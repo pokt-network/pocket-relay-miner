@@ -1,0 +1,32 @@
+# Functions unreachable from the production `main` packages.
+#
+# WHY THIS FILE EXISTS. `golangci-lint` runs with defaults and its `unused` check
+# does NOT report EXPORTED identifiers -- it assumes another package may call
+# them. So an exported function whose only caller is deleted stays green forever.
+# Measured: `RecordClaimLeafStats` was written 2026-04-20, its only caller went
+# away with claim_pipeline.go on 2026-06-24, and for four months the linter, CI
+# and the repo's own metric check all passed while docs/CLAIM_LEAF_MODEL.md told
+# operators to watch a counter that could not move.
+#
+# A TEST IS NOT A CALLER. `deadcode` runs with the production mains as roots and
+# test files excluded, on purpose.
+#
+# HOW TO USE IT. Every line is one function that is knowingly unreachable, with
+# the reason. If you cannot write the reason, the answer is to delete the
+# function or wire it up. A function in the scan and NOT here fails the gate.
+
+# --- TEST SEAMS -----------------------------------------------------------
+# These exist so a test can OBSERVE or FORCE something production does on its
+# own schedule. That is not the self-deception this gate hunts: the deception is
+# a PRODUCT function alive only because its test calls it, which is what
+# RecordClaimLeafStats was. Each line below has a real test exercising it, named.
+#
+# The honest alternative is to move them behind `//go:build test`. They are kept
+# here instead because the move is a bigger change than the problem, and because
+# a seam that is DECLARED is not a seam that deceives.
+keys/keyring_provider.go NewKeyringProviderWithKeyring          # injects a prepared keyring; production builds its own (keys/keyring_provider_test.go)
+observability/runtime_metrics.go RuntimeMetricsCollector.CollectNow  # forces a collection that production does on a ticker (observability/runtime_metrics_test.go)
+observability/runtime_metrics.go RuntimeMetricsCollector.LastMallocs # reads collector state a test asserts on (observability/runtime_metrics_test.go)
+observability/server.go Server.IsRunning                        # lets a test observe lifecycle without racing on the listener (observability/server_test.go)
+relayer/simulation.go SimulationVerifier.Reload                 # reconfigures the verifier between cases; production wires it once via SetSimulationVerifier and has NO hot-reload path, so changing simulation config needs a restart (relayer/simulation_test.go, 6 uses)
+relayer/websocket.go WebSocketBridge.Close                      # closes a bridge in-test; production closes with closeWithReason and a specific cause, 13 call sites (relayer/websocket_simulation_test.go)

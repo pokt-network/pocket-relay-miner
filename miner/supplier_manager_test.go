@@ -91,7 +91,7 @@ func TestResolveAndPublish_ChainOK(t *testing.T) {
 	}
 	mgr, supplierCache, _ := newCacheTestSupplierManager(t, qc)
 
-	owner, services := mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
+	owner, services, _ := mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
 	require.Equal(t, "pokt1owner", owner)
 	require.Equal(t, []string{"svc-a", "svc-b"}, services)
 
@@ -115,7 +115,7 @@ func TestResolveAndPublish_ChainNotFound(t *testing.T) {
 	qc := &fakeSupplierQueryClient{err: status.Error(codes.NotFound, "not staked")}
 	mgr, supplierCache, _ := newCacheTestSupplierManager(t, qc)
 
-	owner, services := mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
+	owner, services, _ := mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
 	require.Empty(t, owner)
 	require.Empty(t, services)
 
@@ -149,7 +149,7 @@ func TestResolveAndPublish_ChainTransientError_DoesNotOverwrite(t *testing.T) {
 	}
 	require.NoError(t, supplierCache.SetSupplierState(context.Background(), preexisting))
 
-	owner, services := mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
+	owner, services, _ := mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
 	require.Empty(t, owner, "transient error must return empty locals")
 	require.Empty(t, services)
 
@@ -173,7 +173,7 @@ func TestResolveAndPublish_ChainTransientError_NoOverwrite_WhenEmpty(t *testing.
 	qc := &fakeSupplierQueryClient{err: errors.New("network timeout")}
 	mgr, supplierCache, _ := newCacheTestSupplierManager(t, qc)
 
-	_, _ = mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
+	_, _, _ = mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
 
 	state, err := supplierCache.GetSupplierState(context.Background(), addr)
 	require.NoError(t, err)
@@ -192,7 +192,7 @@ func TestResolveAndPublish_Prewarmed(t *testing.T) {
 		Services:     []string{"svc-x", "svc-y"},
 	}
 
-	owner, services := mgr.resolveAndPublishSupplierState(context.Background(), addr, prewarmed)
+	owner, services, _ := mgr.resolveAndPublishSupplierState(context.Background(), addr, prewarmed)
 	require.Equal(t, "pokt1owner_pre", owner)
 	require.Equal(t, []string{"svc-x", "svc-y"}, services)
 

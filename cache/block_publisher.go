@@ -13,12 +13,33 @@ const (
 	blockPublisherComponentName = "block_publisher"
 )
 
+// BlockEventPublisher is the one thing BlockPublisher needs from its Redis
+// endpoint: somewhere to put a block event. It is an interface rather than
+// *RedisBlockSubscriber because a constructor that DEMANDS a subscriber makes
+// every caller build one — which is how the leader ended up running a
+// pub/sub receive loop nobody consumed, double-counting
+// ha_cache_block_events_received_total on the leader and making
+// "published == received" unassertable.
+//
+// Narrowing removes the requirement, NOT the possibility: *RedisBlockSubscriber
+// carries this exact method, so it still satisfies this interface and handing
+// one over still compiles. Measured 2026-08-27 with a temporary
+// `var _ BlockEventPublisher = (*RedisBlockSubscriber)(nil)`, which go vet
+// accepted. What actually guards the wiring is leader_controller.go holding a
+// *RedisBlockPublisher field, plus the live gate asserting published ==
+// received per process (scripts/gates/live.sh, "block events published ==
+// received").
+type BlockEventPublisher interface {
+	// PublishBlockHeight publishes a new block height to all subscribers.
+	PublishBlockHeight(ctx context.Context, event BlockEvent) error
+}
+
 // BlockPublisher watches the blockchain for new blocks and publishes events.
 // This should run on a single instance (leader) to avoid duplicate events.
 type BlockPublisher struct {
 	logger          logging.Logger
 	blockSubscriber *localclient.BlockSubscriber
-	redisSubscriber *RedisBlockSubscriber
+	publisher       BlockEventPublisher
 
 	mu       sync.Mutex
 	closed   bool
@@ -30,12 +51,12 @@ type BlockPublisher struct {
 func NewBlockPublisher(
 	logger logging.Logger,
 	blockSubscriber *localclient.BlockSubscriber,
-	redisSubscriber *RedisBlockSubscriber,
+	publisher BlockEventPublisher,
 ) *BlockPublisher {
 	return &BlockPublisher{
 		logger:          logger.With().Str("component", blockPublisherComponentName).Logger(),
 		blockSubscriber: blockSubscriber,
-		redisSubscriber: redisSubscriber,
+		publisher:       publisher,
 	}
 }
 
@@ -84,7 +105,7 @@ func (w *BlockPublisher) watchLoop(ctx context.Context) {
 				Timestamp: blk.Time(),
 			}
 
-			if err := w.redisSubscriber.PublishBlockHeight(ctx, event); err != nil {
+			if err := w.publisher.PublishBlockHeight(ctx, event); err != nil {
 				w.logger.Error().
 					Err(err).
 					Int64("height", event.Height).

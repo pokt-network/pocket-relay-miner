@@ -139,7 +139,7 @@ func TestDedupMetrics_NoSessionIDLabel(t *testing.T) {
 	for _, m := range []string{
 		"ha_miner_dedup_misses_total",
 		"ha_miner_dedup_marked_total",
-		"ha_miner_dedup_redis_cache_hits_total",
+		"ha_miner_dedup_cache_hits_total",
 	} {
 		fam := extractMetric(body, m)
 		require.NotContainsf(t, fam, "session_id=", "%s must not carry session_id label:\n%s", m, fam)

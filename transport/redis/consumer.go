@@ -691,6 +691,77 @@ func (c *StreamsConsumer) parseMessage(message redis.XMessage, streamName string
 	}, nil
 }
 
+// ReleaseMessage hands a delivered entry back so ANOTHER consumer can take it,
+// without acknowledging it. It is the opposite of AckMessage: the entry stays in
+// the stream.
+//
+// Why this exists: AckMessage is XAckDel with DELREF, which deletes the entry.
+// A consumer that is going away has no business deleting work it did not do --
+// doing so removes the entry from the pending list the reclaim reads, so nothing
+// can rescue it.
+//
+// Two paths, both MEASURED against real servers on 2026-09-01:
+//
+//   - XNACK SILENT, from Redis 8.8.0. Marks the entry unowned and sets its
+//     delivery time to 0, so it is claimable immediately regardless of any
+//     min-idle. SILENT is the mode Redis documents for a consumer that is
+//     shutting down: the delivery "did not count".
+//   - Older servers (the deployed cluster is 8.4.6) have no XNACK, so the entry
+//     is claimed BY ITSELF with a high IDLE, which makes it look idle enough for
+//     the next XAUTOCLAIM to take it right away. This goes through a raw Do
+//     because XClaimArgs does not expose IDLE in any go-redis version.
+//
+// A NOPERM is NOT treated as "unsupported": an ACL that forbids XNACK is a
+// deliberate operator decision, and degrading past it silently would hide it.
+// releaseIdleMillis is what the pre-8.8 fallback writes as the entry's idle
+// time: large enough that any reclaim's min-idle is already satisfied.
+const releaseIdleMillis = 24 * 60 * 60 * 1000
+
+func (c *StreamsConsumer) ReleaseMessage(ctx context.Context, msg transport.StreamMessage) error {
+	// Same guard AckMessage keeps: a closed consumer must not claim to have
+	// handed anything over. The caller counts a failure here as abandoned, which
+	// leaves the entry pending -- the safe outcome.
+	c.mu.RLock()
+	if c.closed {
+		c.mu.RUnlock()
+		return fmt.Errorf("consumer is closed")
+	}
+	c.mu.RUnlock()
+
+	if msg.StreamName == "" {
+		return fmt.Errorf("message missing stream name")
+	}
+
+	err := c.client.XNack(ctx, &redis.XNackArgs{
+		Stream: msg.StreamName,
+		Group:  c.config.ConsumerGroup,
+		Mode:   redis.XNackModeSilent,
+		IDs:    []string{msg.ID},
+	}).Err()
+	if err == nil {
+		return nil
+	}
+
+	errText := err.Error()
+	if strings.Contains(errText, "NOPERM") {
+		return fmt.Errorf("XNACK is forbidden by ACL for this user, which is configuration rather than server version: %w", err)
+	}
+	if !strings.Contains(errText, "unknown command") {
+		return fmt.Errorf("failed to release message %s: %w", msg.ID, err)
+	}
+
+	// Pre-8.8 fallback. The IDLE is the whole trick: without it the entry stays
+	// young and a reclaim with a positive min-idle skips it.
+	claim := []any{
+		"XCLAIM", msg.StreamName, c.config.ConsumerGroup, c.config.ConsumerName, 0,
+		msg.ID, "IDLE", releaseIdleMillis, "JUSTID",
+	}
+	if claimErr := c.client.Do(ctx, claim...).Err(); claimErr != nil {
+		return fmt.Errorf("failed to release message %s via XCLAIM fallback: %w", msg.ID, claimErr)
+	}
+	return nil
+}
+
 // AckMessage acknowledges a StreamMessage using its embedded stream name.
 // This is the preferred method for acknowledging messages in multi-stream consumption.
 func (c *StreamsConsumer) AckMessage(ctx context.Context, msg transport.StreamMessage) error {

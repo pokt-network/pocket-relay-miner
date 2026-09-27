@@ -154,11 +154,17 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 
 	// Dedicated client for forwarding to gRPC backends. h2c (HTTP/2 cleartext,
 	// prior knowledge) with HTTP/1.1 disabled is exactly how a native gRPC
-	// client opens a non-TLS connection. No client-level Timeout: the per-request
-	// context deadline (service timeout) governs, matching the HTTP path.
+	// client opens a non-TLS connection. HTTP/2 over TLS is enabled too, for the
+	// https:// and grpcs:// backends: measured on Go 1.26, a TLS request with
+	// only UnencryptedHTTP2 set does NOT fail -- it silently negotiates HTTP/1.1
+	// and returns 200, which cannot carry gRPC. A silent downgrade to a protocol
+	// that cannot serve the request is harder to diagnose than a dial error.
+	// No client-level Timeout: the per-request context deadline (service
+	// timeout) governs, matching the HTTP path.
 	grpcTransport := &http.Transport{}
 	grpcTransport.Protocols = new(http.Protocols)
 	grpcTransport.Protocols.SetUnencryptedHTTP2(true)
+	grpcTransport.Protocols.SetHTTP2(true)
 	grpcTransport.Protocols.SetHTTP1(false)
 	grpcHTTPClient := &http.Client{
 		Transport: grpcTransport,
@@ -299,12 +305,24 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 		// Meter relay (check stake before serving)
 		allowed, meterErr := s.relayPipeline.MeterRelay(ctx, relayCtx)
-		if meterErr != nil {
-			// Fail-open: log but allow relay (issue #23 tracks honouring
-			// fail_behavior here; only the log level changed in this pass)
+		if meterErr != nil && allowed {
+			// The meter could not answer, but not because OUR store was
+			// unreadable -- a chain query it depends on blinked. The relay is
+			// served and passed on: the miner re-derives what it needs when it
+			// claims, and it retries. See RelayMeter.handleMeterError.
+			relayMeterUnbilled.WithLabelValues(serviceID).Inc()
 			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(meterErr).
-				Msg("relay metering error (fail-open: allowing relay)")
+				Msg("relay served unmetered; the miner arbitrates")
+		} else if meterErr != nil {
+			// The meter's own store is unreadable, so what this session has
+			// already consumed is unknown. This is admission: it is refused,
+			// and the message says nothing about which store or why.
+			grpcRelayErrors.WithLabelValues(serviceID, "meter_unavailable").Inc()
+			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
+				Err(meterErr).
+				Msg("relay rejected - unable to verify session budget")
+			return status.Error(codes.Unavailable, "unable to process relay request")
 		} else if !allowed {
 			// Stake limit exceeded - reject relay
 			grpcRelayErrors.WithLabelValues(serviceID, "meter_rejected").Inc()
@@ -644,15 +662,20 @@ func (s *RelayGRPCService) forwardToBackend(
 	}
 
 	// Get headers and auth from backend config (always needed regardless of pool usage)
+	//
+	// pool.NormalizeGRPCScheme is applied on these fallbacks too: they read the
+	// configured URL directly instead of going through pool.NewBackendEndpoint,
+	// so without it a grpc:// backend reached by this path would still fail as
+	// an undialable scheme. Reachable when no pool is wired (getPool == nil).
 	if backend, ok := svcConfig.Backends[rpcType]; ok {
 		if backendURL == "" {
-			backendURL = backend.URL
+			backendURL = pool.NormalizeGRPCScheme(backend.URL)
 		}
 		configHeaders = backend.Headers
 		auth = backend.Authentication
 	} else if backend, ok := svcConfig.Backends["rest"]; ok {
 		if backendURL == "" {
-			backendURL = backend.URL
+			backendURL = pool.NormalizeGRPCScheme(backend.URL)
 		}
 		configHeaders = backend.Headers
 		auth = backend.Authentication
@@ -660,7 +683,7 @@ func (s *RelayGRPCService) forwardToBackend(
 		// Use any available backend
 		for _, backend := range svcConfig.Backends {
 			if backendURL == "" {
-				backendURL = backend.URL
+				backendURL = pool.NormalizeGRPCScheme(backend.URL)
 			}
 			configHeaders = backend.Headers
 			auth = backend.Authentication
@@ -839,11 +862,6 @@ func (s *RelayGRPCService) getCircuitBreakerThreshold(serviceID, rpcType string)
 		}
 	}
 	return pool.DefaultUnhealthyThreshold
-}
-
-// Close releases resources held by the relay gRPC service.
-func (s *RelayGRPCService) Close() error {
-	return nil
 }
 
 // NewGRPCServerForRelayService creates a gRPC server configured for the relay service.

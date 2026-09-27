@@ -19,10 +19,11 @@ import (
 // Safety invariants:
 //  1. State keys ({base}:miner:*, {base}:smst:*, {base}:relays:*,
 //     {base}:suppliers:*, {base}:tx:*) are never touched.
-//  2. Healthy supplier entries are never deleted: the relayer returns 503 on
-//     a supplier cache miss (fail-open covers Redis errors only), so wiping
-//     a healthy entry rejects that supplier's relays until the miner
-//     reconcile rewrites it. Only contaminated entries (staked+active with
+//  2. Healthy supplier entries are never deleted: an absent entry is served
+//     OPTIMISTICALLY for a supplier whose key this relayer holds, so wiping a
+//     healthy entry does not stop its relays -- it serves them against state
+//     nobody verified until the miner reconcile rewrites the entry. Only
+//     contaminated entries (staked+active with
 //     empty services) are deleted — those are already treated as misses by
 //     the read guard, and the deletion re-checks contamination atomically
 //     under WATCH so a concurrently-healed entry is preserved.
@@ -205,8 +206,9 @@ var errSupplierPreserved = errors.New("supplier entry no longer contaminated")
 // classify-then-delete TOCTOU: the miner reconcile rewrites every supplier
 // key on its cadence, and an entry that was contaminated at scan time (e.g.
 // written while BlockClient height was 0 at miner boot) may legitimately be
-// healthy by delete time — deleting it then would 503 that supplier's
-// relays until the next reconcile pass. If the value changes between GET and
+// healthy by delete time — deleting it then would serve that supplier
+// UNVERIFIED until the next reconcile pass, and those relays are not
+// claimable. If the value changes between GET and
 // EXEC, the transaction aborts (TxFailedErr) and the entry is preserved:
 // losing a delete is safe (the next cleanup catches it), deleting a healthy
 // entry is not.

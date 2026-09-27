@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -367,37 +366,6 @@ func (h *StreamingResponseHandler) signBatch(payload []byte, statusCode int) ([]
 		Msg("signed streaming batch")
 
 	return signedBatch, nil
-}
-
-// ScanStreamEvents is a bufio.SplitFunc that splits streaming data by the POKT stream delimiter.
-// This is used by clients to parse the signed relay response batches from the stream.
-//
-// Usage:
-//
-//	scanner := bufio.NewScanner(responseBody)
-//	scanner.Split(ScanStreamEvents)
-//	for scanner.Scan() {
-//	    signedBatch := scanner.Bytes()
-//	    // Unmarshal as RelayResponse...
-//	}
-func ScanStreamEvents(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-
-	// Look for the POKT_STREAM delimiter
-	if i := strings.Index(string(data), streamDelimiter); i >= 0 {
-		// Return chunk without the delimiter
-		return i + len(streamDelimiter), data[0:i], nil
-	}
-
-	// If we're at EOF, return whatever we have
-	if atEOF {
-		return len(data), data, nil
-	}
-
-	// Request more data
-	return 0, nil, nil
 }
 
 // handleStreamingResponseWithSigning is a helper method on ProxyServer that uses

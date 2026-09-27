@@ -7,7 +7,11 @@ import (
 
 const (
 	metricsNamespace = "ha"
-	metricsSubsystem = "transport_redis"
+	// The subsystem is the CONCEPT, not the implementation: these metric names
+	// (published_total, consumed_total, reconnection_attempts_total, ...) describe
+	// a relay stream, and a different store behind the same stream would emit the
+	// same series rather than a parallel set nobody graphs.
+	metricsSubsystem = "transport"
 )
 
 var (
@@ -18,7 +22,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "published_total",
-			Help:      "Total number of mined relays published to Redis Streams",
+			Help:      "Total number of mined relays published to the relay stream",
 		},
 		[]string{"supplier_addr", "service_id"},
 	)
@@ -40,7 +44,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "consumed_total",
-			Help:      "Total number of mined relays consumed from Redis Streams",
+			Help:      "Total number of mined relays consumed from the relay stream",
 		},
 		[]string{"supplier_addr", "service_id"},
 	)
@@ -105,7 +109,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "reconnection_attempts_total",
-			Help:      "Total Redis reconnection attempts by component",
+			Help:      "Total store reconnection attempts by component",
 		},
 		[]string{"component"},
 	)
@@ -115,7 +119,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "reconnection_success_total",
-			Help:      "Successful Redis reconnections by component",
+			Help:      "Successful store reconnections by component",
 		},
 		[]string{"component"},
 	)
@@ -127,7 +131,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "reclaim_errors_total",
-			Help:      "Reclaim scan operations that failed, by Redis operation. A failure aborts the whole drain for that tick, not just one page",
+			Help:      "Reclaim scan operations that failed, by store operation. A failure aborts the whole drain for that tick, not just one page",
 		},
 		[]string{"supplier_addr", "op"},
 	)

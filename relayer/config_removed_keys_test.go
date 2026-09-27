@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 )
@@ -159,5 +160,43 @@ func TestValidate_RemovedGracePeriodExtraBlocks(t *testing.T) {
 		require.Contains(t, err.Error(), "grace_period_extra_blocks is no longer supported")
 		require.Contains(t, strings.ToLower(err.Error()), "rejected as expired",
 			"the operator must be told what changes for them, not just that a key went away")
+	})
+}
+
+// TestRemovedFailBehaviorWarnsInsteadOfFailing pins a deliberate difference from
+// the other tombstones in this file: relay_meter.fail_behavior does NOT fail the
+// boot. The owner chose a warning so a fleet mid-rollout is not held back by a
+// line that no longer does anything.
+//
+// What must not happen is silence. The YAML decoder drops unknown keys without
+// a word, so deleting the field outright would let a config that still says
+// "open" boot as closed, with the file and the process disagreeing and nothing
+// anywhere saying so.
+func TestRemovedFailBehaviorWarnsInsteadOfFailing(t *testing.T) {
+	t.Run("open is accepted and warned about", func(t *testing.T) {
+		cfg := minimalValidConfig()
+		cfg.RelayMeter.RemovedFailBehavior = "open"
+
+		require.NoError(t, cfg.Validate(),
+			"a retired key must not hold back a rollout: the process runs correctly without it")
+
+		warnings := cfg.Warnings()
+		require.Len(t, warnings, 1, "the operator has to be told the line does nothing")
+		require.Contains(t, warnings[0], "fail_behavior")
+		require.Contains(t, warnings[0], "ignored",
+			"the warning must say the key is not being honoured, not merely that it is old")
+	})
+
+	t.Run("absent produces no warning", func(t *testing.T) {
+		cfg := minimalValidConfig()
+		require.Empty(t, cfg.Warnings(),
+			"a clean config must be silent, or the warning becomes noise nobody reads")
+	})
+
+	t.Run("the key still parses off disk", func(t *testing.T) {
+		var cfg Config
+		require.NoError(t, yaml.Unmarshal([]byte("relay_meter:\n  fail_behavior: \"open\"\n"), &cfg))
+		require.Equal(t, "open", cfg.RelayMeter.RemovedFailBehavior,
+			"the field exists precisely so the decoder does not drop the key in silence")
 	})
 }

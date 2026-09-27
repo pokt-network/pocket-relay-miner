@@ -32,6 +32,14 @@ var (
 	RelayLocalnet       bool
 	RelayAllSuppliers   bool
 
+	// gRPC-mode targeting. Without these, `relay grpc` can only reach the
+	// localnet demo backend, so the one transport this CLI could not validate
+	// against a real backend was gRPC -- recorded during the beta/pnf bring-up,
+	// where confirming the transport meant reading the relayer's Prometheus
+	// counters instead of a signed relay.
+	RelayGRPCMethod     string // --grpc-method: /package.Service/Method to invoke
+	RelayGRPCRequestHex string // --grpc-request-hex: protobuf request body, hex; empty = a request with no fields
+
 	// Simulated-relay flags: fire a real, ring-signed relay verified by the
 	// relayer's SimulationVerifier against a config-pinned ring instead of an
 	// on-chain session (served but never charged). See simulate.go.

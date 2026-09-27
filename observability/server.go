@@ -36,21 +36,6 @@ type ServerConfig struct {
 	Registry prometheus.Gatherer
 }
 
-// DefaultServerConfig returns sensible defaults, and they are defaults that
-// START. Metrics are OFF here because this constructor cannot supply the
-// Registry they now require: leaving them on returned a config whose only
-// possible outcome was `observability server requires a Registry` at Start,
-// which is a trap rather than a default. Both binaries build the struct
-// literal with their combined registry and never call this.
-func DefaultServerConfig() ServerConfig {
-	return ServerConfig{
-		MetricsEnabled: false,
-		MetricsAddr:    ":9090",
-		PprofEnabled:   false,
-		PprofAddr:      ":6060",
-	}
-}
-
 // ReadinessCheck is a function that returns nil if the service is ready,
 // or an error describing why it is not ready.
 type ReadinessCheck func(ctx context.Context) error

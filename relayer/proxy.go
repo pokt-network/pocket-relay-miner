@@ -99,7 +99,6 @@ const (
 
 	// Drop reasons (for relaysDropped metric)
 	dropReasonValidationFailed = "validation_failed"
-	dropReasonMeterError       = "meter_error"
 	dropReasonStakeExhausted   = "stake_exhausted"
 	dropReasonNoSupplier       = "no_supplier"
 	dropReasonMarshalFailed    = "marshal_failed"
@@ -708,11 +707,11 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 // the operator should declare the endpoint on-chain so PATH routes it on purpose
 // and the network has an accurate view of what each supplier serves.
 //
-// FAIL-OPEN and mixed-fleet safe: skipped when state is nil (boot/optimistic) or
-// when the supplier's per-transport view is empty (old miner that does not yet
-// publish StakedEndpoints) — see SupplierState.TransportDeclared. The metric
-// counts every occurrence; the log line is deduped to once per tuple so the hot
-// path never spams.
+// Skipped only when state is nil (boot/optimistic). An empty per-transport view
+// no longer buys silence — see SupplierState.TransportDeclared — so an old miner
+// that does not publish StakedEndpoints makes every relay of that supplier count
+// here. The metric counts every occurrence; the log line is deduped to once per
+// tuple so the hot path never spams.
 func (p *ProxyServer) warnUndeclaredTransport(state *cache.SupplierState, supplier, serviceID, backendType string) {
 	if state == nil || state.TransportDeclared(serviceID, backendType) {
 		return
@@ -728,8 +727,10 @@ func (p *ProxyServer) warnUndeclaredTransport(state *cache.SupplierState, suppli
 		Str("supplier", supplier).
 		Str("service", serviceID).
 		Str("transport", backendType).
-		Msg("serving a relay for a (service, transport) not declared in the supplier's on-chain stake; " +
-			"still served and claimable, but declare this endpoint on-chain so PATH routes it deliberately")
+		Msg("serving a relay for a (service, transport) this supplier's cached stake does not declare; " +
+			"still served and claimable. Either the endpoint is genuinely undeclared on-chain -- declare it " +
+			"so PATH routes it deliberately -- or the miner writing this supplier's state is too old to " +
+			"publish the per-transport view, in which case upgrade it rather than restaking")
 }
 
 // handleRelay handles incoming relay requests.
@@ -1002,6 +1003,10 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// For eager validation, validate before forwarding
 	if validationMode == ValidationModeEager {
+		// Set when the meter could not answer for a reason that still allows
+		// serving (a chain query blinked). Recorded only after the relay
+		// survives validation, so the counter matches its own help text.
+		servedUnmetered := false
 		// EAGER MODE: Check meter BEFORE backend call (synchronous, blocks the hot path)
 		if p.relayMeter != nil && relayRequest.Meta.SessionHeader != nil {
 			sessionHeader := relayRequest.Meta.SessionHeader
@@ -1036,6 +1041,13 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonMeterError).Inc()
 					return
 				}
+				// Counted only once the relay is actually SERVED -- see the
+				// increment after validation below. Counting it here would
+				// report a relay that the signature check or the fast-fail
+				// gate is about to reject as "served and submitted for
+				// mining", which is the opposite of what an operator reading
+				// this series during an outage needs.
+				servedUnmetered = true
 			} else if !allowed {
 				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 					Msg("relay rejected: session relay limit reached (eager mode)")
@@ -1065,6 +1077,10 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			validationFailures.WithLabelValues(serviceID, "signature").Inc()
 			return
 		}
+		if servedUnmetered {
+			relayMeterUnbilled.WithLabelValues(serviceID).Inc()
+		}
+
 		eagerDuration := time.Since(eagerStart)
 
 		// Record eager validation latency asynchronously
@@ -1380,15 +1396,22 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				p.metricRecorder.RecordDuration(relayMeterLatency, []string{capturedServiceID, "optimistic"}, meterDuration)
 
 				if meterErr != nil {
-					relaysDropped.WithLabelValues(capturedServiceID, dropReasonMeterError).Inc()
+					// The relay is ALREADY SERVED here -- optimistic meters
+					// after the response goes out -- so refusing now cannot
+					// protect anything. It would only throw away work whose
+					// backend call was already paid for, and the miner is the
+					// arbiter: it re-derives what it needs when it claims, and
+					// it retries. So this is reported and submitted anyway.
+					//
+					// This is the whole reason fail-closed is a rule about
+					// ADMISSION and not about accounting. Until 2026-08-31 a
+					// store blip here dropped every relay it touched, after
+					// serving every one of them.
+					relayMeterUnbilled.WithLabelValues(capturedServiceID).Inc()
 					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 						Err(meterErr).
 						Str("validation_mode", "optimistic").
-						Msg("relay meter error (optimistic mode) - relay dropped")
-					// Meter error in optimistic mode - discard, don't submit to miner
-					if !allowed {
-						return
-					}
+						Msg("relay served and submitted without being metered; the miner arbitrates")
 				} else if !allowed {
 					relaysDropped.WithLabelValues(capturedServiceID, dropReasonStakeExhausted).Inc()
 					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).

@@ -93,6 +93,15 @@ install-hooks: ## Point git at the versioned hooks in scripts/hooks/
 	@echo "Installing git hooks..."
 	@chmod +x scripts/hooks/*
 	@git config core.hooksPath scripts/hooks
+	@# The pre-hooksPath layout symlinked .git/hooks/pre-commit at a script this
+	@# repo no longer has. core.hooksPath makes git ignore .git/hooks entirely, so
+	@# the stale link is harmless HERE -- but a checkout that never re-runs this
+	@# target keeps it, and git skips an unexecutable hook in SILENCE: every commit
+	@# then passes with zero checks and no message. Remove it while we are here.
+	@if [ -L .git/hooks/pre-commit ] && [ ! -e .git/hooks/pre-commit ]; then \
+		rm -f .git/hooks/pre-commit; \
+		echo "removed a dangling .git/hooks/pre-commit left by the old layout"; \
+	fi
 	@echo "core.hooksPath -> scripts/hooks"
 	@echo "  pre-commit: gofmt, build, vet, tracked files, lint, gate self-tests, unreachable functions."
 	@echo "  pre-push:   level 2 -- suite, race detector, coverage. Minutes, not seconds."

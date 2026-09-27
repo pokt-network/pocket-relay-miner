@@ -117,7 +117,13 @@ func (p *RelayPipeline) MeterRelay(
 			Str("service_id", relayCtx.ServiceID).
 			Str("session_id", relayCtx.SessionID).
 			Msg("relay metering failed")
-		return false, fmt.Errorf("metering failed: %w", err)
+		// allowed is PROPAGATED, not flattened to false. The meter answers
+		// (false, err) when its own store is unreadable -- admission refuses --
+		// and (true, err) when a chain query it depends on blinked, which is
+		// served and left for the miner to arbitrate. Returning false here
+		// collapsed the two, so every WebSocket and gRPC caller treated a chain
+		// blip as a refusal: connections closed, subscriptions dropped.
+		return allowed, fmt.Errorf("metering failed: %w", err)
 	}
 
 	if !allowed {

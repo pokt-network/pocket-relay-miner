@@ -27,19 +27,6 @@ const (
 	HealthStatusUnhealthy
 )
 
-func (s HealthStatus) String() string {
-	switch s {
-	case HealthStatusUnknown:
-		return "unknown"
-	case HealthStatusHealthy:
-		return "healthy"
-	case HealthStatusUnhealthy:
-		return "unhealthy"
-	default:
-		return "invalid"
-	}
-}
-
 // BackendHealth tracks the health of a single backend endpoint.
 // When a pool.BackendEndpoint is associated, health state is delegated to it
 // (single source of truth shared with the circuit breaker). Supplementary fields
@@ -112,39 +99,6 @@ func (h *BackendHealth) SetStatus(status HealthStatus) {
 		return
 	}
 	h.status.Store(int32(status))
-}
-
-// GetLastCheck returns when the last health check was performed.
-func (h *BackendHealth) GetLastCheck() time.Time {
-	return time.Unix(0, h.lastCheck.Load())
-}
-
-// GetLastError returns the last error message (empty if healthy).
-func (h *BackendHealth) GetLastError() string {
-	if err := h.lastError.Load(); err != nil {
-		return err.(string)
-	}
-	return ""
-}
-
-// IsHealthy returns true if the backend is healthy.
-// Delegates to pool BackendEndpoint when available (single source of truth).
-func (h *BackendHealth) IsHealthy() bool {
-	if h.endpoint != nil {
-		return h.endpoint.CurrentlyHealthy()
-	}
-	status := h.GetStatus()
-	// Unknown is treated as healthy to avoid blocking on startup
-	return status == HealthStatusHealthy || status == HealthStatusUnknown
-}
-
-// ConsecutiveFailureCount returns the current consecutive failure count.
-// Delegates to pool BackendEndpoint when available.
-func (h *BackendHealth) ConsecutiveFailureCount() int32 {
-	if h.endpoint != nil {
-		return h.endpoint.ConsecutiveFailures()
-	}
-	return h.consecutiveFailures.Load()
 }
 
 // HealthChecker manages health checks for all backends.
@@ -223,54 +177,6 @@ func (hc *HealthChecker) RegisterPool(poolKey string, endpoints []*pool.BackendE
 		Int("endpoint_count", len(endpoints)).
 		Bool("health_check_enabled", config != nil && config.Enabled).
 		Msg("registered pool for health checking")
-}
-
-// GetHealth returns the health status for the first endpoint in a pool.
-// For per-endpoint health, use GetAllHealth.
-func (hc *HealthChecker) GetHealth(poolKey string) *BackendHealth {
-	hc.backendsMu.RLock()
-	defer hc.backendsMu.RUnlock()
-	backends := hc.backends[poolKey]
-	if len(backends) == 0 {
-		return nil
-	}
-	return backends[0]
-}
-
-// IsHealthy returns true if any backend in the pool is healthy.
-func (hc *HealthChecker) IsHealthy(poolKey string) bool {
-	hc.backendsMu.RLock()
-	defer hc.backendsMu.RUnlock()
-	backends := hc.backends[poolKey]
-	if len(backends) == 0 {
-		// Unknown pool - assume healthy
-		return true
-	}
-	for _, b := range backends {
-		if b.IsHealthy() {
-			return true
-		}
-	}
-	return false
-}
-
-// GetAllHealth returns health status for all backends across all pools.
-func (hc *HealthChecker) GetAllHealth() map[string]*BackendHealth {
-	hc.backendsMu.RLock()
-	defer hc.backendsMu.RUnlock()
-
-	result := make(map[string]*BackendHealth)
-	for poolKey, backends := range hc.backends {
-		if len(backends) == 1 {
-			result[poolKey] = backends[0]
-		} else {
-			for i, b := range backends {
-				key := fmt.Sprintf("%s#%d", poolKey, i)
-				result[key] = b
-			}
-		}
-	}
-	return result
 }
 
 // Start begins health checking for all registered backends.
@@ -604,20 +510,6 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 	}
 
 	healthCheckSuccesses.WithLabelValues(backend.ServiceID, endpointLabel).Inc()
-}
-
-// CheckNow performs an immediate health check for all endpoints in a pool.
-func (hc *HealthChecker) CheckNow(ctx context.Context, poolKey string) error {
-	hc.configsMu.RLock()
-	config, ok := hc.configs[poolKey]
-	hc.configsMu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("no health check config for pool %s", poolKey)
-	}
-
-	hc.checkPool(ctx, poolKey, config)
-	return nil
 }
 
 // Close gracefully shuts down the health checker.

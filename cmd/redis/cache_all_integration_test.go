@@ -38,7 +38,7 @@ func (q *countingAppQueryClient) InvalidateApplication(_ string) {}
 // (invalidateAllTypes in cache_all.go) is safe to run while live relayer-side
 // caches are being read concurrently. It wires the REAL cache.SupplierCache and
 // cache.ApplicationCache exactly as cmd_relayer.go does (shared Redis client,
-// FailOpen supplier cache, ha:supplier prefix) against miniredis, hammers them
+// supplier cache, ha:supplier prefix) against miniredis, hammers them
 // from 8 reader goroutines, fires the cleanup once mid-flight, and asserts the
 // observable safety contract holds under the race detector:
 //
@@ -66,10 +66,8 @@ func TestCleanupAll_LiveReadersUnaffected(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.Config{Level: "error", Format: "text", Async: false})
 	ctx := context.Background()
 
-	// --- REAL supplier cache: same wiring as cmd_relayer.go (FailOpen, ha:supplier). ---
-	supplierCache := cache.NewSupplierCache(logger, client.Client, cache.SupplierCacheConfig{
-		FailOpen: true,
-	})
+	// --- REAL supplier cache: same wiring as cmd_relayer.go (ha:supplier). ---
+	supplierCache := cache.NewSupplierCache(logger, client.Client, cache.SupplierCacheConfig{})
 	require.NoError(t, supplierCache.Start(ctx))
 	t.Cleanup(func() { _ = supplierCache.Close() })
 

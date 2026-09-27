@@ -142,6 +142,13 @@ Examples:
 			}
 			fmt.Printf("config OK: %s would start\n", configPath)
 
+			// Keys the config still carries that no longer do anything. Printed
+			// here as well as at startup because this command exists precisely
+			// so an operator finds out before the rollout, not during it.
+			for _, w := range config.Warnings() {
+				fmt.Printf("warning: %s\n", w)
+			}
+
 			// A disabled simulation block is skipped by Validate, by design.
 			// Report what enabling it would do anyway: otherwise the operator
 			// finds out on the deploy that flips the switch, when the relayer
@@ -403,6 +410,13 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
 
+	// Retired keys the file still carries. Warn rather than fail: the process
+	// runs correctly, but the file says something that is no longer true, and a
+	// config nobody re-reads is how that survives a year.
+	for _, w := range config.Warnings() {
+		logger.Warn().Msg(w)
+	}
+
 	// Start observability server (metrics and pprof)
 	if config.Metrics.Enabled || config.Pprof.Enabled {
 		// Default pprof addr to localhost:6060 for security if not specified
@@ -468,9 +482,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	supplierCache := cache.NewSupplierCache(
 		logger,
 		redisClient,
-		cache.SupplierCacheConfig{
-			FailOpen: true, // Prioritize serving traffic over strict validation
-		},
+		cache.SupplierCacheConfig{},
 	)
 	// Start supplier cache for pub/sub subscription
 	if err := supplierCache.Start(ctx); err != nil {
@@ -951,15 +963,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Create and wire relay meter for rate limiting based on app stakes
 	if config.RelayMeter.Enabled {
-		// Convert fail behavior string to type
-		failBehavior := relayer.FailOpen // Default
-		if config.RelayMeter.FailBehavior == "closed" {
-			failBehavior = relayer.FailClosed
-		}
-
 		relayMeterConfig := relayer.RelayMeterConfig{
-			FailBehavior: failBehavior,
-			CacheTTL:     config.RelayMeter.CacheTTL,
+			CacheTTL: config.RelayMeter.CacheTTL,
 		}
 
 		// Create service factor client for reading service factors from Redis
@@ -1005,7 +1010,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 		proxy.SetRelayMeter(relayMeter)
 		logger.Info().
-			Str("fail_behavior", string(failBehavior)).
 			Msg("relay meter initialized and wired")
 	} else {
 		logger.Info().Msg("relay meter disabled in config")

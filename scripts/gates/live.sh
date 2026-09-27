@@ -244,12 +244,28 @@ fi
 #   cometbft                sequential single relays; one request bills one relay.
 run_transport_load() {
     local mode="$1" service="$2" out rc
+    local -a extra_args=()
+    # One gRPC cell drives a NON-default method, so --grpc-method is exercised
+    # against the real relayer instead of only in unit tests. It rides an
+    # existing cell rather than firing extra probe relays: the settlement
+    # assertion compares billed against what this ledger recorded as served, so
+    # any relay sent outside the load phase would surface as "foreign traffic"
+    # and fail the money assertion for the wrong reason.
+    #
+    # HealthCheck is one of the four methods tilt/backend-server/pb/demo.proto
+    # serves, and it takes a request with no fields, so the default empty
+    # --grpc-request-hex is correct. If --grpc-method regresses, this cell goes
+    # red on verification or on served==billed -- which is the whole point:
+    # before this, the custom-method path had no gate at any level.
+    if [ "$mode" = "grpc" ] && [ "$service" = "${GRPC_CUSTOM_METHOD_SERVICE:-develop-grpc-optimistic}" ]; then
+        extra_args=(--grpc-method "${GRPC_CUSTOM_METHOD:-/demo.DemoService/HealthCheck}")
+    fi
     case "$mode" in
     jsonrpc | websocket | grpc)
         out="$("$BIN" relay "$mode" --localnet --service "$service" \
             --relayer-url "$relayer_url" \
             --load-test -n "$RELAYS_PER_TRANSPORT" --concurrency "$CONCURRENCY" \
-            --all-suppliers 2>&1)"
+            --all-suppliers "${extra_args[@]}" 2>&1)"
         rc=$?
         ;;
     stream | cometbft)
@@ -259,9 +275,10 @@ run_transport_load() {
         # supplier1 when --supplier is absent -- successive requests do NOT
         # spread on their own (the old comment claiming they did was false).
         # All of this cell's relays go to ONE supplier, rotated per cell:
-        # concentration keeps the per-supplier-session count at 3 (issue #25
-        # reproduces at 1 relay/supplier-session), while rotating across cells
-        # stops every cell from stacking on supplier1's session budget.
+        # concentration keeps the per-supplier-session count at 3 -- a
+        # 1-relay supplier-session is the regime where a claim can vanish
+        # between the WAL and the claim -- while rotating across cells stops
+        # every cell from stacking on supplier1's session budget.
         out=""
         rc=0
         TRANSPORT_SENT=0
@@ -375,22 +392,23 @@ if [ -z "$matrix_overridden" ]; then
     [ "$gate_failed" -ne 0 ] && gate_verdict "live"
 fi
 
-# Issue #25: single-relay-per-supplier claims can vanish between the WAL and
-# the claim (a supplier's entire 1-relay session goes unclaimed, with no drop
-# counter and no failure state). Reproduced at 1 relay/supplier regardless of
-# session timing; never observed at >=4 relays/supplier (300/300 billed). Until
-# it is fixed, warn when the load is thin enough to trip it -- the exact
-# served==billed assertion is then testing #25, not the change under test.
+# A single-relay-per-supplier claim can vanish between the WAL and the claim:
+# the supplier's entire 1-relay session goes unclaimed, with no drop counter and
+# no failure state. Reproduced at 1 relay/supplier regardless of session timing;
+# never observed at >=4 relays/supplier (300/300 billed). So when the load is
+# thin enough to reach that regime, say so -- an exact served==billed assertion
+# would then be measuring the thin-load behaviour rather than the change under
+# test.
 if [ "$RELAYS_PER_TRANSPORT" -lt $(( supplier_count * 2 )) ]; then
-    gate_skip "RELAYS_PER_TRANSPORT=${RELAYS_PER_TRANSPORT} gives <2 relays per supplier (${supplier_count} suppliers): exact billing may trip issue #25"
+    gate_skip "RELAYS_PER_TRANSPORT=${RELAYS_PER_TRANSPORT} gives <2 relays per supplier (${supplier_count} suppliers): too thin to assert exact billing, a 1-relay supplier-session can go unclaimed"
 fi
 # stream/cometbft cells ignore RELAYS_PER_TRANSPORT: each sends 3 sequential
 # relays pinned to ONE (per-cell rotated) supplier, so a session boundary can
-# split them 2+1 and leave a 1-relay supplier-session -- the issue #25 regime
-# the warning above cannot see for these transports.
+# split them 2+1 and leave a 1-relay supplier-session -- the unclaimed-session
+# regime the warning above cannot see for these transports.
 case " $MATRIX " in
 *" stream:"* | *" cometbft:"*)
-    gate_skip "stream/cometbft cells send 3 relays on one supplier: a session-boundary split can trip issue #25 for that cell"
+    gate_skip "stream/cometbft cells send 3 relays on one supplier: a session-boundary split can leave a 1-relay supplier-session, which is not asserted exactly"
     ;;
 esac
 
@@ -439,11 +457,54 @@ announced_drops_now() {
 drops_before="${BIN_DIR}/announced_drops_before.tsv"
 announced_drops_now >"$drops_before" || : >"$drops_before"
 
+# The relayer's mining-difficulty check FAILS OPEN: when the target hash cannot
+# be resolved the relay is mined as applicable anyway, and
+# relayer/relay_processor.go:177 says so in as many words -- "the counter is the
+# only signal that difficulty is unresolvable". Nothing read that counter until
+# this gate did, which meant a run with the difficulty filter completely broken
+# was INDISTINGUISHABLE from a healthy one: every relay applicable, sent ==
+# num_relays, green. The gate was asserting the filter's outcome while never
+# checking the filter ran.
+#
+# Read as a delta over this run, like the drops above, because it is a counter.
+difficulty_failures_now() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode "query=sum by (service_id) (ha_relayer_difficulty_query_failures_total)" 2>/dev/null |
+        jq -r '.data.result[]? | "\(.metric.service_id)\t\(.value[1])"' 2>/dev/null || true
+}
+
+# Relays the filter DECLINED to mine. At base difficulty every relay is
+# applicable, so this is 0 and its value is as a tripwire: a non-zero count here
+# on a base-difficulty localnet means the effective target hash is not base, and
+# then the per-service `sent == num_relays` assertion below is comparing across
+# a filter and would fail for a reason that is not a loss.
+skipped_difficulty_now() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode "query=sum by (service_id) (ha_relayer_relays_skipped_difficulty_total)" 2>/dev/null |
+        jq -r '.data.result[]? | "\(.metric.service_id)\t\(.value[1])"' 2>/dev/null || true
+}
+
+difficulty_failures_before="${BIN_DIR}/difficulty_failures_before.tsv"
+difficulty_failures_now >"$difficulty_failures_before" || : >"$difficulty_failures_before"
+skipped_difficulty_before="${BIN_DIR}/skipped_difficulty_before.tsv"
+skipped_difficulty_now >"$skipped_difficulty_before" || : >"$skipped_difficulty_before"
+
+# TOTAL_DELTA SNAPSHOT_FILE READER -- sums one counter family across services.
+counter_family_delta() {
+    local before_file="$1" reader="$2" total=0 svc before after
+    while IFS=$'\t' read -r svc after; do
+        [ -n "${svc:-}" ] || continue
+        before="$(awk -F'\t' -v s="$svc" '$1 == s {print int($2)}' "$before_file" | tail -1)"
+        total=$(( total + $(gate_counter_delta "${before:-0}" "$(printf '%d' "${after%%.*}" 2>/dev/null || echo 0)") ))
+    done < <("$reader")
+    printf '%s' "$total"
+}
+
 announced_drops() {
     local svc="$1" before after
     before="$(awk -F'\t' -v s="$svc" '$1 == s {print int($2)}' "$drops_before" | tail -1)"
     after="$(announced_drops_now | awk -F'\t' -v s="$svc" '$1 == s {print int($2)}' | tail -1)"
-    printf '%s' "$(( ${after:-0} - ${before:-0} ))"
+    gate_counter_delta "${before:-0}" "${after:-0}"
 }
 
 loaded_services=""
@@ -553,6 +614,57 @@ case " $MATRIX " in
 esac
 
 # ---------------------------------------------------------------------------
+gate_step "assert: the mining-difficulty filter actually ran"
+
+# This runs BEFORE the settlement wait on purpose: if the filter was down, the
+# per-service assertions below are comparing numbers the filter never touched,
+# and there is no reason to spend 25 minutes discovering that.
+#
+# "Zero failures" and "could not measure" MUST NOT produce the same signal.
+# Every query here returns empty when Prometheus is unreachable, and empty sums
+# to 0 -- which would read as a clean run. So liveness is asserted first, with a
+# counter that MUST have series after the load, and the outcome when it does not
+# is gate_nothing_measured, never a pass.
+#
+# relays_published_total is the liveness proxy because it is the one counter
+# that MUST have series after any successful load. The two difficulty counters
+# cannot serve as their own liveness check: they are per-service_id counters
+# that legitimately have NO series when nothing failed and nothing was skipped,
+# so "absent because all is well" and "absent because the metric was renamed"
+# are indistinguishable from the query alone.
+#
+# NOT COVERED, and said plainly rather than papered over: if either counter is
+# RENAMED, both queries go empty, both deltas sum to 0, and this block prints
+# two green lines while checking nothing. Verified 2026-08-30 -- no test in this
+# repository reads this file, so nothing ties the names below to the code that
+# declares them (internal/conventions/metrics_test.go freezes session_id labels
+# and counts references; it does not know this gate exists).
+prom_series_count() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode "query=count(ha_relayer_relays_published_total)" 2>/dev/null |
+        jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || printf '0'
+}
+published_series="$(prom_series_count)"
+
+if [ "${published_series%%.*}" -lt 1 ] 2>/dev/null || [ -z "$published_series" ]; then
+    gate_nothing_measured "difficulty filter: Prometheus returned no relays_published series after a load that served relays -- the filter's counters cannot be read, so this run proves nothing about it"
+else
+    difficulty_failures="$(counter_family_delta "$difficulty_failures_before" difficulty_failures_now)"
+    skipped_difficulty="$(counter_family_delta "$skipped_difficulty_before" skipped_difficulty_now)"
+
+    if [ "${difficulty_failures:-0}" -gt 0 ]; then
+        gate_fail "difficulty filter: ${difficulty_failures} relay(s) could not resolve a target hash and were mined ANYWAY (it fails open, relay_processor.go:179 and :336) -- every assertion below about served==billed passed through a filter that was not working"
+    else
+        gate_pass "difficulty filter: resolved a target hash for every relay (0 query failures)"
+    fi
+
+    if [ "${skipped_difficulty:-0}" -gt 0 ]; then
+        gate_fail "difficulty filter: ${skipped_difficulty} relay(s) were filtered out as non-applicable, so this chain is NOT at base difficulty -- the exact served==billed assertions below do not hold across a filter and this gate does not yet cover that regime"
+    else
+        gate_pass "difficulty filter: base difficulty, 0 relays filtered -- served==billed is the right assertion for this run"
+    fi
+fi
+
 gate_step "settle: waiting for FINAL on-chain outcomes per service (up to ${SETTLE_TIMEOUT_MIN} min)"
 
 # What counts as proof that a relay earned money is the SETTLEMENT, not the

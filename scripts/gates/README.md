@@ -71,9 +71,10 @@ load and its own settlement assertion:
 | stream | develop-stream (eager), develop-stream-optimistic (optimistic¹) | served == billed (one request = one relay; batches do not multiply billing — pinned live) |
 | cometbft | develop-cometbft (eager), develop-cometbft-optimistic (optimistic) | served == billed, exactly |
 
-¹ websocket/grpc hard-wire eager admission regardless of the configured mode
-until issue #24 lands, so those cells exercise the config plumbing, not a
-distinct admission path — a deliberate decision, wired in advance.
+¹ websocket/grpc hard-wire eager admission regardless of the configured mode —
+they do not read it — so those cells exercise the config plumbing, not a
+distinct admission path. A deliberate decision, wired in advance: the day those
+transports honour the mode, the cells start asserting a real difference.
 
 The gate derives nothing from this table: at runtime the default `MATRIX` is
 cross-checked against the services in the rendered `relayer-config` configmap,
