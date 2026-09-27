@@ -27,6 +27,25 @@ var _ transport.MinedRelayConsumer = (*StreamsConsumer)(nil)
 // writes it.
 var blockInterval = 5 * time.Second
 
+// pendingPageSize bounds one XPENDING page during a reclaim scan.
+//
+// It is ONE constant on purpose. The page size and the "this was the last page"
+// test must agree: a COUNT larger than the termination threshold loops forever,
+// and a COUNT smaller than it stops the drain early, stranding pending entries
+// until the next tick -- silent relay loss with the shape of issue #25. They
+// used to be two independent literals.
+const pendingPageSize = 50
+
+// reapIdleMultiplier scales ClaimIdleTimeout into the silence a consumer record
+// must show before it is deleted.
+//
+// The reclaim already rescues a dead pod's deliveries after ONE ClaimIdleTimeout,
+// so by the time this threshold is reached the record is expected to be an empty
+// shell. The multiple buys margin for a consumer that is merely slow rather than
+// dead: deleting one that is about to act would destroy its pending entries, and
+// XGROUP DELCONSUMER offers no conditional form.
+const reapIdleMultiplier = 10
+
 // isStreamNotFoundError reports whether a Redis error indicates the stream (or
 // its consumer group) does not exist yet. Redis surfaces this as a "no such
 // key" error for missing keys and a "NOGROUP" error when the stream/group is
@@ -211,6 +230,7 @@ func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
 			c.claimMu.Unlock()
 			if due {
 				c.claimPendingMessages(ctx)
+				c.reapDeadConsumers(ctx)
 			}
 		}
 	}
@@ -390,18 +410,29 @@ func (c *StreamsConsumer) claimIdleFromOtherConsumers(
 		start = "-"
 	}
 
-	// No Idle filter here on purpose: the age check belongs to XCLAIM below,
-	// which Redis applies authoritatively (entries younger than MinIdle are
-	// simply not handed over). XPENDING is used only to learn WHO owns each
-	// entry, which XAUTOCLAIM never reveals.
+	// Idle prunes the scan SERVER-side; it does not decide who gets the entry.
+	// XCLAIM below still applies MinIdle authoritatively, so correctness does
+	// not depend on this filter -- it only stops the scan from paging through
+	// our own hot in-flight deliveries, which are young by definition and are
+	// the bulk of the PEL under a backlog. XPENDING remains the only command
+	// that reveals WHO owns an entry, which XAUTOCLAIM never does.
+	//
+	// Safe against skipping: the cursor advances past the last entry RETURNED,
+	// so a young entry filtered out here is simply not examined this pass --
+	// and it was not claimable anyway. claimPendingMessages restarts every
+	// drain from "0-0", so nothing is permanently skipped.
 	pending, err := c.client.XPendingExt(ctx, &redis.XPendingExtArgs{
 		Stream: c.streamName,
 		Group:  c.config.ConsumerGroup,
+		Idle:   minIdle,
 		Start:  start,
 		End:    "+",
-		Count:  50, // page size; claimPendingMessages loops until drained
+		Count:  pendingPageSize,
 	}).Result()
 	if err != nil {
+		if !isStreamNotFoundError(err) {
+			reclaimErrorsTotal.WithLabelValues(c.config.SupplierOperatorAddress, "xpending").Inc()
+		}
 		return nil, "0-0", err
 	}
 	if len(pending) == 0 {
@@ -422,7 +453,7 @@ func (c *StreamsConsumer) claimIdleFromOtherConsumers(
 	// "<ms>-<seq>" is "<ms>-<seq+1>"; computing it avoids the exclusive-range
 	// syntax "(", which not every Redis implementation accepts.
 	next = nextStreamID(pending[len(pending)-1].ID)
-	if len(pending) < 50 {
+	if len(pending) < pendingPageSize {
 		next = "0-0" // last page
 	}
 
@@ -438,9 +469,100 @@ func (c *StreamsConsumer) claimIdleFromOtherConsumers(
 		Messages: ids,
 	}).Result()
 	if err != nil {
+		if !isStreamNotFoundError(err) {
+			reclaimErrorsTotal.WithLabelValues(c.config.SupplierOperatorAddress, "xclaim").Inc()
+		}
 		return nil, "0-0", err
 	}
 	return msgs, next, nil
+}
+
+// reapDeadConsumers deletes consumer records that hold nothing and have gone
+// silent, so a group's consumer registry does not grow by one entry per supplier
+// per pod recreation forever.
+//
+// Why this is needed at all: the consumer name embeds the hostname and pid, so a
+// recreated pod always registers a NEW name and Redis keeps the old record until
+// something removes it. Until 2026-08-20 nothing did; the registry stayed small
+// only because the stream key carried a TTL and expiring the key took the group
+// with it. That TTL destroyed un-consumed relays along the way and has been
+// removed, which is what makes an explicit reaper mandatory rather than tidy.
+//
+// The guard is deliberately narrow, because XGROUP DELCONSUMER DISCARDS the
+// pending entries of the consumer it deletes -- running it on a consumer that
+// still owns deliveries is exactly the relay loss this whole change exists to
+// stop. Three conditions, all required:
+//
+//  1. not ourselves;
+//  2. Pending == 0, so there is nothing to discard;
+//  3. idle beyond reapIdleMultiplier * ClaimIdleTimeout, so a merely slow
+//     consumer is not mistaken for a dead one.
+//
+// Between reading condition 2 and issuing the delete there is a window, and
+// Redis has no conditional delete to close it. Rather than assert the window is
+// unreachable, the return value of DELCONSUMER -- the number of pending entries
+// it destroyed -- is recorded. It must always be zero; if it ever is not, the
+// metric names the loss instead of hiding it.
+func (c *StreamsConsumer) reapDeadConsumers(ctx context.Context) {
+	claimIdle := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
+	reapIdle := claimIdle * reapIdleMultiplier
+
+	consumers, err := c.client.XInfoConsumers(ctx, c.streamName, c.config.ConsumerGroup).Result()
+	if err != nil {
+		if isStreamNotFoundError(err) {
+			return
+		}
+		if ctx.Err() == nil {
+			reclaimErrorsTotal.WithLabelValues(c.config.SupplierOperatorAddress, "xinfoconsumers").Inc()
+			c.logger.Debug().Err(err).Msg("error listing stream consumers")
+		}
+		return
+	}
+
+	for _, consumer := range consumers {
+		if consumer.Name == c.config.ConsumerName {
+			continue
+		}
+		if consumer.Pending != 0 {
+			continue
+		}
+		if consumer.Idle < reapIdle {
+			continue
+		}
+
+		destroyed, delErr := c.client.XGroupDelConsumer(
+			ctx, c.streamName, c.config.ConsumerGroup, consumer.Name,
+		).Result()
+		if delErr != nil {
+			if ctx.Err() == nil {
+				reclaimErrorsTotal.WithLabelValues(c.config.SupplierOperatorAddress, "xgroupdelconsumer").Inc()
+				c.logger.Debug().Err(delErr).
+					Str("dead_consumer", consumer.Name).
+					Msg("error reaping dead consumer")
+			}
+			continue
+		}
+
+		reapedConsumersTotal.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
+
+		if destroyed > 0 {
+			// The window described above actually opened. These are acknowledged
+			// relays that no longer exist anywhere: Error level, not Debug, because
+			// it fires once per occurrence and it is money.
+			reapDestroyedPendingTotal.WithLabelValues(c.config.SupplierOperatorAddress).
+				Add(float64(destroyed))
+			c.logger.Error().
+				Str("dead_consumer", consumer.Name).
+				Int64("destroyed_pending", destroyed).
+				Msg("reaped a consumer that gained pending entries after being observed empty; those relays are lost")
+			continue
+		}
+
+		c.logger.Info().
+			Str("dead_consumer", consumer.Name).
+			Dur("idle", consumer.Idle).
+			Msg("reaped dead stream consumer")
+	}
 }
 
 // nextStreamID returns the smallest stream ID greater than id, so a scan can

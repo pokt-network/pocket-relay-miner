@@ -650,7 +650,7 @@ type RelayMeterYAMLConfig struct {
 
 	// CacheTTL is the TTL for all cached Redis data (streams, params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
-	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
+	// Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 
 	// RemovedRedisKeyPrefix is the tombstone for the retired redis_key_prefix
@@ -711,7 +711,7 @@ func DefaultConfig() Config {
 		RelayMeter: RelayMeterYAMLConfig{
 			Enabled:      true,
 			FailBehavior: "open",
-			CacheTTL:     2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
+			CacheTTL:     2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 		},
 		HTTPTransport: HTTPTransportConfig{
 			MaxIdleConns:                 500,  // Total idle connections across all hosts (5x for 1000+ RPS)

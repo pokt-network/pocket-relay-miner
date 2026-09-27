@@ -651,17 +651,15 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// The relayer's ApplicationCache.WarmupFromRedis() will populate L1 from L2 on startup.
 	// Discovery of apps/services happens on the miner side when processing relays from Redis streams.
 
-	// Create publisher for mined relays
-	// CacheTTL default: 2h if not configured
-	cacheTTL := config.RelayMeter.CacheTTL
-	if cacheTTL == 0 {
-		cacheTTL = 2 * time.Hour
-	}
+	// Create publisher for mined relays.
+	//
+	// No TTL is passed: relay streams do not expire. relay_meter.cache_ttl still
+	// governs the meter's own per-session keys further down; it used to double as
+	// the stream's lifetime, which deleted un-consumed relays mid-session.
 	publisher := redistransport.NewStreamsPublisher(
 		logger,
 		redisClient.UniversalClient,     // Embedded go-redis client
 		redisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
-		cacheTTL,                        // TTL for relay streams (backup safety net)
 	)
 
 	// Create health checker
@@ -742,6 +740,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			_ = provider.Close()
 		}
 
+		// Publish the key count: this process holds its signing keys directly
+		// from the providers and never builds a MultiProviderKeyManager, which is
+		// what drives this gauge on the miner. Without this the relayer reported
+		// a hard 0 while holding a full key set.
+		keys.SetSupplierKeysActive(len(loadedKeys))
+
 		if len(loadedKeys) == 0 {
 			logger.Warn().Msg("no keys found - response signing will be disabled")
 		} else {
@@ -818,9 +822,14 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			)
 
 			// Create caches for full session validation
+			//
+			// BlockTimeSeconds has no operator-configurable field on this path today
+			// (unlike the miner's block_time_seconds) -- cache.DefaultBlockTimeSeconds
+			// is the single source for that fallback value across the whole process;
+			// see its doc comment for why the value itself is not "corrected" here.
 			cacheConfig := cache.CacheConfig{
 				TTLBlocks:        1,
-				BlockTimeSeconds: 30, // CRITICAL: Must match actual block time (30s for this network, not 6s!)
+				BlockTimeSeconds: cache.DefaultBlockTimeSeconds,
 			}
 
 			// Create SharedParamCache for shared parameter caching

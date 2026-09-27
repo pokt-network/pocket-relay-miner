@@ -10,6 +10,7 @@ import (
 	"github.com/alitto/pond/v2"
 	"gopkg.in/yaml.v3"
 
+	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
@@ -56,7 +57,7 @@ type Config struct {
 
 	// CacheTTL is the TTL for Redis cached data (params, app stakes, service data, SMST trees).
 	// This is a backup safety net - manual cleanup is primary, TTL prevents leaks if cleanup fails.
-	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
+	// Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 
 	// SMSTLiveRootCheckpointInterval is how often (in UpdateTree calls) the
@@ -653,7 +654,7 @@ func (c *Config) GetBlockTimeSeconds() int64 {
 	if c.BlockTimeSeconds > 0 {
 		return c.BlockTimeSeconds
 	}
-	return 30 // Default: 30s
+	return cache.DefaultBlockTimeSeconds
 }
 
 // GetBlockHealthSlownessThreshold returns the slowness threshold for block health monitoring.
@@ -669,7 +670,7 @@ func (c *Config) GetCacheTTL() time.Duration {
 	if c.CacheTTL > 0 {
 		return c.CacheTTL
 	}
-	return 2 * time.Hour // Default: 2h (covers ~15 session lifecycles at 30s blocks)
+	return 2 * time.Hour // Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 }
 
 // GetSubmissionTrackingTTL returns the TTL for submission tracking records.
@@ -918,7 +919,7 @@ func DefaultConfig() *Config {
 		HotReloadEnabled:       true,
 		// SessionTTL: 0 means use CacheTTL (default 2h) - ensures SMST trees and sessions expire together
 		// This prevents orphaned sessions causing "SMST missing but relay count > 0" warnings
-		CacheTTL:              2 * time.Hour,  // Covers ~15 session lifecycles at 30s blocks
+		CacheTTL:              2 * time.Hour,  // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 		SubmissionTrackingTTL: 24 * time.Hour, // 24h for debugging (was 7 days)
 		BalanceMonitor: BalanceMonitorConfigYAML{
 			Enabled:                     true,    // Enable by default

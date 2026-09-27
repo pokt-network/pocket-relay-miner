@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
@@ -552,4 +553,234 @@ func TestSupplierCache_L1RefreshesAfterTTL(t *testing.T) {
 	require.NotNil(t, state)
 	require.Equal(t, []string{"svcA", "svcB"}, state.Services,
 		"after supplierCacheL1TTL elapses, L1 must refresh and follow the L2 supplier state")
+}
+
+// TestSupplierCacheTTLFromParams pins the formula (HIGH-1, review
+// 2026-08-20): TTL = 2 x num_blocks_per_session x block_time_seconds,
+// grounded in live chain params rather than an arbitrary constant, with
+// every missing-input path falling back to defaultSupplierCacheTTL instead
+// of ever landing on a zero/no-TTL write.
+//
+// SupplierUnbondingPeriodSessions is deliberately NOT a formula input and
+// deliberately NOT in these cases — an earlier version used it and produced a
+// ~40-day TTL against mainnet's real value (1429 sessions, verified live via
+// sauron-api.infra.pocket.network 2026-08-20), because that param is the
+// stake-unlock window, not the service-deactivation one. See the doc comment
+// on SupplierCacheTTLFromParams for the full correction.
+func TestSupplierCacheTTLFromParams(t *testing.T) {
+	cases := []struct {
+		name             string
+		params           *sharedtypes.Params
+		blockTimeSeconds int64
+		want             time.Duration
+	}{
+		{
+			name: "mainnet params: 20 blocks/session, 60s blocks (verified live 2026-08-20)",
+			params: &sharedtypes.Params{
+				NumBlocksPerSession: 20,
+				// A real mainnet value, included to document that it must NOT
+				// affect the result — see the "unbonding period is ignored" case.
+				SupplierUnbondingPeriodSessions: 1429,
+			},
+			blockTimeSeconds: 60,
+			// 2 * 20 * 60s = 2400s = 40m
+			want: 40 * time.Minute,
+		},
+		{
+			name: "unbonding period is ignored: 1429 sessions changes nothing",
+			params: &sharedtypes.Params{
+				NumBlocksPerSession:             20,
+				SupplierUnbondingPeriodSessions: 1429,
+			},
+			blockTimeSeconds: 60,
+			want:             40 * time.Minute,
+		},
+		{
+			name: "longer session length scales linearly",
+			params: &sharedtypes.Params{
+				NumBlocksPerSession: 60,
+			},
+			blockTimeSeconds: 60,
+			// 2 * 60 * 60s = 7200s = 2h
+			want: 2 * time.Hour,
+		},
+		{
+			name:             "nil params falls back to the safety net",
+			params:           nil,
+			blockTimeSeconds: 60,
+			want:             defaultSupplierCacheTTL,
+		},
+		{
+			name: "zero block time falls back to the safety net",
+			params: &sharedtypes.Params{
+				NumBlocksPerSession: 20,
+			},
+			blockTimeSeconds: 0,
+			want:             defaultSupplierCacheTTL,
+		},
+		{
+			name: "zero blocks per session falls back to the safety net",
+			params: &sharedtypes.Params{
+				NumBlocksPerSession: 0,
+			},
+			blockTimeSeconds: 60,
+			want:             defaultSupplierCacheTTL,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SupplierCacheTTLFromParams(tc.params, tc.blockTimeSeconds)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestSupplierCacheTTLFromParams_MarginAboveReconcileInterval pins the
+// invariant r1's review flagged (point 3, 2026-08-20): the TTL must stay
+// comfortably above the interval that refreshes it, or a stalled reconcile
+// loop (leader change, a stuck query) expires a LIVE supplier's entry and
+// flips relayer/proxy.go's decideSupplierServe into optimistic-serve for a
+// supplier the miner has simply lost track of, not decommissioned — the
+// original bug's shape, inverted. Written here (not just in a comment) so
+// shrinking the multiplier or the session length someday fails loudly instead
+// of silently narrowing this margin.
+//
+// miner.DefaultSupplierReconcileInterval (60s) is duplicated as a literal
+// because importing package miner from cache would cycle (miner already
+// imports cache); the two are pinned to the SAME value by
+// TestDefaultSupplierReconcileIntervalMatchesTTLMarginAssumption in
+// miner/supplier_worker_test.go.
+func TestSupplierCacheTTLFromParams_MarginAboveReconcileInterval(t *testing.T) {
+	const reconcileInterval = 60 * time.Second
+	const mainnetBlockTimeSeconds = 60
+
+	ttl := SupplierCacheTTLFromParams(&sharedtypes.Params{NumBlocksPerSession: 20}, mainnetBlockTimeSeconds)
+
+	require.Greater(t, ttl, 10*reconcileInterval,
+		"the TTL must survive many missed reconcile ticks, not just one, or a single stalled "+
+			"pass on a live supplier reads as decommissioned")
+}
+
+// TestSetSupplierState_WritesABoundedTTL is the test-teeth for HIGH-1: it
+// asserts the CONSEQUENCE (the key actually expires in Redis) rather than the
+// mechanism, so it cannot be satisfied by a TTL value that is merely
+// "present" but too long to matter, or by a mock that never touches real
+// expiry. Before the fix, SetSupplierState wrote with TTL=0 (no expiry) and
+// this test fails: the key survives with TTL == -1 (no expiry) forever.
+func TestSetSupplierState_WritesABoundedTTL(t *testing.T) {
+	ctx := context.Background()
+	client := newTestRedis(t)
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+
+	const configuredTTL = 3 * time.Second
+	cache := NewSupplierCache(logger, client, SupplierCacheConfig{
+		FailOpen: false,
+		TTL:      configuredTTL,
+	})
+
+	const addr = "pokt1ttlbound"
+	require.NoError(t, cache.SetSupplierState(ctx, &SupplierState{
+		OperatorAddress: addr,
+		Status:          SupplierStatusActive,
+		Staked:          true,
+		Services:        []string{"svcA"},
+	}))
+
+	key := client.KB().SupplierStateKey(addr)
+	ttl, err := client.TTL(ctx, key).Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, time.Duration(0),
+		"SetSupplierState must write a positive TTL, never TTL=0 (no expiry) — "+
+			"a supplier whose signing key leaves the keyring must eventually age out, not freeze forever")
+	require.LessOrEqual(t, ttl, configuredTTL,
+		"the key's remaining TTL must not exceed what was configured")
+
+	// The actual expiry, not just the metadata. Rule #1 (CLAUDE.md) forbids
+	// time.Sleep for synchronization, so the remaining TTL is driven to 0
+	// directly (PExpire) rather than waited out — the key vanishing on a
+	// TTL of 0 is the same Redis guarantee a real elapsed TTL relies on, with
+	// no timing window to be flaky on.
+	ok, err := client.PExpire(ctx, key, 0).Result()
+	require.NoError(t, err)
+	require.True(t, ok, "the key must still exist for its TTL to be driven to 0")
+
+	exists, err := client.Exists(ctx, key).Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(0), exists, "the entry must actually expire once its TTL elapses")
+}
+
+// TestNewSupplierCache_DefaultsTTLWhenUnconfigured pins the fallback path: a
+// caller that does not (or cannot, chain unreachable at startup) supply a TTL
+// must still get a bounded one, never SetSupplierState's old TTL=0.
+func TestNewSupplierCache_DefaultsTTLWhenUnconfigured(t *testing.T) {
+	ctx := context.Background()
+	client := newTestRedis(t)
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+
+	cache := NewSupplierCache(logger, client, SupplierCacheConfig{FailOpen: false})
+	require.Equal(t, defaultSupplierCacheTTL, time.Duration(cache.ttl.Load()))
+
+	const addr = "pokt1ttldefault"
+	require.NoError(t, cache.SetSupplierState(ctx, &SupplierState{
+		OperatorAddress: addr,
+		Status:          SupplierStatusActive,
+		Staked:          true,
+		Services:        []string{"svcA"},
+	}))
+
+	ttl, err := client.TTL(ctx, client.KB().SupplierStateKey(addr)).Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, time.Duration(0))
+	require.LessOrEqual(t, ttl, defaultSupplierCacheTTL)
+}
+
+// TestWarmupFromRedis_DiscoversEveryKeyItScans is the L2 half of a check that
+// was only ever done by hand against a live stack (2026-08-21): every supplier
+// key present in Redis must come back from the discovery scan and land in L1.
+//
+// It exists because the failure is INVISIBLE to the live gate. Discovery
+// extracts the operator address from each scanned key; if that extraction breaks
+// -- a drifted trim prefix, a namespace change -- the scan returns keys and the
+// loop discards every one of them. L1 stays empty, every relay falls through to
+// L2, and the relays still get served and billed. The live gate measures relays
+// billed, so it passes green while the cache layer it depends on does nothing.
+//
+// Asserting on L1 CONTENT rather than on the log line is the point: the count in
+// "discovered_suppliers" can be right while the addresses are garbage.
+func TestWarmupFromRedis_DiscoversEveryKeyItScans(t *testing.T) {
+	cache, client := newTestSupplierCache(t)
+	ctx := context.Background()
+
+	// A staked entry, an unstaked one, and an address whose text could tempt a
+	// naive prefix trim (it repeats the prefix's last segment).
+	addrs := []string{
+		"pokt1warmup_discover_a",
+		"pokt1warmup_discover_b",
+		"pokt1supplier_looking_addr",
+	}
+	for i, addr := range addrs {
+		state := &SupplierState{
+			OperatorAddress: addr,
+			Status:          SupplierStatusActive,
+			Staked:          true,
+			Services:        []string{"svc1"},
+		}
+		if i == 1 {
+			state.Status = SupplierStatusNotStaked
+			state.Staked = false
+			state.Services = nil
+		}
+		writeSupplierToRedis(t, client, state)
+	}
+
+	require.NoError(t, cache.WarmupFromRedis(ctx, nil))
+
+	for _, addr := range addrs {
+		_, ok := cache.localCache.Load(addr)
+		require.Truef(t, ok,
+			"warmup scanned this key but %q never reached L1: the address extraction "+
+				"dropped it, which leaves L1 empty and sends every relay to L2 -- "+
+				"degraded silently, and invisible to the live gate", addr)
+	}
 }

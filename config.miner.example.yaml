@@ -185,7 +185,14 @@ keys:
 # Block Time Configuration (Feature 1)
 # ==============================================================================
 block_time_seconds: 10  # Expected block time (localnet uses faster blocks)
-# [PRODUCTION] block_time_seconds: 30  # Mainnet/testnet use 30s blocks
+# This is a per-DEPLOYMENT value, not a fixed constant -- mainnet, beta/testnet,
+# and localnet all run different real block times, and mainnet's own varies
+# with network conditions (latency, round timing) rather than holding still at
+# any one number. The 30s previously suggested here for [PRODUCTION] was stale:
+# a live mainnet sample on 2026-08-21 measured ~64s/block (100 blocks,
+# height 887111->887211, sauron-api.infra.pocket.network). Measure your own
+# target network before deploying rather than trusting either number blindly.
+# [PRODUCTION MAINNET] block_time_seconds: 60  # round figure -- re-measure periodically, it drifts
 
 # Block health monitoring
 block_health_monitor:
@@ -300,7 +307,7 @@ supplier_claiming:
 deduplication_ttl_blocks: 10  # Keep relay hashes for 10 blocks to prevent duplicates
 batch_size: 1000  # Relay batch size for XREADGROUP (increased from 100 for better throughput)
 hot_reload_enabled: true  # Enable hot-reload of keys on startup
-cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h covers ~15 session lifecycles at 30s blocks. Backup safety net if manual cleanup fails.
+cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget). Backup safety net if manual cleanup fails.
 
 # SMST live_root checkpoint interval (in UpdateTree calls).
 # Bounds the relay loss window on mid-session leader kills: up to (interval - 1)

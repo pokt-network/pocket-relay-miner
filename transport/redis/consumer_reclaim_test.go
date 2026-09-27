@@ -18,7 +18,7 @@ import (
 
 // TestConsume_ReclaimsDeadConsumerPending pins the recovery path for issue
 // #25: a relay delivered to a consumer whose pod died before acking sat in
-// that consumer's PEL forever, because the only XAUTOCLAIM call was gated
+// that consumer's PEL forever, because the only reclaim call was gated
 // behind XReadGroup returning redis.Nil -- which BLOCK 0 makes impossible on
 // a real server. The reclaim now runs on its own ticker, so a stranded entry
 // must reach the live consumer's channel within a few ClaimIdleTimeout

@@ -81,7 +81,7 @@ type RelayMeterConfig struct {
 func DefaultRelayMeterConfig() RelayMeterConfig {
 	return RelayMeterConfig{
 		FailBehavior: FailOpen,      // Default to availability
-		CacheTTL:     2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
+		CacheTTL:     2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 	}
 }
 

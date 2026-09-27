@@ -252,17 +252,52 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// orchestrator-refreshed param caches that need to exist live on the leader
 	// controller. Worker-local copies were dead duplicates.
 
-	// Create supplier cache (for publishing supplier state)
+	// Create supplier cache (for publishing supplier state). Constructed with
+	// SupplierCacheConfig{} — no TTL set — so it starts on cache.
+	// defaultSupplierCacheTTL immediately: HIGH-1's write path (SetSupplierState)
+	// always writes a bounded TTL from the moment this cache exists, never TTL=0.
 	w.supplierCache = cache.NewSupplierCache(
 		w.logger,
 		w.config.RedisClient,
-		cache.SupplierCacheConfig{
-			FailOpen: false,
-		},
+		cache.SupplierCacheConfig{FailOpen: false},
 	)
 	if err = w.supplierCache.Start(ctx); err != nil {
 		w.cleanup()
 		return fmt.Errorf("failed to start supplier cache: %w", err)
+	}
+
+	// Refine that default to the chain's own session length
+	// (cache.SupplierCacheTTLFromParams, num_blocks_per_session x
+	// block_time_seconds — NOT the unbonding period; see that function's doc
+	// comment for why) once shared params are available, via SetTTL.
+	//
+	// Dispatched off the master pool, same as the advisory above and for the
+	// same reason: this used to be a synchronous GetParams() call here,
+	// duplicating the advisory's own chain round trip and reintroducing the
+	// exact "an unreachable node must not lengthen every miner start" problem
+	// the advisory was written to avoid (review 2026-08-21). Nothing blocks
+	// on this result — the cache already has a safe default the moment it
+	// was constructed above — so there is no correctness reason for it to be
+	// synchronous either.
+	//
+	// qcForTTL is captured HERE, before dispatch — same as sharedForAdvisory
+	// above — not read as w.queryClients inside the closure. cleanup() sets
+	// w.queryClients = nil before calling masterPool.Stop(), and pond's
+	// Stop() does not wait for queued tasks to finish (StopAndWait() does;
+	// this call site does not use it, see leader_controller.go:517 for the
+	// blocking sibling). A task still queued when Start() fails a later step
+	// and Close() runs would read w.queryClients.Shared() on a nil receiver
+	// and panic — silently, since the pool's default panicRecovery swallows
+	// it (review 2026-08-21, verified against pond/v2 v2.6.0's Stop()/Task
+	// semantics). Reading the captured qcForTTL instead of the field closes
+	// that window the same way the advisory block already does.
+	qcForTTL := w.queryClients
+	supplierCache := w.supplierCache
+	if ttlErr := w.masterPool.Go(func() {
+		w.refineSupplierCacheTTL(qcForTTL, supplierCache)
+	}); ttlErr != nil {
+		w.logger.Warn().Err(ttlErr).
+			Msg("supplier cache TTL refinement skipped: worker pool would not accept the task")
 	}
 
 	// Get chain ID - required for transaction signing
@@ -489,7 +524,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Early duplicate check on reclaims only, as an optimization: a reclaimed
 	// message is likely to have been processed already, and detecting it here
 	// skips the SMST work. This check is NOT the correctness gate — that is
-	// the MarkProcessed result below, which covers the case XAUTOCLAIM cannot:
+	// the MarkProcessed result below, which covers the case the reclaim cannot:
 	// the ORIGINAL copy still buffered in a slow-but-alive consumer, processed
 	// with IsReclaim=false after another consumer processed the reclaim.
 	// Create the session if it does not exist yet, BEFORE any path that can
@@ -590,12 +625,14 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Mark relay hash as processed in the deduplicator. This runs on every
 	// relay (not only reclaims) because if the current consumer crashes
 	// after the SMST update but before the stream ACK, the next consumer
-	// will reclaim the message via XAUTOCLAIM and needs the dedup set to
-	// recognize it as already processed. The SADD result is the correctness
-	// gate for OnRelayProcessed below: XAUTOCLAIM honors only min-idle, not
-	// consumer liveness, so the duplicate can be the ORIGINAL copy arriving
-	// with IsReclaim=false after another consumer already processed the
-	// reclaimed one — this is the only place that catches that ordering.
+	// will reclaim the message and needs the dedup set to recognize it as
+	// already processed. The SADD result is the correctness gate for
+	// OnRelayProcessed below: the reclaim skips entries this consumer owns
+	// and takes only those idle past the timeout, but idleness cannot
+	// distinguish a dead consumer from a slow-but-alive one — so the
+	// duplicate can be the ORIGINAL copy arriving with IsReclaim=false after
+	// another consumer already processed the reclaimed one, and this is the
+	// only place that catches that ordering.
 	// Ordering matters: MarkProcessed runs BEFORE OnRelayProcessed
 	// (IncrementRelayCount) below so that a crash between them leaves the
 	// counter under-counted rather than over-counted — under-count is the
@@ -641,7 +678,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// the claim; SessionCoordinator (snapshot.TotalComputeUnits) is
 	// derived state used for economic-viability decisions and operator
 	// observability. Returning an error here would leave the stream
-	// message un-ACK'd and XAUTOCLAIM would reclaim it on idle timeout;
+	// message un-ACK'd and the reclaim would take it on idle timeout;
 	// the dedup gate above rejects the duplicate increment on that
 	// redelivery (unless the dedup set entry already expired — treat the
 	// call as best-effort). Log at WARN for operator visibility, then ACK.
@@ -666,6 +703,28 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	}
 
 	return nil
+}
+
+// refineSupplierCacheTTL fetches shared params via qc and, on success, sets
+// supplierCache's TTL from them.
+//
+// qc and supplierCache are explicit parameters, not w.queryClients /
+// w.supplierCache, BY DESIGN: this runs on the master pool, dispatched from
+// Start() before it returns, and cleanup() can nil w.queryClients out from
+// under a still-queued task (see the capture comment at the Start() call
+// site). Reading only the parameters makes that race impossible to
+// reintroduce here without changing this signature.
+func (w *SupplierWorker) refineSupplierCacheTTL(qc *query.Clients, supplierCache *cache.SupplierCache) {
+	ttlCtx, cancelTTL := context.WithTimeout(w.ctx, sharedParamsAdvisoryTimeout)
+	defer cancelTTL()
+
+	sharedParamsForTTL, sharedErr := qc.Shared().GetParams(ttlCtx)
+	if sharedErr != nil {
+		w.logger.Warn().Err(sharedErr).
+			Msg("could not read shared params for supplier cache TTL; keeping the default")
+		return
+	}
+	supplierCache.SetTTL(cache.SupplierCacheTTLFromParams(sharedParamsForTTL, w.config.Config.GetBlockTimeSeconds()))
 }
 
 // Close shuts down the supplier worker.
@@ -740,6 +799,24 @@ func (w *SupplierWorker) cleanup() {
 }
 
 // GetSupplierManager returns the supplier manager for external access.
+// GetSupplierCache returns the worker's supplier cache so leader-only code can
+// SHARE it instead of constructing a second one.
+//
+// The worker's cache is the right one to share because the worker runs on every
+// replica for the process's whole life, while LeaderController's resources are
+// built on election and torn down on demotion. Two instances in one process
+// meant two L1 maps and two subscriptions to the same invalidation channel, so
+// the leader processed every invalidation twice -- measured 2026-08-21: the
+// leader miner counted +204 supplier invalidations over an idle window where a
+// relayer counted +102, exactly 2x.
+//
+// Returns nil before Start() has built it; callers must handle that.
+func (w *SupplierWorker) GetSupplierCache() *cache.SupplierCache {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.supplierCache
+}
+
 func (w *SupplierWorker) GetSupplierManager() *SupplierManager {
 	return w.supplierManager
 }

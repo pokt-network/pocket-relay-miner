@@ -2,6 +2,7 @@ package redis
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 )
@@ -55,6 +56,19 @@ func (kb *KeyBuilder) StreamPrefix() string {
 	return fmt.Sprintf("%s:%s", kb.ns.BasePrefix, kb.ns.StreamsPrefix)
 }
 
+// StreamPattern returns the SCAN glob that matches every supplier relay stream
+// in this namespace.
+//
+// It exists so nobody hand-builds `StreamPrefix() + ":*"`. The key-literal
+// convention check cannot see a pattern assembled that way -- it matches literal
+// prefixes, not concatenations -- so a hand-built pattern passes CI silently and
+// then matches nothing on a deployment with a custom base prefix.
+// Format: {base}:{streams}:*
+// Example: "ha:relays:*"
+func (kb *KeyBuilder) StreamPattern() string {
+	return fmt.Sprintf("%s:%s:*", kb.ns.BasePrefix, kb.ns.StreamsPrefix)
+}
+
 // ConsumerGroup returns the consumer group name for Redis Streams.
 // Format: {base}-{consumer_group_prefix}
 // Example: "ha-miners"
@@ -99,6 +113,23 @@ func (kb *KeyBuilder) SupplierRegistryKey(operatorAddress string) string {
 // Example: "ha:relays:pokt1abc"
 func (kb *KeyBuilder) StreamKey(supplierOperatorAddress string) string {
 	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.StreamsPrefix, supplierOperatorAddress)
+}
+
+// StreamAddress extracts the supplier operator address a StreamKey was built
+// for, given a key that matched StreamPattern(). Returns ("", false) if key
+// is not one of this namespace's stream keys.
+//
+// It exists so nobody hand-builds StreamPrefix()+":" to strip a scanned key
+// back to its address — the same class of drift StreamPattern() was added
+// to stop for the SCAN side (review 2026-08-20, LOW; recurred on the trim
+// side in the very commit meant to demonstrate the lesson, review
+// 2026-08-21).
+func (kb *KeyBuilder) StreamAddress(key string) (string, bool) {
+	addr := strings.TrimPrefix(key, kb.StreamPrefix()+":")
+	if addr == key || addr == "" {
+		return "", false
+	}
+	return addr, true
 }
 
 // SuppliersRegistryIndexKey returns the index key for suppliers registry.
@@ -469,6 +500,21 @@ func (kb *KeyBuilder) SupplierStateKey(operatorAddress string) string {
 // Example: "ha:supplier:*"
 func (kb *KeyBuilder) SupplierStatePattern() string {
 	return fmt.Sprintf("%s:%s:*", kb.ns.BasePrefix, kb.ns.SupplierPrefix)
+}
+
+// SupplierStateAddress extracts the operator address a SupplierStateKey was
+// built for, given a key that matched SupplierStatePattern(). Returns
+// ("", false) if key is not one of this namespace's supplier state keys.
+//
+// It exists for the same reason StreamAddress does: nobody hand-builds
+// SupplierKeyPrefix()+":" to strip a scanned key back to its address (review
+// 2026-08-20, LOW; recurred review 2026-08-21).
+func (kb *KeyBuilder) SupplierStateAddress(key string) (string, bool) {
+	addr := strings.TrimPrefix(key, kb.SupplierKeyPrefix()+":")
+	if addr == key || addr == "" {
+		return "", false
+	}
+	return addr, true
 }
 
 // SMSTSessionNodesPattern builds the SCAN pattern matching a session's SMST

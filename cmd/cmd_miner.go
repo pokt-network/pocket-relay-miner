@@ -333,6 +333,12 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		QueryNodeGRPCUrl: config.PocketNode.QueryNodeGRPCUrl,
 		GRPCInsecure:     config.PocketNode.GRPCInsecure,
 		ChainID:          config.GetChainID(), // Get from config (defaults to "pocket" if not set)
+
+		// Share the worker's supplier cache instead of letting the leader build
+		// a second one in this same process. Safe to read here: the worker's
+		// Start() above already constructed it, and the worker outlives every
+		// leadership change, so the controller borrows and never closes it.
+		SharedSupplierCache: supplierWorker.GetSupplierCache(),
 	})
 
 	// Register leader election callbacks. They run in goroutines, so failures

@@ -47,6 +47,52 @@ var (
 		[]string{"supplier", "service_id"},
 	)
 
+	// orphanedStreams is the number of relay streams whose supplier this
+	// deployment has no record of, as counted by the leader.
+	//
+	// It is a Gauge because it is a level, not an event: the same orphan is
+	// counted again on every sweep. Zero labels on purpose -- the supplier
+	// address is the obvious thing to want here and is exactly what must not be
+	// a label, since it is unbounded; the addresses go to the log line the sweep
+	// emits, and to `redis streams --orphaned`.
+	orphanedStreams = observability.MinerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "orphaned_streams",
+			Help:      "Relay streams whose supplier is no longer known to this deployment (leader-reported; bookkeeping, not lost relays)",
+		},
+	)
+
+	// shutdownDrainedRelays counts relays pulled out of the delivery buffer during a
+	// GRACEFUL shutdown and processed to completion, and those abandoned because the
+	// drain window closed first.
+	//
+	// Abandoned is not the same as lost: an abandoned entry is still in the consumer
+	// group's pending list, so the reclaim on a surviving or restarted miner picks it
+	// up once it passes claim_idle_timeout. What IS lost is only what a SIGKILL or a
+	// crash leaves behind, because no drain runs at all there -- which is the whole
+	// reason the graceful path bothers to drain.
+	shutdownDrainedRelays = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "shutdown_drained_relays_total",
+			Help:      "Relays drained from the delivery buffer and processed during graceful shutdown",
+		},
+		[]string{"supplier"},
+	)
+
+	shutdownAbandonedRelays = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "shutdown_abandoned_relays_total",
+			Help:      "Relays still buffered when the graceful drain window closed; they stay pending and are recovered by the reclaim, not lost",
+		},
+		[]string{"supplier"},
+	)
+
 	// claimNumLeaves is the number of distinct SMST leaves in the claim
 	// being submitted (equals EventClaimCreated.num_relays on-chain).
 	// Paired with claimRelayAttempts below, the delta exposes collapses
@@ -327,8 +373,9 @@ var (
 	)
 
 	// Deduplication metrics. The deduplicator only runs on the reclaim path
-	// (XAUTOCLAIM redelivery), so hit volume is expected to be near-zero in
-	// normal operation and non-zero only after consumer crashes.
+	// (redelivery of an entry stranded in a dead consumer's pending list), so
+	// hit volume is expected to be near-zero in normal operation and non-zero
+	// only after consumer crashes.
 	// session_id deliberately excluded from all dedup counters: it is an
 	// unbounded value on Counters (never DeleteLabelValues'd) and
 	// dedupMisses/dedupMarked fire on every new relay (hot path) → TSDB OOM.
@@ -998,6 +1045,27 @@ var (
 // RecordRelayConsumedFromStream records a relay consumed from Redis Stream.
 func RecordRelayConsumedFromStream(supplier, serviceID string) {
 	relaysConsumedFromStream.WithLabelValues(supplier, serviceID).Inc()
+}
+
+// RecordOrphanedStreams publishes the number of relay streams with no known
+// supplier. Called only by the leader, so the gauge has a single writer.
+func RecordOrphanedStreams(n int) {
+	orphanedStreams.Set(float64(n))
+}
+
+// RecordShutdownDrainedRelay records one relay drained and processed during a
+// graceful shutdown.
+func RecordShutdownDrainedRelay(supplier string) {
+	shutdownDrainedRelays.WithLabelValues(supplier).Inc()
+}
+
+// RecordShutdownAbandonedRelays records relays still buffered when the drain
+// window closed. They remain in the pending list for the reclaim to recover.
+func RecordShutdownAbandonedRelays(supplier string, n int) {
+	if n <= 0 {
+		return
+	}
+	shutdownAbandonedRelays.WithLabelValues(supplier).Add(float64(n))
 }
 
 // RecordRelayAddedToSMST records a relay successfully added to SMST tree.

@@ -4,11 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/redis/go-redis/v9"
-
-	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
@@ -24,42 +21,46 @@ type StreamsPublisher struct {
 	client       redis.UniversalClient
 	streamPrefix string
 
-	// cacheTTL is the TTL for relay stream data (backup safety net)
-	cacheTTL time.Duration
-
-	// ttlSet tracks which stream keys already have TTL set.
-	// Avoids calling EXPIRE on every publish (saves 1 Redis round-trip per relay).
-	// Bounded by supplier count (stream names are ha:relays:{supplierAddr}).
-	ttlSet *xsync.Map[string, struct{}]
-
 	// mu protects closed state
 	mu     sync.RWMutex
 	closed bool
 }
 
 // NewStreamsPublisher creates a new Redis Streams publisher.
-// cacheTTL is the TTL for relay stream data (default: 2h if not provided).
+//
+// It sets no expiry on the streams it writes. A supplier's stream is a permanent
+// lane that spans every session that supplier ever serves, so a clock is the wrong
+// instrument for ending its life: the lane should live as long as the supplier does.
+// See Publish for what bounds the stream's SIZE instead.
 func NewStreamsPublisher(
 	logger logging.Logger,
 	client redis.UniversalClient,
 	streamPrefix string,
-	cacheTTL time.Duration,
 ) *StreamsPublisher {
-	if cacheTTL <= 0 {
-		cacheTTL = 2 * time.Hour // Default to 2h
-	}
-
 	return &StreamsPublisher{
-		ttlSet:       xsync.NewMap[string, struct{}](),
 		logger:       logging.ForComponent(logger, logging.ComponentRedisPublisher),
 		client:       client,
 		streamPrefix: streamPrefix,
-		cacheTTL:     cacheTTL,
 	}
 }
 
 // Publish sends a mined relay message to the Redis Stream for the session.
-// The stream is automatically expired after the session's claim window closes.
+//
+// The stream key is NOT given an expiry, and this is load-bearing rather than an
+// omission. Until 2026-08-20 the publisher issued EXPIRE once per (process, stream)
+// and memoised the fact, which produced two defects measured against a live Redis:
+//
+//   - an absolute deadline anchored to the first publish of that process, unrelated
+//     to any session boundary, that deleted the whole key mid-session -- taking
+//     un-consumed entries and the pending-entries list with it, silently, because
+//     Redis key expiry emits no log and no metric;
+//   - a key that, once expired and recreated by XADD, came back with no TTL at all
+//     while the memo still said one had been set, so it was never re-armed.
+//
+// What bounds the stream's size is delivery, not time: the miner deletes each entry
+// as it acknowledges it (XACKDEL/DELREF), and a periodic XTRIM MINID sweeps whatever
+// slipped past. What ends the stream's life is the supplier's own lifecycle, not a
+// timer.
 func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRelayMessage) error {
 	p.mu.RLock()
 	if p.closed {
@@ -112,38 +113,17 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 		return fmt.Errorf("failed to publish to stream %s: %w", streamName, err)
 	}
 
-	// Log publish details for tracing (DEBUG level - per-relay)
-	p.logger.Debug().
-		Str("stream_name", streamName).
-		Str("session_id", msg.SessionId).
-		Str("supplier", msg.SupplierOperatorAddress).
-		Str("service", msg.ServiceId).
-		Str("message_id", messageID).
-		Msg("relay published to stream")
-
-	// Set stream TTL only once per stream (not on every publish).
-	// Saves 1 Redis round-trip per relay. TTL is a backup safety net.
-	if _, alreadySet := p.ttlSet.LoadOrStore(streamName, struct{}{}); !alreadySet {
-		if ttlErr := p.client.Expire(ctx, streamName, p.cacheTTL).Err(); ttlErr != nil {
-			p.ttlSet.Delete(streamName) // retry next publish
-			p.logger.Debug().
-				Err(ttlErr).
-				Str(logging.FieldStreamID, streamName).
-				Int64("ttl_seconds", int64(p.cacheTTL.Seconds())).
-				Msg("failed to set stream TTL")
-		}
-	}
-
-	// Update metrics
-	publishedTotal.WithLabelValues(msg.SupplierOperatorAddress, msg.ServiceId).Inc()
-
+	// Per-relay: Debug only, and the alertable signal is publishedTotal below.
 	p.logger.Debug().
 		Str(logging.FieldStreamID, streamName).
 		Str(logging.FieldMessageID, messageID).
 		Str(logging.FieldSessionID, msg.SessionId).
 		Str(logging.FieldSupplier, msg.SupplierOperatorAddress).
-		Int64("ttl_seconds", int64(p.cacheTTL.Seconds())).
-		Msg("published mined relay to supplier stream")
+		Str("service", msg.ServiceId).
+		Msg("relay published to stream")
+
+	// Update metrics
+	publishedTotal.WithLabelValues(msg.SupplierOperatorAddress, msg.ServiceId).Inc()
 
 	return nil
 }

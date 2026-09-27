@@ -17,7 +17,6 @@ type SupplierUpdateAction string
 
 const (
 	SupplierUpdateActionAdd      SupplierUpdateAction = "add"
-	SupplierUpdateActionUpdate   SupplierUpdateAction = "update"
 	SupplierUpdateActionDraining SupplierUpdateAction = "draining"
 	SupplierUpdateActionRemove   SupplierUpdateAction = "remove"
 )
@@ -77,7 +76,7 @@ func (r *SupplierRegistry) PublishSupplierUpdate(
 	key := r.redisClient.KB().SupplierRegistryKey(operatorAddr)
 
 	switch action {
-	case SupplierUpdateActionAdd, SupplierUpdateActionUpdate:
+	case SupplierUpdateActionAdd:
 		// Set supplier data
 		data := SupplierRegistryData{
 			OperatorAddr: operatorAddr,
@@ -126,6 +125,15 @@ func (r *SupplierRegistry) PublishSupplierUpdate(
 		if err := r.redisClient.SRem(ctx, r.config.IndexKey, operatorAddr).Err(); err != nil {
 			return fmt.Errorf("failed to remove from supplier index: %w", err)
 		}
+
+	default:
+		// No silent no-op. The switch used to fall through for an unrecognised
+		// action: nothing was written, the counter was still incremented with
+		// that action as its label, and nil came back -- so the caller believed
+		// the registry had been updated and the metric agreed with it. Failing
+		// here also keeps the label bounded to the constants below, which is
+		// what stops an arbitrary string from becoming a Prometheus series.
+		return fmt.Errorf("unknown supplier update action %q", action)
 	}
 
 	supplierRegistryUpdatesTotal.WithLabelValues(string(action)).Inc()

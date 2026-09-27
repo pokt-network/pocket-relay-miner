@@ -244,7 +244,7 @@ relay_meter:
 
   # Cache TTL for all Redis data (streams, params, app stakes, meters)
   # Redis TTL handles automatic expiration - no cleanup goroutines needed.
-  # Default: 2h (covers ~15 session lifecycles at 30s blocks)
+  # Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
   cache_ttl: 2h
 
 # HTTP transport settings (connection pooling and timeouts for backend requests)

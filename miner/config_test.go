@@ -17,7 +17,10 @@ func TestDefaultConfig(t *testing.T) {
 	// Redis config now uses namespace configuration for stream prefix and consumer group
 	// These are derived from the namespace config at runtime
 	require.Equal(t, "redis://localhost:6379", cfg.Redis.URL)
-	// Note: BlockTimeout removed - BLOCK 0 (TRUE PUSH) is now hardcoded in consumer
+	// Note: BlockTimeout removed - the consumer uses a bounded block (see
+	// blockInterval in transport/redis/consumer.go), NOT BLOCK 0: an unbounded
+	// block sets no read deadline, so a cancelled context cannot end the read
+	// and Close() hangs.
 	require.Equal(t, int64(60000), cfg.Redis.ClaimIdleTimeoutMs)
 	require.Equal(t, int64(10), cfg.DeduplicationTTLBlocks)
 	require.Equal(t, int64(1000), cfg.BatchSize) // Increased from 100 for better throughput
@@ -160,7 +163,8 @@ func TestConfig_Validate_RemovedKeysDir(t *testing.T) {
 // Note: Supplier validation tests removed - suppliers are auto-discovered from keys
 // See TestConfig_Validate_NoKeySource for key validation
 
-// Note: TestConfig_GetRedisBlockTimeout removed - BLOCK 0 is now hardcoded
+// Note: TestConfig_GetRedisBlockTimeout removed - the block duration is no longer
+// configurable; it is the bounded blockInterval in transport/redis/consumer.go.
 
 func TestConfig_GetClaimIdleTimeout(t *testing.T) {
 	cfg := &Config{

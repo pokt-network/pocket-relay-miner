@@ -120,6 +120,44 @@ var (
 		[]string{"component"},
 	)
 
+	// Reclaim / reaper metrics
+
+	reclaimErrorsTotal = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "reclaim_errors_total",
+			Help:      "Reclaim scan operations that failed, by Redis operation. A failure aborts the whole drain for that tick, not just one page",
+		},
+		[]string{"supplier_addr", "op"},
+	)
+
+	reapedConsumersTotal = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "reaped_consumers_total",
+			Help:      "Dead consumer records removed from a stream group after being seen with an empty PEL and idle past the reap threshold",
+		},
+		[]string{"supplier_addr"},
+	)
+
+	// reapDestroyedPendingTotal MUST stay at zero. XGROUP DELCONSUMER returns how many
+	// pending entries it destroyed, and the reaper only deletes consumers it has just
+	// observed with an empty PEL -- so a non-zero value here is a relay that was
+	// acknowledged into oblivion by the race between that observation and the delete.
+	// It is measured rather than assumed: Redis offers no conditional delete, so the
+	// return value is the only evidence that the guard held.
+	reapDestroyedPendingTotal = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "reap_destroyed_pending_total",
+			Help:      "Pending entries destroyed by reaping a consumer that was observed empty. Any non-zero value is lost relays and a bug in the reaper guard",
+		},
+		[]string{"supplier_addr"},
+	)
+
 	// Note: Stream discovery metrics removed with single-stream-per-supplier architecture.
 	// Discovery is no longer needed - we consume from a single known stream per supplier.
 )

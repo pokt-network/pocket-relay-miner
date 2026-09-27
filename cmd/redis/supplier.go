@@ -103,18 +103,16 @@ func getSupplierCacheState(ctx context.Context, client *DebugRedisClient, addres
 
 // getAllSupplierCacheStates reads all supplier states from cache
 func getAllSupplierCacheStates(ctx context.Context, client *DebugRedisClient) (map[string]*supplierCacheState, error) {
-	pattern := fmt.Sprintf("%s:*", client.KB().SupplierKeyPrefix())
-	keys, err := clusterAwareScanAllKeys(ctx, client, pattern)
+	keys, err := clusterAwareScanAllKeys(ctx, client, client.KB().SupplierStatePattern())
 	if err != nil {
 		return nil, err
 	}
 
 	states := make(map[string]*supplierCacheState)
 	for _, key := range keys {
-		// Extract address from key (ha:supplier:{address})
-		addr := strings.TrimPrefix(key, fmt.Sprintf("%s:", client.KB().SupplierKeyPrefix()))
-		if addr == key {
-			continue // Didn't match pattern
+		addr, ok := client.KB().SupplierStateAddress(key)
+		if !ok {
+			continue // not a supplier state key under this namespace
 		}
 
 		state, err := getSupplierCacheState(ctx, client, addr)
