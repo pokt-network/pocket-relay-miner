@@ -82,6 +82,8 @@ are not checked, and breaking them is unsupported.
   load is in [docs/benchmarks/README.md](docs/benchmarks/README.md)),
   [config.redis.example.conf](config.redis.example.conf) (Redis settings of
   that run), and [TROUBLESHOOTING.md, Memory and CPU](docs/deploy/TROUBLESHOOTING.md#memory-and-cpu).
+  Then tell the human to watch memory as traffic grows: it follows request
+  sizes and live sessions, and no example can size it for every mix.
 - Pick 1 runbook, [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md)
   or [docs/deploy/HOST.md](docs/deploy/HOST.md), and run its steps in order
   from Step 0. A step gives **Run** and **Expect**, and **If not** and

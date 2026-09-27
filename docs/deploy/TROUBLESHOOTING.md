@@ -192,6 +192,19 @@ every core of the host, and sizes its worker pools and Redis pool from them.
 **Action**: set `GOMEMLIMIT` about 10% below the container's `mem_limit` (or
 the unit's `MemoryMax`) and `GOMAXPROCS` equal to its CPU limit.
 
+**Watch memory, and size it to your traffic.** Memory follows the size of the
+requests and responses you serve and how many sessions and suppliers are live
+at once, and the combinations are too many to test them all: the
+[capacity report](../benchmarks/README.md) measures one of them. The relay miner
+bounds its queues and refuses work under pressure, but a process whose limit is
+too small for its traffic can still run out of memory. Watch each process's
+memory against its limit on the dashboard *5 Storage and memory*
+([examples/observability/](../../examples/observability/README.md)). When one
+climbs toward its limit, raise the limit, or cap the bodies a service accepts
+with `max_request_body_size_bytes`, `max_response_body_size_bytes` or
+`max_body_size_bytes` (per service, with a default at the root of the relayer
+config; [config.relayer.example.yaml](../../config.relayer.example.yaml)).
+
 ## Relays refused
 
 | Answer | Reason label on `ha_relayer_relays_rejected_total` | Cause | Action |
