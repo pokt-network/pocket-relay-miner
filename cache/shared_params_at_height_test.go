@@ -4,15 +4,12 @@ package cache
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -86,19 +83,11 @@ func (c *recordingSharedQueryClient) snapshot() (liveCalls int, atHeight []int64
 	return c.liveCalls, append([]int64(nil), c.atHeightCalls...)
 }
 
-// newAtHeightTestCache builds a RedisSharedParamCache over miniredis.
-func newAtHeightTestCache(t *testing.T, ctx context.Context, sharedClient *recordingSharedQueryClient) *RedisSharedParamCache {
+// newAtHeightTestCache builds a RedisSharedParamCache over a real Redis.
+func newAtHeightTestCache(t *testing.T, sharedClient *recordingSharedQueryClient) *RedisSharedParamCache {
 	t.Helper()
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = redisClient.Close() })
+	redisClient := newTestRedis(t)
 
 	c := NewRedisSharedParamCache(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
@@ -131,7 +120,7 @@ func TestGetSharedParams_QueriesAtRequestedHeight(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	c := newAtHeightTestCache(t, ctx, sharedClient)
+	c := newAtHeightTestCache(t, sharedClient)
 
 	params, err := c.GetSharedParams(ctx, sessionEnd)
 	require.NoError(t, err)
@@ -157,7 +146,7 @@ func TestGetSharedParams_CachesUnderRequestedHeight(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	c := newAtHeightTestCache(t, ctx, sharedClient)
+	c := newAtHeightTestCache(t, sharedClient)
 
 	first, err := c.GetSharedParams(ctx, sessionEnd)
 	require.NoError(t, err)
@@ -185,7 +174,7 @@ func TestGetSharedParams_DistinctHeightsDoNotAlias(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	c := newAtHeightTestCache(t, ctx, sharedClient)
+	c := newAtHeightTestCache(t, sharedClient)
 
 	old, err := c.GetSharedParams(ctx, 100)
 	require.NoError(t, err)

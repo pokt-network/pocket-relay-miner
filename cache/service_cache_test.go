@@ -4,16 +4,13 @@ package cache
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // frozenServiceQueryClient models the query layer's in-process cache: once it
@@ -37,20 +34,6 @@ func (f *frozenServiceQueryClient) GetService(_ context.Context, serviceID strin
 func (f *frozenServiceQueryClient) InvalidateService(_ string) {
 	f.invalidateCalls++
 	f.served = nil // next GetService re-reads the (possibly changed) chain value
-}
-
-func newTestRedis(t *testing.T) *redisutil.Client {
-	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	client, err := redisutil.NewClient(context.Background(), redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-	return client
 }
 
 // TestServiceCache_ForceRefresh_PicksUpCUPRChange is the end-to-end regression
@@ -91,7 +74,7 @@ func TestServiceCache_ForceRefresh_PicksUpCUPRChange(t *testing.T) {
 // every such claim was skipped on-chain. The fix ages L1 entries out after
 // serviceCacheL1TTL so Get falls through to L2/L3 and follows the on-chain CUPR
 // WITHOUT a pod restart. This test drives that change against the REAL service
-// cache with miniredis — coverage the fakes-only provider test could not give.
+// cache on a real Redis — coverage the fakes-only provider test could not give.
 func TestServiceCache_L1RefreshesAfterTTL(t *testing.T) {
 	client := newTestRedis(t)
 	fq := &frozenServiceQueryClient{chainCUPR: 1000}

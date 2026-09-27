@@ -21,12 +21,8 @@ import (
 // one for the whole run. The files below still use the fake and are FROZEN at
 // 2026-08-19: this check only stops new ones from landing, and forces the list
 // to shrink as packages are migrated. transport/redis was migrated with this
-// check and is deliberately absent.
+// check and is deliberately absent, as is cache.
 var miniredisAllowlist = map[string]bool{
-	"cache/params_lock_release_test.go":                  true,
-	"cache/service_cache_test.go":                        true,
-	"cache/shared_params_at_height_test.go":              true,
-	"cache/supplier_cache_test.go":                       true,
 	"client/relay_client/simulated_test.go":              true,
 	"cmd/redis/cache_all_test.go":                        true,
 	"cmd/redis/cache_test.go":                            true,

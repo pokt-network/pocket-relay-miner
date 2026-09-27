@@ -5,35 +5,23 @@ package cache
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
-	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-// newTestSupplierCache wires a SupplierCache against a fresh miniredis
-// instance. Returns the cache, the redis client, and the miniredis handle
-// for direct manipulation. All three are cleaned up by t.Cleanup.
-func newTestSupplierCache(t *testing.T) (*SupplierCache, *redisutil.Client, *miniredis.Miniredis) {
+// newTestSupplierCache wires a SupplierCache against the shared real Redis,
+// under this test's own namespace. Returns the cache and the client, both
+// cleaned up by t.Cleanup.
+func newTestSupplierCache(t *testing.T) (*SupplierCache, *redisutil.Client) {
 	t.Helper()
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	client := newTestRedis(t)
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	cache := NewSupplierCache(logger, client, SupplierCacheConfig{
@@ -41,17 +29,21 @@ func newTestSupplierCache(t *testing.T) (*SupplierCache, *redisutil.Client, *min
 		FailOpen:  false,
 	})
 
-	return cache, client, mr
+	return cache, client
 }
 
-// writeSupplierToRedis marshals a SupplierState directly into miniredis so
-// tests can simulate entries written by another (possibly buggy) producer.
-func writeSupplierToRedis(t *testing.T, mr *miniredis.Miniredis, state *SupplierState) {
+// writeSupplierToRedis marshals a SupplierState straight into Redis so tests
+// can simulate entries written by another (possibly buggy) producer.
+//
+// The key comes from the SAME client's KeyBuilder the cache reads through. A
+// second KeyBuilder of its own would write under the default namespace, which
+// nothing here reads, and every assertion below would fail as a cache miss.
+func writeSupplierToRedis(t *testing.T, client *redisutil.Client, state *SupplierState) {
 	t.Helper()
 	data, err := json.Marshal(state)
 	require.NoError(t, err)
-	kb := redisutil.NewKeyBuilder(config.RedisNamespaceConfig{})
-	require.NoError(t, mr.Set(fmt.Sprintf("%s:%s", kb.SupplierKeyPrefix(), state.OperatorAddress), string(data)))
+	require.NoError(t, client.Set(context.Background(),
+		client.KB().SupplierStateKey(state.OperatorAddress), data, 0).Err())
 }
 
 func TestIsContaminated(t *testing.T) {
@@ -96,7 +88,7 @@ func TestIsContaminated(t *testing.T) {
 }
 
 func TestGetSupplierState_ContaminatedInL1_EvictsAndReportsMiss(t *testing.T) {
-	cache, _, _ := newTestSupplierCache(t)
+	cache, _ := newTestSupplierCache(t)
 	ctx := context.Background()
 
 	const addr = "pokt1contaminatedL1"
@@ -125,11 +117,11 @@ func TestGetSupplierState_ContaminatedInL1_EvictsAndReportsMiss(t *testing.T) {
 }
 
 func TestGetSupplierState_ContaminatedInL2_TreatedAsMissNoL1Populate(t *testing.T) {
-	cache, _, mr := newTestSupplierCache(t)
+	cache, client := newTestSupplierCache(t)
 	ctx := context.Background()
 
 	const addr = "pokt1contaminatedL2"
-	writeSupplierToRedis(t, mr, &SupplierState{
+	writeSupplierToRedis(t, client, &SupplierState{
 		OperatorAddress: addr,
 		Status:          SupplierStatusActive,
 		Staked:          true,
@@ -151,11 +143,11 @@ func TestGetSupplierState_ContaminatedInL2_TreatedAsMissNoL1Populate(t *testing.
 }
 
 func TestGetSupplierState_CleanEntry_ServedNormally(t *testing.T) {
-	cache, _, mr := newTestSupplierCache(t)
+	cache, client := newTestSupplierCache(t)
 	ctx := context.Background()
 
 	const addr = "pokt1clean"
-	writeSupplierToRedis(t, mr, &SupplierState{
+	writeSupplierToRedis(t, client, &SupplierState{
 		OperatorAddress: addr,
 		Status:          SupplierStatusActive,
 		Staked:          true,
@@ -177,11 +169,11 @@ func TestGetSupplierState_CleanEntry_ServedNormally(t *testing.T) {
 }
 
 func TestGetSupplierState_LegitimateUnstaked_ServedNormally(t *testing.T) {
-	cache, _, mr := newTestSupplierCache(t)
+	cache, client := newTestSupplierCache(t)
 	ctx := context.Background()
 
 	const addr = "pokt1unstaked"
-	writeSupplierToRedis(t, mr, &SupplierState{
+	writeSupplierToRedis(t, client, &SupplierState{
 		OperatorAddress: addr,
 		Status:          SupplierStatusNotStaked,
 		Staked:          false,
@@ -201,26 +193,26 @@ func TestGetSupplierState_LegitimateUnstaked_ServedNormally(t *testing.T) {
 }
 
 func TestWarmupFromRedis_SkipsContaminatedKeepsClean(t *testing.T) {
-	cache, _, mr := newTestSupplierCache(t)
+	cache, client := newTestSupplierCache(t)
 	ctx := context.Background()
 
 	const cleanAddr = "pokt1warmup_clean"
 	const dirtyAddr = "pokt1warmup_dirty"
 	const unstakedAddr = "pokt1warmup_unstaked"
 
-	writeSupplierToRedis(t, mr, &SupplierState{
+	writeSupplierToRedis(t, client, &SupplierState{
 		OperatorAddress: cleanAddr,
 		Status:          SupplierStatusActive,
 		Staked:          true,
 		Services:        []string{"svc1"},
 	})
-	writeSupplierToRedis(t, mr, &SupplierState{
+	writeSupplierToRedis(t, client, &SupplierState{
 		OperatorAddress: dirtyAddr,
 		Status:          SupplierStatusActive,
 		Staked:          true,
 		Services:        []string{},
 	})
-	writeSupplierToRedis(t, mr, &SupplierState{
+	writeSupplierToRedis(t, client, &SupplierState{
 		OperatorAddress: unstakedAddr,
 		Status:          SupplierStatusNotStaked,
 		Staked:          false,
@@ -395,7 +387,7 @@ func TestIsActiveForService(t *testing.T) {
 // and the height field preserved. This is the serialisation contract that
 // writeSupplierStatusToCache (miner) and GetSupplierState (relayer) depend on.
 func TestWriteAndReadSupplierStatusUnstaking(t *testing.T) {
-	sc, _, _ := newTestSupplierCache(t)
+	sc, _ := newTestSupplierCache(t)
 	ctx := context.Background()
 
 	const addr = "pokt1unstaking_roundtrip"
@@ -507,14 +499,14 @@ func TestStakedEndpoints_JSONRoundTripAndBackCompat(t *testing.T) {
 // view forever. The fix ages L1 entries out after supplierCacheL1TTL so
 // GetSupplierState falls through to L2 (Redis) and follows the on-chain
 // stake/services change WITHOUT a pod restart. This test drives that change
-// against the REAL supplier cache with miniredis.
+// against the REAL supplier cache on a real Redis.
 //
 // NOTE: unlike the service cache, SupplierCache is L1+L2 only — it has no L3
 // query client (and thus no frozen-query-client stub to reuse). The downstream
 // change is therefore driven at L2 (Redis), the cache's only authoritative
 // source below L1, via the existing writeSupplierToRedis helper.
 func TestSupplierCache_L1RefreshesAfterTTL(t *testing.T) {
-	cache, _, mr := newTestSupplierCache(t)
+	cache, client := newTestSupplierCache(t)
 	ctx := context.Background()
 
 	// Use a large L1 TTL while we prove caching; restore the package default after.
@@ -525,7 +517,7 @@ func TestSupplierCache_L1RefreshesAfterTTL(t *testing.T) {
 	const addr = "pokt1ttl"
 
 	// Seed L2 with the old service set and load it into L1 via a real Get.
-	writeSupplierToRedis(t, mr, &SupplierState{
+	writeSupplierToRedis(t, client, &SupplierState{
 		OperatorAddress: addr,
 		Status:          SupplierStatusActive,
 		Staked:          true,
@@ -538,7 +530,7 @@ func TestSupplierCache_L1RefreshesAfterTTL(t *testing.T) {
 
 	// On-chain services change mid-session: the miner rewrites L2 with a new
 	// service set. The relayer's L1 entry is the stale one.
-	writeSupplierToRedis(t, mr, &SupplierState{
+	writeSupplierToRedis(t, client, &SupplierState{
 		OperatorAddress: addr,
 		Status:          SupplierStatusActive,
 		Staked:          true,

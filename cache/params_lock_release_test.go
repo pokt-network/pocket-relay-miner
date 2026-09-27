@@ -4,16 +4,12 @@ package cache
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/cosmos/gogoproto/proto"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/stretchr/testify/require"
-
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // These tests pin the contended-loser behavior of the two param singletons
@@ -24,22 +20,8 @@ import (
 // exists to prevent: loser exits, deletes the winner's lock, and a third
 // instance acquires immediately and fires a duplicate chain query.
 
-func setupLockTestClient(t *testing.T) *redisutil.Client {
-	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	client, err := redisutil.NewClient(context.Background(), redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-	return client
-}
-
 func TestSharedParamsSingleton_ContendedLoserKeepsWinnersLock(t *testing.T) {
-	client := setupLockTestClient(t)
+	client := newTestRedis(t)
 	ctx := context.Background()
 
 	// The winner holds the lock.
@@ -70,7 +52,7 @@ func TestSharedParamsSingleton_ContendedLoserKeepsWinnersLock(t *testing.T) {
 }
 
 func TestProofParamsSingleton_ContendedLoserKeepsWinnersLock(t *testing.T) {
-	client := setupLockTestClient(t)
+	client := newTestRedis(t)
 	ctx := context.Background()
 
 	lockKey := client.KB().ParamsProofLockKey()

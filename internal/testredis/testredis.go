@@ -86,7 +86,16 @@ func Client(t *testing.T) *redis.Client {
 func Prefix(t *testing.T) string {
 	t.Helper()
 
-	safe := strings.NewReplacer("/", "_", " ", "_", ":", "_").Replace(t.Name())
+	// Redis glob metacharacters are replaced too, not only the separators:
+	// the cleanup below deletes by SCAN MATCH prefix+"*", so a subtest name
+	// carrying "[", "?" or "*" would make that pattern match a DIFFERENT set
+	// of keys -- either none (this test's keys leak onto the shared server)
+	// or a wider one (another package's keys deleted mid-run). That is the
+	// exact damage isolation-by-prefix exists to prevent.
+	safe := strings.NewReplacer(
+		"/", "_", " ", "_", ":", "_",
+		"*", "_", "?", "_", "[", "_", "]", "_", "^", "_", `\`, "_",
+	).Replace(t.Name())
 	prefix := fmt.Sprintf("t:%s:%d:%d", safe, time.Now().UnixNano(), prefixSeq.Add(1))
 
 	t.Cleanup(func() {

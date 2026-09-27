@@ -51,7 +51,7 @@ func (f *frozenApplicationQueryClient) InvalidateApplication(_ string) {
 // never followed the on-chain state. The fix ages L1 entries out after
 // applicationCacheL1TTL so Get falls through to L2/L3 and follows the on-chain
 // application WITHOUT a pod restart. This test drives that change against the REAL
-// application cache with miniredis.
+// application cache on a real Redis.
 func TestApplicationCache_L1RefreshesAfterTTL(t *testing.T) {
 	client := newTestRedis(t)
 	fq := &frozenApplicationQueryClient{chainDelegatees: []string{"gw-a"}}
