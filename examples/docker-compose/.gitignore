@@ -1,3 +1,5 @@
 # The operator's real supplier keys. The tracked config/supplier-keys.yaml
 # holds only a public, unstaked key.
 config/supplier-keys.local.yaml
+# Local port overrides (docs/deploy/DOCKER_COMPOSE.md, step 0).
+.env

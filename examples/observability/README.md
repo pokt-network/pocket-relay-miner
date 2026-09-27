@@ -35,7 +35,9 @@ curl -s "http://127.0.0.1:${PROMETHEUS_PORT:-9091}/api/v1/targets" | grep -o '"h
 login): the Money dashboard is the home page, the others are in the
 "Pocket RelayMiner" folder. Both ports are bound to loopback; from another
 machine use an SSH tunnel (`ssh -L 3000:127.0.0.1:3000 <host>`). If 9091 or
-3000 is taken, export `PROMETHEUS_PORT` or `GRAFANA_PORT` before `up`.
+3000 is taken, set `PROMETHEUS_PORT` or `GRAFANA_PORT` in
+`examples/docker-compose/.env` before `up`
+([DOCKER_COMPOSE.md, step 0](../../docs/deploy/DOCKER_COMPOSE.md#step-0-prerequisites)).
 
 Without a browser, list the dashboards through Grafana's HTTP API:
 

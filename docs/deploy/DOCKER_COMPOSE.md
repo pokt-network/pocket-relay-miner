@@ -61,9 +61,17 @@ ss -ltn | grep -E ':(8180|9091|3000) ' ; echo "EXIT=$?"
 3000 (Grafana) are free.
 
 **If not**: something else already listens there, and a check against that
-port would read the other program, not this stack. Pick free ports and export
-them in this shell before step 4, then use them wherever this runbook says
-8180, 9091 or 3000: `export RELAYER_PORT=18180 PROMETHEUS_PORT=19091 GRAFANA_PORT=13000`.
+port would read the other program, not this stack. Pick free ports and write
+them to `examples/docker-compose/.env` before step 4, then use them wherever
+this runbook says 8180, 9091 or 3000:
+
+```bash
+printf 'RELAYER_PORT=18180\nPROMETHEUS_PORT=19091\nGRAFANA_PORT=13000\n' > examples/docker-compose/.env
+```
+
+Compose reads that file on every command, so the ports hold in every new
+shell; an `export` lasts only for the shell that ran it, and a service started
+from another shell falls back to 8180, 9091 or 3000.
 
 Also needed: about 10 GiB of free RAM (Redis and the miner are limited to
 4 GiB each, the relayer to 2 GiB; `free -g` shows it in the `available`
@@ -178,8 +186,9 @@ EXIT=0
 - `container prm-example-miner-1 is unhealthy` →
   `$C logs miner | grep '"level":"error"\|Error:'` and look the message up in
   [Miner does not start](TROUBLESHOOTING.md#miner-does-not-start).
-- `bind: address already in use` → port 8180 is taken → export
-  `RELAYER_PORT=18180`, run `$C down -v`, retry. Some Docker setups print no
+- `bind: address already in use` → port 8180 is taken → set
+  `RELAYER_PORT=18180` in `examples/docker-compose/.env` (step 0), run
+  `$C down -v`, retry. Some Docker setups print no
   error and start the container without the port instead: step 5 checks it.
 
 **Stop if**: the same step fails twice after a [reset](#reset).
@@ -210,8 +219,8 @@ relayer	Up About a minute (healthy)
 $C ps --format '{{.Service}}\t{{.Ports}}' | grep relayer
 ```
 
-**Expect**: `relayer	127.0.0.1:8180->8080/tcp` (or the `RELAYER_PORT` you
-exported), and the same `127.0.0.1:<port>->` form for Prometheus and Grafana
+**Expect**: `relayer	127.0.0.1:8180->8080/tcp` (or the
+`RELAYER_PORT` you set in `.env`), and the same `127.0.0.1:<port>->` form for Prometheus and Grafana
 when the dashboards run.
 
 **If not**: `relayer	8080/tcp` with no `127.0.0.1:...->` → the port was
