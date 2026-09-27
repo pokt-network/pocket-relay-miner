@@ -84,6 +84,21 @@ are not checked, and breaking them is unsupported.
 
 ## Rules for an agent running a deployment
 
+**Hard rules**, broken in real first-time runs:
+
+1. Run the runbook's commands exactly as written, with its `$C` (project
+   `prm-example`). Do not swap in another tool: `netstat` is missing on many
+   hosts and prints nothing, which reads as "all ports free".
+2. Never install software or pipe a downloaded script into a shell on the
+   human's machine. `pocketd` is installed by the human, with the commands in
+   [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
+3. Never ask for, accept or handle a private key, a mnemonic or a passphrase.
+4. Never invent a service id, a URL, a port, a flag or an amount; take each
+   from the docs or the chain, or say you do not know.
+5. Stake and configure only services the human's backends serve. A service
+   with another name is another service, even if it sounds related.
+6. Stop and ask before anything on mainnet, and before spending or staking.
+
 - **Size the limits for the load; the examples do not.** The limits in
   `examples/docker-compose/` (Redis and miner 4 GiB, relayer 2 GiB, 2 CPUs
   each) fit a few suppliers with ordinary traffic; they do not absorb a burst
