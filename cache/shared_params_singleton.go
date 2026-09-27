@@ -330,7 +330,7 @@ func (c *sharedParamsCache) queryChainWithLock(ctx context.Context) (*sharedtype
 	// and re-fire the duplicate chain query the lock exists to prevent
 	// (same fix as cache/keyed_query_lock.go).
 	if locked {
-		defer c.redisClient.Del(ctx, lockKey)
+		defer releaseCacheLock(ctx, c.redisClient, lockKey)
 	}
 
 	if !locked {

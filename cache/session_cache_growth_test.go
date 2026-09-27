@@ -3,12 +3,15 @@
 package cache
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
 // TestSessionCacheL1_BoundedGrowth is the regression guard for the unbounded L1
@@ -35,4 +38,26 @@ func TestSessionCacheL1_BoundedGrowth(t *testing.T) {
 	require.True(t, newest, "the newest session must be retained")
 	_, oldest := c.sessionCache.Load(fmt.Sprintf("app/svc/%d", int64(1)))
 	require.False(t, oldest, "a session far below the keep window must be pruned")
+}
+
+// RedisSessionCache used to carry lifecycle machinery it never used: Start did
+// `_, c.cancelFn = context.WithCancel(ctx)`, discarding the context and keeping
+// only the cancel, so Close cancelled a context nobody held; and a WaitGroup was
+// waited on that nothing ever added to. It reads as a shutdown contract, and
+// there is none to honour -- this cache runs no goroutines. These pin what the
+// contract actually is now.
+func TestSessionCacheLifecycle_StartIsUnaffectedByItsContext(t *testing.T) {
+	c := &RedisSessionCache{
+		sessionCache: xsync.NewMap[string, sessionCacheL1Entry](),
+		logger:       logging.NewLoggerFromConfig(logging.Config{Level: "error", Format: "json"}),
+	}
+
+	// An already-cancelled context must not matter: nothing is launched from it.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, c.Start(ctx))
+
+	require.NoError(t, c.Close(), "Close must not wait on anything")
+	require.NoError(t, c.Close(), "Close is idempotent")
+	require.Error(t, c.Start(context.Background()), "a closed cache cannot be restarted")
 }

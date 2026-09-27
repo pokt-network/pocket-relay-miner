@@ -39,7 +39,6 @@ def get_defaults():
             "config": {
                 "listen_addr": "0.0.0.0:8080",
                 "validation_mode": "optimistic",
-                "grace_period_extra_blocks": 2,
                 "relay_meter": {
                     "enabled": True,
                 },

@@ -78,11 +78,14 @@ type RedisSessionCache struct {
 
 	// Cache keys helper
 
-	// Lifecycle
-	mu       sync.RWMutex
-	closed   bool
-	cancelFn context.CancelFunc
-	wg       sync.WaitGroup
+	// Lifecycle. There is no cancelFn and no WaitGroup on purpose: this cache
+	// runs no background goroutines. It used to carry both -- Start did
+	// `_, c.cancelFn = context.WithCancel(ctx)`, throwing the context away and
+	// keeping only the cancel, so Close cancelled a context nobody held, and
+	// wg was waited on without a single Add. Dead lifecycle machinery reads
+	// like a shutdown contract that does not exist.
+	mu     sync.RWMutex
+	closed bool
 }
 
 // NewRedisSessionCache creates a new SessionCache backed by Redis.
@@ -112,16 +115,15 @@ func NewRedisSessionCache(
 	}
 }
 
-// Start begins the cache's background processes.
-func (c *RedisSessionCache) Start(ctx context.Context) error {
+// Start satisfies the cache interface. This cache has no background processes:
+// every read is driven by its caller, so there is nothing to launch and the
+// context is unused.
+func (c *RedisSessionCache) Start(context.Context) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed {
-		c.mu.Unlock()
 		return fmt.Errorf("cache is closed")
 	}
-
-	_, c.cancelFn = context.WithCancel(ctx)
-	c.mu.Unlock()
 
 	c.logger.Info().Msg("session cache started")
 	return nil
@@ -268,12 +270,6 @@ func (c *RedisSessionCache) Close() error {
 	}
 
 	c.closed = true
-
-	if c.cancelFn != nil {
-		c.cancelFn()
-	}
-
-	c.wg.Wait()
 
 	c.logger.Info().Msg("session cache closed")
 	return nil

@@ -47,3 +47,33 @@ func TestConfigValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestValidate_RetiredLevelsNameTheirReplacement covers the upgrade path rather
+// than the rejection. Until this validation existed an unknown level fell back
+// to info in silence, so a config carrying "trace" BOOTED -- at the wrong
+// verbosity. Refusing to start is the fix; refusing without naming the
+// replacement turns a one-line edit into a rollback.
+func TestValidate_RetiredLevelsNameTheirReplacement(t *testing.T) {
+	for level, want := range map[string]string{
+		"trace":    "debug",
+		"warning":  "warn",
+		"fatal":    "error",
+		"panic":    "error",
+		"disabled": "error",
+	} {
+		t.Run(level, func(t *testing.T) {
+			err := Config{Level: level, Format: "json"}.Validate()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), `use "`+want+`"`,
+				"the error must name the replacement, not just the valid set")
+			require.Contains(t, err.Error(), "silently logged at info",
+				"and say why it used to boot, so the operator knows what changed")
+		})
+	}
+
+	t.Run("an unrecognisable level still gets the plain message", func(t *testing.T) {
+		err := Config{Level: "verbose-ish", Format: "json"}.Validate()
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "use \"")
+	})
+}
