@@ -161,7 +161,8 @@ next session (poktroll v0.1.35, `x/supplier/keeper/msg_server_stake_supplier.go`
 To add a service later, stake again with the full list.
 
 `stake_amount` is in `upokt` (1 POKT = 1,000,000 upokt) and at least the
-network's `min_stake`, which governance can change: read it before staking
+network's `min_stake`, which governance can change. It is per supplier, not
+per service: 1 supplier staked for 2 services needs the minimum once. Read it before staking
 with `curl -s https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/supplier/params`
 (`sauron-api.infra.pocket.network` for mainnet; it read `59500000000` on both
 on 2026-09-26, which is **59,500 POKT**: divide upokt by 1,000,000). The account also needs POKT left over for fees. Beta registers
@@ -182,13 +183,23 @@ stake transaction. Use a DNS name you control, with a certificate for it on the
 TLS proxy (a bare IP rarely gets one). A tunnel or address whose URL changes on
 restart breaks the stake every time it changes.
 
+On beta:
+
 ```bash
 pocketd tx supplier stake-supplier --config stake_config.yaml --from supplier1 \
   --keyring-backend file --keyring-dir ~/.pocket --network beta
 pocketd query supplier show-supplier <pokt1-address> --network beta
 ```
 
-Use `--network main` for mainnet. Once staked,
+On mainnet (the network's name for `--network` is `main`, not `mainnet`):
+
+```bash
+pocketd tx supplier stake-supplier --config stake_config.yaml --from supplier1 \
+  --keyring-backend file --keyring-dir ~/.pocket --network main
+pocketd query supplier show-supplier <pokt1-address> --network main
+```
+
+Once staked,
 `pocket-relay-miner relayer validate --config <file> --check-stake` confirms every
 staked service has a backend in your relayer config.
 

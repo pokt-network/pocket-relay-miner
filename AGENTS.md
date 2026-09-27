@@ -75,7 +75,8 @@ the claim and the proof from the served relays and submits them to the chain.
      not read it, and commands, URLs or flags from memory are wrong.
      Facts they will ask about: beta POKT is free from the faucet (mainnet
      POKT is bought); the minimum stake is large, read it from the chain
-     (59,500 POKT on 2026-09-26; divide upokt by 1,000,000); the URL in the
+     (59,500 POKT on 2026-09-26, per supplier, not per service; divide upokt
+     by 1,000,000); the URL in the
      stake is the relayer's public `https://` address, on a DNS name, behind
      a TLS proxy, and must not change (never this machine's IP and port, a
      private address, or a tunnel URL that changes on restart).
