@@ -24,8 +24,8 @@ keys:
 ```yaml
 # /keys/supplier-keys.yaml
 keys:
-  - c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda
-  - fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+  - <64 hex characters: supplier 1's private key>
+  - <64 hex characters: supplier 2's private key>
 ```
 
 The operator address of each supplier is **derived from the key**, so the file

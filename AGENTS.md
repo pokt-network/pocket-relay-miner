@@ -13,7 +13,10 @@ Each one was broken by an agent in a real first-time run.
 2. Never install software or pipe a downloaded script into a shell on the
    human's machine. `pocketd` is installed by the human, with the commands in
    [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
-3. Never ask for, accept or handle a private key, a mnemonic or a passphrase.
+3. Never ask for, accept or handle a private key, a mnemonic or a passphrase,
+   and never ask the human to send one to you. Say instead: "put your key in
+   `examples/docker-compose/config/supplier-keys.local.yaml` yourself (runbook
+   step 9) and tell me when it is there"; then check it with `validate`.
 4. Never invent a service id, a URL, a port, a flag or an amount; take each
    from the docs or the chain, or say you do not know.
 5. Stake and configure only services the human's backends serve. A service
