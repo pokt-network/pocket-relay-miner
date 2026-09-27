@@ -24,8 +24,14 @@ the claim and the proof from the served relays and submits them to the chain.
      key, steps 0 to 8, with the dashboards if they want graphs. It starts
      as shipped, with the example's `my-service`: nothing about their
      services, keys or service ids is needed to start.
-  2. Configure the backends they gave you (step 10), under the on-chain id of
-     the service each one serves, and check each answers. If that service is
+  2. Find the service each of their nodes serves by asking the node, not by
+     its name: [docs/deploy/README.md, "Services"](docs/deploy/README.md#services-what-you-serve-and-how-to-find-yours)
+     lists each service's card (its transports and a health request) and
+     matches an EVM node by its chain id. Tell the human in 1 line what you
+     found ("your Ethereum node is service `eth` on mainnet, JSON_RPC and
+     WEBSOCKET; beta has no such service") and ask only if the node's answer
+     leaves more than 1 candidate. Then configure the backends they gave you
+     (step 10) under that id, 1 per transport, and check each answers. If that service is
      not registered on the network you are testing on (beta has its own
      list), leave the example's service as it is for this test and configure
      theirs when they stake on the network that has it. Never put a backend

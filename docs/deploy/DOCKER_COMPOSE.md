@@ -368,8 +368,11 @@ was checked.
 
 ## Step 10: your services and backends
 
-**First, check each service you want exists on this network**: beta registers
-its own services, not mainnet's.
+**First, find the service each of your nodes serves, and check it exists on
+this network**: beta registers its own services, not mainnet's.
+[docs/deploy/README.md, "Services"](README.md#services-what-you-serve-and-how-to-find-yours)
+lists every service with its transports and matches an EVM node by its chain
+id.
 
 ```bash
 curl -s 'https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000' | grep -o '"id":"<service-id>"'

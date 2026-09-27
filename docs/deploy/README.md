@@ -112,6 +112,63 @@ The miner's `block_time_seconds` must match the network: beta
 (`pocket-lego-testnet`) is roughly 30 seconds, mainnet (`pocket`) roughly 60
 seconds; measure yours.
 
+## Services: what you serve, and how to find yours
+
+A **service** is registered on chain under an id (`eth`, `base`, ...), per
+network: beta and mainnet have different lists. You stake a supplier for
+service ids, and the relayer config lists the same ids under `services:`, each
+with 1 backend per transport. Never invent an id.
+
+Most services carry a **card**: what the service is, which transports
+(`rpc_types`) it expects and what backend answers them, and a health request
+that proves a node is the right one. List every service of a network with its
+card (`sauron-api.infra.pocket.network` for mainnet,
+`sauron-api.beta.infra.pocket.network` for beta):
+
+```bash
+curl -s "https://sauron-api.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000" | python3 -c '
+import base64, json, sys
+for s in json.load(sys.stdin)["service"]:
+    card = json.loads(base64.b64decode(s["metadata"]["card"])) if (s.get("metadata") or {}).get("card") else {}
+    types = ", ".join(t["type"] + " (" + t.get("backend_hint", "") + ")" for t in card.get("rpc_types", []))
+    print(s["id"], "|", s.get("name", ""), "|", card.get("description", "no card"), "|", types)
+'
+```
+
+A line reads `id | name | description | transports`, for example (mainnet,
+2026-09-26):
+
+```
+eth | Ethereum | Ethereum mainnet execution layer JSON-RPC (chain id 1). ... | JSON_RPC (execution client HTTP RPC, default :8545), WEBSOCKET (execution client WS RPC, default :8546)
+```
+
+**To find the service your node serves, ask the node, not the name.** For an
+EVM node, `eth_chainId` gives its chain id; the service is the one whose card
+says that chain id (many descriptions mention Ethereum; only 1 says chain id 1):
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' http://<node>:8545
+```
+
+`{"result":"0x1"}` is chain id 1 (`eth`), `0x2105` is 8453 (`base`). If no
+service on the network matches, that network has no service for your node.
+
+**Transports.** The card's `rpc_types` name what the service expects, in the
+stake file's words; the relayer config names the same transports its own way:
+
+| `rpc_type` (stake file, card) | backend key in `relayer.yaml` |
+|---|---|
+| `JSON_RPC` | `jsonrpc` |
+| `WEBSOCKET` | `websocket` |
+| `REST` | `rest` |
+| `GRPC` | `grpc` |
+| `COMET_BFT` | `cometbft` |
+
+Serve each transport the card expects and your node answers: 1 backend per
+transport in `relayer.yaml`, and 1 endpoint per transport in the stake file.
+The card's health request is a good `health_check` probe for an HTTP backend
+(see below).
+
 ## Backend health checks: turn them on
 
 **Give every HTTP backend (`jsonrpc`, `rest`, `cometbft`) an active health
