@@ -129,6 +129,29 @@ lists them; so does
 `https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000`
 (`sauron-api.infra.pocket.network` for mainnet).
 
+A minimal `stake_config.yaml`, in the format of that page (the addresses are
+yours; 1 endpoint per transport you serve for a service, `rpc_type` one of
+`JSON_RPC`, `REST`, `WEBSOCKET`):
+
+```yaml
+owner_address: pokt1...
+operator_address: pokt1...
+stake_amount: 59500000000upokt
+services:
+  - service_id: <an id registered on this network>
+    endpoints:
+      - publicly_exposed_url: https://relayer.example.com
+        rpc_type: JSON_RPC
+```
+
+`stake_amount` is in `upokt` (1 POKT = 1,000,000 upokt) and at least the
+network's `min_stake`, which governance can change: read it before staking
+with `curl -s https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/supplier/params`
+(`sauron-api.infra.pocket.network` for mainnet; it read `59500000000` on both
+on 2026-09-26). The account also needs POKT left over for fees. Beta registers
+its own services, not mainnet's: if the one you want to serve is not on beta,
+the test on beta stops at the running stack, and staking it needs mainnet.
+
 **The endpoint URL is where gateways on the internet reach your relayer**, not
 your backend node. It is a public DNS name or IP, normally `https://` through a
 TLS proxy in front of the relayer's relay port (8080 in the relayer's config;
