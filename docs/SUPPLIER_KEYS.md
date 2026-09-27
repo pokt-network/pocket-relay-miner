@@ -143,11 +143,22 @@ owner_address: pokt1...
 operator_address: pokt1...
 stake_amount: 59500000000upokt
 services:
-  - service_id: <an id registered on this network>
+  - service_id: <a service id registered on this network>
+    endpoints:
+      - publicly_exposed_url: https://relayer.example.com
+        rpc_type: JSON_RPC
+      - publicly_exposed_url: https://relayer.example.com
+        rpc_type: WEBSOCKET
+  - service_id: <another service id>
     endpoints:
       - publicly_exposed_url: https://relayer.example.com
         rpc_type: JSON_RPC
 ```
+
+**1 supplier, 1 stake file with every service it serves.** Staking again
+replaces the list: a service missing from the new file is deactivated at the
+next session (poktroll v0.1.35, `x/supplier/keeper/msg_server_stake_supplier.go`).
+To add a service later, stake again with the full list.
 
 `stake_amount` is in `upokt` (1 POKT = 1,000,000 upokt) and at least the
 network's `min_stake`, which governance can change: read it before staking
