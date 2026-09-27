@@ -117,11 +117,21 @@ mnemonic. Write the mnemonic down offline: it is the only way to recover the key
 **3. Fund and stake the supplier.** The account needs POKT for the stake and for
 the fee of every claim and proof. On beta, request test POKT for the address
 from the faucet, <https://faucet.beta.pocket.network>. On mainnet there is no
-faucet: POKT is bought, and sent to the address from an account you control. Staking is a chain transaction; its config file
-(owner and operator addresses, stake amount, and each service with the public URL
-gateways reach your relayer at: your relayer's address, never your backend
-node's) and the minimum stake are defined by the network:
-see the [supplier staking config](https://dev.poktroll.com/operate/configs/supplier_staking_config).
+faucet: POKT is bought, and sent to the address from an account you control.
+
+Staking is a chain transaction. Its config file (owner and operator addresses,
+stake amount, and each service with its endpoint URL) and the minimum stake are
+defined by the network: see the
+[supplier staking config](https://dev.poktroll.com/operate/configs/supplier_staking_config).
+
+**The endpoint URL is where gateways on the internet reach your relayer**, not
+your backend node. It is a public DNS name or IP, normally `https://` through a
+TLS proxy in front of the relayer's relay port (8080 in the relayer's config;
+the compose example publishes it on the host as 8180, bound to loopback until
+you change it). Never `localhost` or a private address (`10.x`, `172.16-31.x`,
+`192.168.x`): gateways cannot reach it, and the supplier gets no relays. A
+server at home needs a public address, or a port forward on the router to the
+TLS proxy.
 
 ```bash
 pocketd tx supplier stake-supplier --config stake_config.yaml --from supplier1 \

@@ -296,8 +296,9 @@ from its first **Expect**. To stop everything, `$C --profile observability down 
 ## Step 9: switch to your own keys
 
 **Stop if**: you do not have a staked supplier's private key from a human.
-An agent never generates, funds or stakes a key, and never pastes a key into a
-tracked file. The human creates and stakes it with `pocketd`, in a few steps:
+An agent never generates, funds or stakes a key, never asks for one in the
+chat, and never writes one into a file: the human runs the commands below
+with their own key. The human creates and stakes it with `pocketd`, in a few steps:
 [docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](../SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
 
 `config/supplier-keys.yaml` is tracked and holds only the public key. Your keys

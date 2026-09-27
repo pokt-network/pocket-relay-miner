@@ -91,6 +91,14 @@ are not checked, and breaking them is unsupported.
   Without a health check the relayer finds a dead backend only by failing the
   relays it forwards; see
   [docs/deploy/README.md, "Backend health checks"](docs/deploy/README.md#backend-health-checks-turn-them-on).
+- **Prove the stack before any staking.** Run the runbook's steps with the
+  public example key first: the stack up, `/ready` 200, the height growing. Only
+  then help the human create, fund and stake a real key.
+- **Never ask for, accept or handle a private key, a mnemonic or a
+  passphrase.** Not in the chat, not in a file you write. Tell the human which
+  file to put the key in and how (DOCKER_COMPOSE.md step 9, HOST.md step 3),
+  let them do it, and check the result with `validate` and the miner's
+  `staked_suppliers` count.
 - **Stop and ask a human** before using real supplier keys, spending funds,
   staking, or pointing anything at mainnet. The key in
   `examples/docker-compose/config/supplier-keys.yaml` is public and unstaked,
