@@ -120,9 +120,9 @@ from the faucet, <https://faucet.beta.pocket.network>. On mainnet there is no
 faucet: POKT is bought, and sent to the address from an account you control.
 
 Staking is a chain transaction. Its config file (owner and operator addresses,
-stake amount, and each service with its endpoint URL) and the minimum stake are
-defined by the network: see the
-[supplier staking config](https://dev.poktroll.com/operate/configs/supplier_staking_config).
+stake amount, and each service with its endpoint URL) is described in the
+Pocket Network docs, [Supplier staking](https://docs.pocket.network/node-operators/supplier-staking/);
+the minimum stake is a governance parameter of the network.
 
 **The endpoint URL is where gateways on the internet reach your relayer**, not
 your backend node. It is a public DNS name or IP, normally `https://` through a
