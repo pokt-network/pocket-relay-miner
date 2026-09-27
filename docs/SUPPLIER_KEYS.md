@@ -153,7 +153,7 @@ services:
 network's `min_stake`, which governance can change: read it before staking
 with `curl -s https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/supplier/params`
 (`sauron-api.infra.pocket.network` for mainnet; it read `59500000000` on both
-on 2026-09-26). The account also needs POKT left over for fees. Beta registers
+on 2026-09-26, which is **59,500 POKT**: divide upokt by 1,000,000). The account also needs POKT left over for fees. Beta registers
 its own services, not mainnet's: if the one you want to serve is not on beta,
 the test on beta stops at the running stack, and staking it needs mainnet.
 
@@ -165,6 +165,11 @@ you change it). Never `localhost` or a private address (`10.x`, `172.16-31.x`,
 `192.168.x`): gateways cannot reach it, and the supplier gets no relays. A
 server at home needs a public address, or a port forward on the router to the
 TLS proxy.
+
+The URL is written on chain and must stay the same: changing it takes a new
+stake transaction. Use a DNS name you control, with a certificate for it on the
+TLS proxy (a bare IP rarely gets one). A tunnel or address whose URL changes on
+restart breaks the stake every time it changes.
 
 ```bash
 pocketd tx supplier stake-supplier --config stake_config.yaml --from supplier1 \
