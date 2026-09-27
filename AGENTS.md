@@ -21,7 +21,9 @@ the claim and the proof from the served relays and submits them to the chain.
 - **The human has nothing yet** (no key, no POKT, no stake): the usual case,
   and not a blocker. In this order:
   1. Start now: the Docker Compose runbook on beta with the public example
-     key, steps 0 to 8, with the dashboards if they want graphs.
+     key, steps 0 to 8, with the dashboards if they want graphs. It starts
+     as shipped, with the example's `my-service`: nothing about their
+     services, keys or service ids is needed to start.
   2. Configure the backends they gave you (step 10), under the on-chain id of
      the service each one serves, and check each answers. If that service is
      not registered on the network you are testing on (beta has its own
