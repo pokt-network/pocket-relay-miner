@@ -68,11 +68,23 @@ the claim and the proof from the served relays and submits them to the chain.
      list), leave the example's service as it is for this test and configure
      theirs when they stake on the network that has it. Never put a backend
      under another service's id, and never invent a URL or a port.
-  3. For the key, the POKT and the stake, copy into your reply the commands
-     of [docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it)
-     (installing `pocketd`, the beta faucet, the export, the stake file), as
-     they are written there: a link alone is not enough for a human who will
-     not read it, and commands, URLs or flags from memory are wrong.
+  3. Key, POKT and stake: paste these into your reply exactly; the human runs
+     them. See more (the stake file): [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
+
+     ```bash
+     curl -sLO https://github.com/pokt-network/poktroll/releases/download/v0.1.35/pocket_linux_amd64.tar.gz
+     tar -xzf pocket_linux_amd64.tar.gz      # extracts a single file: pocketd
+     sudo install pocketd /usr/local/bin/
+     pocketd keys add supplier1 --keyring-backend file --keyring-dir ~/.pocket
+     pocketd keys export supplier1 --unarmored-hex --unsafe --keyring-backend file --keyring-dir ~/.pocket
+     pocketd tx supplier stake-supplier --config stake_config.yaml --from supplier1 \
+       --keyring-backend file --keyring-dir ~/.pocket --network main
+     pocketd query supplier show-supplier <pokt1-address> --network main
+     ```
+
+     Beta: `--network beta`, POKT from <https://faucet.beta.pocket.network>.
+     The human puts the exported key in `config/supplier-keys.local.yaml`
+     (runbook step 9), never in your chat.
      Facts they will ask about: beta POKT is free from the faucet (mainnet
      POKT is bought); the minimum stake is large, read it from the chain
      (59,500 POKT on 2026-09-26, per supplier, not per service; divide upokt
