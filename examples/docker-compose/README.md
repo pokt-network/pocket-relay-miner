@@ -31,8 +31,9 @@ its mainnet value in a comment right above it, marked `Mainnet:`.
 
 ### Run it
 
-The relayer and miner run `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0`.
-If that tag is not published yet, build it from the repository root first:
+The relayer and miner run `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0`,
+which `docker compose up` pulls. On a host that cannot reach `ghcr.io`, build
+it from the repository root first:
 
 ```bash
 docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.0 .

@@ -20,8 +20,8 @@ Mainnet is the same runbook with the values in
 
 Every **Expect** below comes from a real run against beta on 2026-09-26, unless
 it says **not verified**. That run used an image built locally from commit
-`daaf6e2`, because `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0` was not
-published yet, and a random key that is not staked anywhere, so its supplier
+`daaf6e2`, a commit from before the v0.1.0 tag, and a random key that is
+not staked anywhere, so its supplier
 address differs from the one the shipped key gives. Ids, timestamps, heights
 and durations differ on every run, and `...` marks lines left out.
 
@@ -83,20 +83,21 @@ docker pull ghcr.io/pokt-network/pocket-relay-miner:v0.1.0
 ```
 
 **Expect**: exit 0 and `Status: Downloaded newer image` or
-`Status: Image is up to date`. **Not verified**: the tag was not published
-when this runbook was checked.
+`Status: Image is up to date`, then the image name on the last line
+(checked on 2026-09-27 against the published tag).
 
-**If not**: `manifest unknown` → the tag is not published yet → build it
-locally with the same name (takes a few minutes), because the compose file
-names that image:
+**If not**: `manifest unknown` → check the name is exactly as above. If
+this host cannot reach `ghcr.io`, build the image locally with the same name
+(takes a few minutes), because the compose file names that image:
 
 ```bash
 git checkout v0.1.0 2>/dev/null || echo "tag v0.1.0 not found: building the current checkout"
 docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.0 .
 ```
 
-If the tag is not in the repository either, the release is not out: the image
-is then whatever commit you have checked out, under the v0.1.0 name.
+If the tag is not in your checkout, fetch it first (`git fetch --tags`):
+otherwise the image is whatever commit you have checked out, under the v0.1.0
+name.
 
 **Stop if**: someone asks you to use another tag. Relayer and miner must run
 the same version.

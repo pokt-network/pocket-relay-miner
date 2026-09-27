@@ -27,21 +27,30 @@ in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 git clone --branch v0.1.0 https://github.com/pokt-network/pocket-relay-miner.git && cd pocket-relay-miner
 ```
 
-**If not**: `Remote branch v0.1.0 not found in upstream origin` → the release
-is not published yet → clone without `--branch`, and in step 1 build from
-source: the release image does not exist either.
-
-**Stop if**: you must run a published release and v0.1.0 is not out yet.
+**If not**: `Remote branch v0.1.0 not found in upstream origin` → check the
+tag is typed exactly `v0.1.0`; the list of tags is at
+<https://github.com/pokt-network/pocket-relay-miner/tags>.
 
 **Stop if**: you do not have the supplier key or the node endpoints. A human
 provides them; do not generate keys or move funds.
 
 ## Step 1: get the binary
 
-Pick 1 of 2 ways. Both give the same binary; relayer and miner must use the
+Pick 1 of 3 ways. All give the same binary; relayer and miner must use the
 same one.
 
-**Run** (build from source; needs Go 1.26.5 and make)
+**Run** (download it from the release; `arm64` instead of `amd64` on ARM)
+
+```bash
+curl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.0/pocket-relay-miner_v0.1.0_linux_amd64.tar.gz
+curl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.0/checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+mkdir -p bin && tar -xzf pocket-relay-miner_v0.1.0_linux_amd64.tar.gz -C bin
+```
+
+**Expect**: `pocket-relay-miner_v0.1.0_linux_amd64.tar.gz: OK`
+
+Or **Run** (build from source; needs Go 1.26.5 and make)
 
 ```bash
 make build-release
