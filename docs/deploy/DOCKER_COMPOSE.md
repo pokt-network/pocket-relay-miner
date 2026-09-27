@@ -51,11 +51,23 @@ missing → install Docker Engine with the compose plugin.
 
 **Stop if**: you cannot install Docker on this machine.
 
+**Run**, to see whether the ports this runbook uses are free:
+
+```bash
+ss -ltn | grep -E ':(8180|9091|3000) ' ; echo "EXIT=$?"
+```
+
+**Expect**: no port lines and `EXIT=1`: 8180 (relays), 9091 (Prometheus) and
+3000 (Grafana) are free.
+
+**If not**: something else already listens there, and a check against that
+port would read the other program, not this stack. Pick free ports and export
+them in this shell before step 4, then use them wherever this runbook says
+8180, 9091 or 3000: `export RELAYER_PORT=18180 PROMETHEUS_PORT=19091 GRAFANA_PORT=13000`.
+
 Also needed: about 10 GiB of free RAM (Redis and the miner are limited to
 4 GiB each, the relayer to 2 GiB; `free -g` shows it in the `available`
-column), the local port 8180 free (if it is taken, run
-`export RELAYER_PORT=18180` in this shell before step 4 and use that port
-wherever this runbook says 8180), and outbound HTTPS to
+column), and outbound HTTPS to
 `sauron-rpc.beta.infra.pocket.network` and
 `sauron-grpc.beta.infra.pocket.network:443`.
 
@@ -331,7 +343,9 @@ was checked.
 ## Step 10: your services and backends
 
 In `config/relayer.yaml`, replace `my-service` with the on-chain service id
-your supplier is staked for, and its `backends.jsonrpc.url` with your
+your supplier is staked for (ids are registered on chain, never invented: list
+them with `pocketd query service all-services --network beta`, or
+`--network main`; mainnet has `eth` and `base`, beta has its own list), and its `backends.jsonrpc.url` with your
 backend's URL, reachable from inside the relayer container. Add 1 entry under
 `services:` per staked service; [config.relayer.example.yaml](../../config.relayer.example.yaml)
 documents every option, including the other transports.

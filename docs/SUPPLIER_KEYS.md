@@ -122,7 +122,10 @@ faucet: POKT is bought, and sent to the address from an account you control.
 Staking is a chain transaction. Its config file (owner and operator addresses,
 stake amount, and each service with its endpoint URL) is described in the
 Pocket Network docs, [Supplier staking](https://docs.pocket.network/node-operators/supplier-staking/);
-the minimum stake is a governance parameter of the network.
+the minimum stake is a governance parameter of the network. Each `service_id`
+must be a service registered on that network, spelled exactly:
+`pocketd query service all-services --network beta` (or `--network main`)
+lists them.
 
 **The endpoint URL is where gateways on the internet reach your relayer**, not
 your backend node. It is a public DNS name or IP, normally `https://` through a
