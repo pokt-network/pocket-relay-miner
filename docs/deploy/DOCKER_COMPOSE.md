@@ -179,7 +179,8 @@ EXIT=0
   `$C logs miner | grep '"level":"error"\|Error:'` and look the message up in
   [Miner does not start](TROUBLESHOOTING.md#miner-does-not-start).
 - `bind: address already in use` → port 8180 is taken → export
-  `RELAYER_PORT=18180`, run `$C down -v`, retry.
+  `RELAYER_PORT=18180`, run `$C down -v`, retry. Some Docker setups print no
+  error and start the container without the port instead: step 5 checks it.
 
 **Stop if**: the same step fails twice after a [reset](#reset).
 
@@ -357,6 +358,19 @@ was checked.
 → do not continue until it is ignored.
 
 ## Step 10: your services and backends
+
+**First, check each service you want exists on this network**: beta registers
+its own services, not mainnet's.
+
+```bash
+curl -s 'https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000' | grep -o '"id":"<service-id>"'
+```
+
+**Expect**: `"id":"<service-id>"`. **If not** (nothing printed) → that
+service is not on beta: leave `my-service` as it is for the beta test, and
+configure the service when you move to the network that has it
+([Switching to mainnet](#switching-to-mainnet)). Never put a backend under
+another service's id.
 
 In `config/relayer.yaml`, replace `my-service` with the on-chain service id
 your supplier is staked for (ids are registered on chain, never invented: list
