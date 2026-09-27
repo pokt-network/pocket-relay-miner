@@ -562,8 +562,14 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 			// auto-recovery), so reading it here flipped the endpoint healthy
 			// and swallowed this very transition log and gauge update.
 			wasUnhealthy := !backend.endpoint.CurrentlyHealthy()
+			// The serving path may have half-opened this endpoint already,
+			// in which case CurrentlyHealthy reads true and the transition
+			// is still unreported — the mark IsHealthy left is the only
+			// record of it, and SetHealthy below is about to clear it.
+			// Claim it here, or the recovery is announced by nobody.
+			recovered := wasUnhealthy || backend.endpoint.ConsumePendingRecovery()
 			backend.endpoint.SetHealthy()
-			if wasUnhealthy {
+			if recovered {
 				// Full reset on recovery: clean slate for the backend
 				backend.endpoint.ResetFailures()
 				backend.consecutiveSuccesses.Store(0)

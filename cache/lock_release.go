@@ -4,6 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -34,15 +37,26 @@ end
 return 0
 `)
 
+// fallbackTokenSeq discriminates fallback tokens minted in the same process.
+var fallbackTokenSeq atomic.Uint64
+
 // newLockToken returns a value unique to one acquisition.
 func newLockToken() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failing is not recoverable here, and a constant token is
-		// worse than none: every instance would then "own" every lock. Fall
-		// back to a value that cannot match any other token, which makes the
-		// release a no-op and lets the TTL do the work.
-		return "unreleasable"
+		// UNREACHABLE on Go >= 1.24: crypto/rand.Read is documented to never
+		// return an error and to crash the process irrecoverably instead. The
+		// branch stays because the signature still returns one and silently
+		// discarding it would be worse, but it is not a path anything takes.
+		//
+		// It is still written to be correct, because a wrong fallback is a
+		// trap that outlives the reason it was wrong. A CONSTANT would let two
+		// holders share a token and delete each other's lock — the exact thing
+		// the token prevents — and so would pid+clock alone, since two
+		// goroutines in ONE process can read the same nanosecond. The counter
+		// is what makes it unique where the collision would actually happen.
+		return fmt.Sprintf("fallback-%d-%d-%d",
+			os.Getpid(), time.Now().UnixNano(), fallbackTokenSeq.Add(1))
 	}
 	return hex.EncodeToString(b[:])
 }

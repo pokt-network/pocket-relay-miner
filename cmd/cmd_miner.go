@@ -401,10 +401,13 @@ func loadMinerConfig(cmd *cobra.Command) (*miner.Config, error) {
 	// Apply flag overrides (flags take precedence over config file)
 	applyFlagOverrides(cmd, config)
 
-	// Generate consumer name from hostname if not set
-	if config.Redis.ConsumerName == "" {
-		hostname, _ := os.Hostname()
-		config.Redis.ConsumerName = fmt.Sprintf("miner-%s-%d", hostname, os.Getpid())
+	// LoadConfig already ran the name through miner.UniqueConsumerName, so it
+	// is re-derived ONLY when the flag overrode it. Doing it unconditionally
+	// appends the host and pid twice ("relay-a-host-1234-host-1234"), which is
+	// still unique but makes the schema's "-<hostname>-<pid> is appended" a
+	// lie and the name in XINFO CONSUMERS unreadable.
+	if cmd.Flags().Changed(flagConsumerName) {
+		config.Redis.ConsumerName = miner.UniqueConsumerName(config.Redis.ConsumerName)
 	}
 
 	return config, nil
