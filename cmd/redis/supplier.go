@@ -87,7 +87,7 @@ Examples:
 
 // getSupplierCacheState reads a supplier's state from the cache (ha:supplier:{address})
 func getSupplierCacheState(ctx context.Context, client *DebugRedisClient, address string) (*supplierCacheState, error) {
-	key := fmt.Sprintf("%s:%s", client.KB().SupplierKeyPrefix(), address)
+	key := client.KB().SupplierStateKey(address)
 	data, err := client.Get(ctx, key).Bytes()
 	if err != nil {
 		return nil, err

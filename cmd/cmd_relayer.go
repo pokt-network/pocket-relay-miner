@@ -457,8 +457,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		logger,
 		redisClient,
 		cache.SupplierCacheConfig{
-			KeyPrefix: redisClient.KB().SupplierKeyPrefix(),
-			FailOpen:  true, // Prioritize serving traffic over strict validation
+			FailOpen: true, // Prioritize serving traffic over strict validation
 		},
 	)
 	// Start supplier cache for pub/sub subscription

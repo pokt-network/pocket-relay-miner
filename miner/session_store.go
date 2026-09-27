@@ -194,8 +194,6 @@ type SessionStore interface {
 
 // SessionStoreConfig contains configuration for the session store.
 type SessionStoreConfig struct {
-	// KeyPrefix is the prefix for all Redis keys.
-	KeyPrefix string
 
 	// SupplierAddress is the supplier this store is for.
 	SupplierAddress string
@@ -220,9 +218,6 @@ func NewRedisSessionStore(
 	redisClient *redisutil.Client,
 	config SessionStoreConfig,
 ) *RedisSessionStore {
-	if config.KeyPrefix == "" {
-		config.KeyPrefix = redisClient.KB().MinerSessionsPrefix()
-	}
 	if config.SessionTTL == 0 {
 		// Default 2h - aligned with CacheTTL to prevent orphaned sessions.
 		// Sessions and SMST trees expire together, avoiding "SMST missing but relay count > 0" warnings.
@@ -238,17 +233,17 @@ func NewRedisSessionStore(
 
 // sessionKey returns the Redis key for a session.
 func (s *RedisSessionStore) sessionKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:%s", s.config.KeyPrefix, s.config.SupplierAddress, sessionID)
+	return s.redisClient.KB().MinerSessionKey(s.config.SupplierAddress, sessionID)
 }
 
 // supplierSessionsKey returns the Redis key for the supplier's session index.
 func (s *RedisSessionStore) supplierSessionsKey() string {
-	return fmt.Sprintf("%s:%s:index", s.config.KeyPrefix, s.config.SupplierAddress)
+	return s.redisClient.KB().MinerSessionsIndexKey(s.config.SupplierAddress)
 }
 
 // stateIndexKey returns the Redis key for a state-based index.
 func (s *RedisSessionStore) stateIndexKey(state SessionState) string {
-	return fmt.Sprintf("%s:%s:state:%s", s.config.KeyPrefix, s.config.SupplierAddress, state)
+	return s.redisClient.KB().MinerSessionStateIndexKey(s.config.SupplierAddress, string(state))
 }
 
 // --- Hash field codec ---------------------------------------------------------

@@ -583,7 +583,6 @@ func (m *SupplierManager) hasPendingSessions(ctx context.Context, supplierAddr s
 		m.logger,
 		m.config.RedisClient,
 		SessionStoreConfig{
-			KeyPrefix:       m.config.RedisClient.KB().MinerSessionsPrefix(),
 			SupplierAddress: supplierAddr,
 			SessionTTL:      m.config.SessionTTL,
 		},
@@ -893,7 +892,6 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 		m.logger,
 		m.config.RedisClient,
 		SessionStoreConfig{
-			KeyPrefix:       m.config.RedisClient.KB().MinerSessionsPrefix(),
 			SupplierAddress: supplier,
 			SessionTTL:      m.config.SessionTTL,
 		},
@@ -1093,7 +1091,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		m.logger,
 		m.config.RedisClient,
 		SessionStoreConfig{
-			KeyPrefix:       m.config.RedisClient.KB().MinerSessionsPrefix(),
 			SupplierAddress: operatorAddr,
 			SessionTTL:      m.config.SessionTTL,
 		},

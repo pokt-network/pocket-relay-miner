@@ -83,6 +83,24 @@ func (kb *KeyBuilder) SuppliersRegistryPrefix() string {
 	return fmt.Sprintf("%s:suppliers", kb.ns.BasePrefix)
 }
 
+// SupplierRegistryKey builds the key for one supplier's registry entry.
+//
+// The registry is the miner-side view (who is claimed by whom); SupplierStateKey
+// is the cache-side stake/services state, under a different prefix. Two layouts,
+// two methods, neither assembled by its caller.
+// Format: {base}:suppliers:{operatorAddress}
+// Example: "ha:suppliers:pokt1abc"
+func (kb *KeyBuilder) SupplierRegistryKey(operatorAddress string) string {
+	return fmt.Sprintf("%s:suppliers:%s", kb.ns.BasePrefix, operatorAddress)
+}
+
+// StreamKey builds the relay WAL stream key for one supplier.
+// Format: {base}:{streams}:{supplierOperatorAddress}
+// Example: "ha:relays:pokt1abc"
+func (kb *KeyBuilder) StreamKey(supplierOperatorAddress string) string {
+	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.StreamsPrefix, supplierOperatorAddress)
+}
+
 // SuppliersRegistryIndexKey returns the index key for suppliers registry.
 // Format: {base}:suppliers:index
 // Example: "ha:suppliers:index"

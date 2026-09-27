@@ -52,7 +52,6 @@ func setupTestCoordinator(t *testing.T) (*SessionCoordinator, *RedisSessionStore
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		client,
 		SessionStoreConfig{
-			KeyPrefix:       client.KB().MinerSessionsPrefix(),
 			SupplierAddress: "pokt1test",
 			SessionTTL:      1 * time.Hour,
 		},

@@ -25,8 +25,7 @@ func newTestSupplierCache(t *testing.T) (*SupplierCache, *redisutil.Client) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	cache := NewSupplierCache(logger, client, SupplierCacheConfig{
-		KeyPrefix: client.KB().SupplierKeyPrefix(),
-		FailOpen:  false,
+		FailOpen: false,
 	})
 
 	return cache, client
