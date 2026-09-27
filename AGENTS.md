@@ -3,6 +3,28 @@
 Read this first. It routes you to the right document and lists what stops a
 deployment from starting.
 
+## Hard rules (read these first)
+
+Each one was broken by an agent in a real first-time run.
+
+1. Run the runbook's commands exactly as written, with its `$C` (project
+   `prm-example`). Do not swap in another tool: `netstat` is missing on many
+   hosts and prints nothing, which reads as "all ports free".
+2. Never install software or pipe a downloaded script into a shell on the
+   human's machine. `pocketd` is installed by the human, with the commands in
+   [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
+3. Never ask for, accept or handle a private key, a mnemonic or a passphrase.
+4. Never invent a service id, a URL, a port, a flag or an amount; take each
+   from the docs or the chain, or say you do not know.
+5. Stake and configure only services the human's backends serve. A service
+   with another name is another service, even if it sounds related.
+6. Stop and ask before anything on mainnet, and before spending or staking.
+7. The stack needs ports 8180, 9091 and 3000 free. Check them (runbook step
+   0). If one is taken, stop and tell the human which.
+8. You have a shell on this machine: run the runbook's commands yourself.
+   Ask the human only for decisions and for what only they can do (their
+   key, their funds, their stake).
+
 ## What this is
 
 Pocket RelayMiner serves relays for Pocket Network suppliers and gets them paid.
@@ -96,21 +118,6 @@ are not checked, and breaking them is unsupported.
 
 ## Rules for an agent running a deployment
 
-**Hard rules**, broken in real first-time runs:
-
-1. Run the runbook's commands exactly as written, with its `$C` (project
-   `prm-example`). Do not swap in another tool: `netstat` is missing on many
-   hosts and prints nothing, which reads as "all ports free".
-2. Never install software or pipe a downloaded script into a shell on the
-   human's machine. `pocketd` is installed by the human, with the commands in
-   [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
-3. Never ask for, accept or handle a private key, a mnemonic or a passphrase.
-4. Never invent a service id, a URL, a port, a flag or an amount; take each
-   from the docs or the chain, or say you do not know.
-5. Stake and configure only services the human's backends serve. A service
-   with another name is another service, even if it sounds related.
-6. Stop and ask before anything on mainnet, and before spending or staking.
-
 - **Size the limits for the load; the examples do not.** The limits in
   `examples/docker-compose/` (Redis and miner 4 GiB, relayer 2 GiB, 2 CPUs
   each) fit a few suppliers with ordinary traffic; they do not absorb a burst
@@ -139,11 +146,6 @@ are not checked, and breaking them is unsupported.
   `curl -s 'https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000'`
   (`sauron-api.infra.pocket.network` for mainnet) lists them. If none matches,
   say so; do not guess one.
-- **Check that the ports are free before starting, and that every check
-  reaches your own stack.** Another program on 8180, 9091 or 3000 answers a
-  health or dashboard check in place of yours: the runbook's step 0 checks the
-  ports and says how to move them; after `up`, `docker compose ps` must show
-  each port published by your containers.
 - Pick 1 runbook, [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md)
   or [docs/deploy/HOST.md](docs/deploy/HOST.md), and run its steps in order
   from Step 0. A step gives **Run** and **Expect**, and **If not** and

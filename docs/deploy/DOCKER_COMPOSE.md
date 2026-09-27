@@ -51,27 +51,22 @@ missing → install Docker Engine with the compose plugin.
 
 **Stop if**: you cannot install Docker on this machine.
 
-**Run**, to see whether the ports this runbook uses are free:
+This stack needs ports 8180 (relays), 9091 (Prometheus) and 3000 (Grafana)
+free on this host.
+
+**Run**
 
 ```bash
 ss -ltn | grep -E ':(8180|9091|3000) ' ; echo "EXIT=$?"
 ```
 
-**Expect**: no port lines and `EXIT=1`: 8180 (relays), 9091 (Prometheus) and
-3000 (Grafana) are free.
+**Expect**: no port lines and `EXIT=1`.
 
-**If not**: something else already listens there, and a check against that
-port would read the other program, not this stack. Pick free ports and write
-them to `examples/docker-compose/.env` before step 4, then use them wherever
-this runbook says 8180, 9091 or 3000:
-
-```bash
-printf 'RELAYER_PORT=18180\nPROMETHEUS_PORT=19091\nGRAFANA_PORT=13000\n' > examples/docker-compose/.env
-```
-
-Compose reads that file on every command, so the ports hold in every new
-shell; an `export` lasts only for the shell that ran it, and a service started
-from another shell falls back to 8180, 9091 or 3000.
+**Stop if**: any line is printed: another program holds that port, and every
+check in this runbook would read it instead of this stack. Tell the human
+which port; they free it, or set other ports in `examples/docker-compose/.env`
+(`RELAYER_PORT`, `PROMETHEUS_PORT`, `GRAFANA_PORT`), and use those wherever
+this runbook says 8180, 9091 or 3000.
 
 Also needed: about 10 GiB of free RAM (Redis and the miner are limited to
 4 GiB each, the relayer to 2 GiB; `free -g` shows it in the `available`
@@ -186,10 +181,7 @@ EXIT=0
 - `container prm-example-miner-1 is unhealthy` →
   `$C logs miner | grep '"level":"error"\|Error:'` and look the message up in
   [Miner does not start](TROUBLESHOOTING.md#miner-does-not-start).
-- `bind: address already in use` → port 8180 is taken → set
-  `RELAYER_PORT=18180` in `examples/docker-compose/.env` (step 0), run
-  `$C down -v`, retry. Some Docker setups print no
-  error and start the container without the port instead: step 5 checks it.
+- `bind: address already in use` → a port is taken → step 0.
 
 **Stop if**: the same step fails twice after a [reset](#reset).
 
@@ -212,22 +204,6 @@ relayer	Up About a minute (healthy)
 **If not**: `miner ... Restarting` → the miner cannot read the chain →
 [Miner does not start](TROUBLESHOOTING.md#miner-does-not-start).
 `relayer ... (unhealthy)` → its `/ready` stays 503 → step 8.
-
-**Run**, to check the relay port reached this stack:
-
-```bash
-$C ps --format '{{.Service}}\t{{.Ports}}' | grep relayer
-```
-
-**Expect**: `relayer	127.0.0.1:8180->8080/tcp` (or the
-`RELAYER_PORT` you set in `.env`), and the same `127.0.0.1:<port>->` form for Prometheus and Grafana
-when the dashboards run.
-
-**If not**: `relayer	8080/tcp` with no `127.0.0.1:...->` → the port was
-taken and Docker started the container without publishing it, with no error
-(measured 2026-09-26). Anything answering on that port is another program:
-`$C down -v`, go back to step 0's port check, export free ports, and start
-again.
 
 ## Step 6: Redis runs with the required memory settings
 
