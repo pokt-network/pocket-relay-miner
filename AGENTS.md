@@ -32,8 +32,9 @@ Each one was broken by an agent in a real first-time run.
    place and a key that does not exist.
 10. To switch keys or networks, follow the runbook's section for it (step 9,
     "Switching to mainnet") line by line, not from memory: the keys file
-    also has to be mounted in `docker-compose.yaml`, and the mainnet values
-    are listed there.
+    also has to be mounted in `docker-compose.yaml`, only once the human has
+    written it (a mount of a missing file breaks the next start), and the
+    mainnet values are listed there.
 
 ## What this is
 
@@ -90,7 +91,8 @@ the claim and the proof from the served relays and submits them to the chain.
      (59,500 POKT on 2026-09-26, per supplier, not per service; divide upokt
      by 1,000,000); the URL in the
      stake is the relayer's public `https://` address, on a DNS name, behind
-     a TLS proxy, and must not change (never this machine's IP and port, a
+     a TLS proxy on 443 (`https://relayer.example.com`, no `:8180`), and must
+     not change (never this machine's IP and port, a
      private address, or a tunnel URL that changes on restart).
      Before the stake file, check that each service they want exists on
      that network (the query below): beta registers its own services, and
