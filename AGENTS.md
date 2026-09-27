@@ -18,6 +18,17 @@ the claim and the proof from the served relays and submits them to the chain.
   [TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md). Words such as
   supplier, stake, session or backend are explained at the top of
   [docs/deploy/README.md](docs/deploy/README.md#words-you-will-meet).
+- **The human has nothing yet** (no key, no POKT, no stake): the usual case,
+  and not a blocker. In this order:
+  1. Start now: the Docker Compose runbook on beta with the public example
+     key, steps 0 to 8, with the dashboards if they want graphs.
+  2. Configure the backends they gave you (step 10) and check each answers.
+  3. For the key, the POKT and the stake, give them the steps in
+     [docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it):
+     where `pocketd` comes from, the beta faucet, the export and the stake
+     file. Do not write those steps from memory; commands, URLs and flags
+     that are not in that section are wrong.
+  4. When they are staked, step 9 switches the key and step 11 checks it.
 - **Dashboards** (optional): Prometheus and Grafana with 7 dashboards, started
   with the compose example's `observability` profile:
   [examples/observability/](examples/observability/README.md).
