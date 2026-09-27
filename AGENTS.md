@@ -22,7 +22,12 @@ the claim and the proof from the served relays and submits them to the chain.
   and not a blocker. In this order:
   1. Start now: the Docker Compose runbook on beta with the public example
      key, steps 0 to 8, with the dashboards if they want graphs.
-  2. Configure the backends they gave you (step 10) and check each answers.
+  2. Configure the backends they gave you (step 10), under the on-chain id of
+     the service each one serves, and check each answers. If that service is
+     not registered on the network you are testing on (beta has its own
+     list), leave the example's service as it is for this test and configure
+     theirs when they stake on the network that has it. Never put a backend
+     under another service's id, and never invent a URL or a port.
   3. For the key, the POKT and the stake, give them the steps in
      [docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it):
      where `pocketd` comes from, the beta faucet, the export and the stake
