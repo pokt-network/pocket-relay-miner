@@ -84,6 +84,11 @@ are not checked, and breaking them is unsupported.
   that run), and [TROUBLESHOOTING.md, Memory and CPU](docs/deploy/TROUBLESHOOTING.md#memory-and-cpu).
   Then tell the human to watch memory as traffic grows: it follows request
   sizes and live sessions, and no example can size it for every mix.
+- **Check that the ports are free before starting, and that every check
+  reaches your own stack.** Another program on 8180, 9091 or 3000 answers a
+  health or dashboard check in place of yours: the runbook's step 0 checks the
+  ports and says how to move them; after `up`, `docker compose ps` must show
+  each port published by your containers.
 - Pick 1 runbook, [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md)
   or [docs/deploy/HOST.md](docs/deploy/HOST.md), and run its steps in order
   from Step 0. A step gives **Run** and **Expect**, and **If not** and
