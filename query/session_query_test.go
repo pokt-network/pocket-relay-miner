@@ -306,9 +306,17 @@ func TestGetSession_CacheInvalidation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, queryCount)
 
-	// Invalidate cache
+	// Expire the cache by aging every entry past the TTL floor. The query
+	// clients no longer expose an InvalidateCache method; freshness is driven
+	// solely by the per-entry TTL (immutableCacheTTLFloor), so simulate elapsed
+	// time by backdating cachedAt beyond it.
 	sessionClient := qc.sessionClient
-	sessionClient.InvalidateCache()
+	sessionClient.sessionCacheMu.Lock()
+	for k, e := range sessionClient.sessionCache {
+		e.cachedAt = time.Now().Add(-2 * immutableCacheTTLFloor)
+		sessionClient.sessionCache[k] = e
+	}
+	sessionClient.sessionCacheMu.Unlock()
 
 	// Next query should hit server again
 	_, err = qc.Session().GetSession(ctx, "pokt1app", "develop", 100)

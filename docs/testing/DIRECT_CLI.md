@@ -8,14 +8,15 @@ signature verification, error codes, and per-protocol behavior.
 ## Why direct instead of PATH?
 
 PATH masks relayer errors: when the relayer returns a `503`, PATH answers the
-client with `200 OK` and an empty body. So a PATH+`hey` run (see
-[PATH_HEY.md](PATH_HEY.md)) is great for throughput and lifecycle testing, but
-it **cannot exercise the relayer's error paths** — a rejected relay looks like
-a success at the gateway.
+client with `200 OK` and an empty body. Any tool that judges a relay by its
+status code therefore counts failures as successes — a real localnet run
+reported `20000/20000 OK` while the WAL sat at `XLEN 0`, meaning not one relay
+was mined. That makes gateway-side load tools wrong for **every** measurement,
+throughput and lifecycle included, not just for error paths.
 
 The `relay` CLI talks to the relayer directly and validates the full response
 (supplier signature + the backend's own error field), so a failure is a
-failure. This is the tool for correctness testing per protocol.
+failure. This is the tool for correctness testing per protocol and for load.
 
 ## Prerequisites
 
@@ -289,10 +290,18 @@ pocket-relay-miner redis submissions --supplier <addr> --failed-only
 pocket-relay-miner redis sessions  --supplier <addr>
 pocket-relay-miner redis smst      --session <session_id>
 pocket-relay-miner redis supplier  --list
+
+# WAL depth: did the miner actually consume what the relayer published?
+# PENDING should fall to 0 once the miner drains the stream.
+pocket-relay-miner redis streams   --supplier <addr>
 ```
 
 The `submissions` output shows, per session-end height and service, the
 `CLAIM_STATUS`, `PROOF_STATUS`, `RELAYS`, and compute units.
+
+`redis streams` is the fastest way to tell a relayer problem from a miner one:
+relays that the relayer never published leave the stream empty, while relays it
+published but the miner never drained leave `PENDING` stuck above zero.
 
 ### Fewer on-chain relays than you sent?
 
@@ -324,6 +333,5 @@ relays, and the on-chain `EventClaimSettled` for the session marks the claim
 ## See also
 
 - [TILT.md](TILT.md) — bringing up the localnet and the port map.
-- [PATH_HEY.md](PATH_HEY.md) — load testing through the PATH gateway.
 - [../CLAIM_PROOF_LIFECYCLE.md](../CLAIM_PROOF_LIFECYCLE.md) — claim/proof windows and the inclusion reconciler.
 - [../REDIS.md](../REDIS.md) — the `redis` debug subcommands in depth.

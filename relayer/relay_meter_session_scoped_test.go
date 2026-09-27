@@ -64,7 +64,7 @@ func newScopedTestMeter(
 		paramCache,
 		nil,
 		nil, // no service factor: exercise the baseLimit formula
-		RelayMeterConfig{RedisKeyPrefix: "ha"},
+		RelayMeterConfig{},
 	)
 	if cuProvider != nil {
 		meter.SetServiceComputeUnitsProvider(cuProvider)

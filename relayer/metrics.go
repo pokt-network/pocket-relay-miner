@@ -111,7 +111,9 @@ var (
 			Name:      "relays_dropped_total",
 			Help:      "Total number of relays served but not mined (optimistic mode: validation failed, meter error, stake exhausted)",
 		},
-		[]string{"service_id", "application", "reason"},
+		// application excluded: on-chain bech32 address is unbounded on a
+		// Counter → TSDB OOM. Per-app detail is in the drop logs.
+		[]string{"service_id", "reason"},
 	)
 
 	// simulatedRelaysTotal counts SIMULATED relays only. It is deliberately

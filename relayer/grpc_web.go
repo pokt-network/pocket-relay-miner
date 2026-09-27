@@ -70,9 +70,3 @@ func (w *GRPCWebWrapper) ServeHTTP(resp http.ResponseWriter, req *http.Request) 
 func (w *GRPCWebWrapper) IsGRPCWebRequest(req *http.Request) bool {
 	return w.wrappedServer.IsGrpcWebRequest(req)
 }
-
-// IsAcceptableGRPCCorsRequest checks if the request is an acceptable
-// CORS preflight request for gRPC-Web.
-func (w *GRPCWebWrapper) IsAcceptableGRPCCorsRequest(req *http.Request) bool {
-	return w.wrappedServer.IsAcceptableGrpcCorsRequest(req)
-}

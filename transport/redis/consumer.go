@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,18 @@ import (
 )
 
 var _ transport.MinedRelayConsumer = (*StreamsConsumer)(nil)
+
+// isStreamNotFoundError reports whether a Redis error indicates the stream (or
+// its consumer group) does not exist yet. Redis surfaces this as a "no such
+// key" error for missing keys and a "NOGROUP" error when the stream/group is
+// absent for group operations (XREADGROUP, XPENDING, XCLAIM, etc.).
+func isStreamNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such key") || strings.Contains(msg, "NOGROUP")
+}
 
 // StreamsConsumer implements MinedRelayConsumer using Redis Streams with consumer groups.
 // It provides exactly-once delivery semantics within the consumer group.
@@ -78,8 +91,12 @@ func NewStreamsConsumer(
 		config.MaxRetries = 3
 	}
 
-	// Channel buffer: 5000 messages to match batch size for smooth pipelining
-	channelBufferSize := int64(5000)
+	// Channel buffer: 5000 messages by default to match batch size for smooth
+	// pipelining; configurable for tests and constrained deployments.
+	channelBufferSize := config.ChannelBufferSize
+	if channelBufferSize <= 0 {
+		channelBufferSize = 5000
+	}
 
 	// Single stream per supplier (simplified architecture)
 	streamName := transport.SupplierStreamName(config.StreamPrefix, config.SupplierOperatorAddress)
@@ -106,10 +123,44 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 	ctx, c.cancelFn = context.WithCancel(ctx)
 	c.mu.Unlock()
 
-	// Start consumer goroutine - consumer group creation happens in connectFn
-	// with proper exponential backoff retry via ReconnectionLoop
+	// Two producer goroutines feed msgCh: the blocking read loop and the
+	// reclaim ticker. The channel is closed by a third goroutine only after
+	// BOTH producers have returned — closing it from either producer would
+	// race the other's in-flight send (send on a closed channel panics and
+	// takes the whole process down).
+	producers := &sync.WaitGroup{}
+	producers.Add(2)
+
+	// Consumer group creation happens in connectFn with proper exponential
+	// backoff retry via ReconnectionLoop.
 	c.wg.Add(1)
-	go c.consumeLoop(ctx)
+	go func() {
+		defer c.wg.Done()
+		defer producers.Done()
+		c.consumeLoop(ctx)
+	}()
+
+	// Reclaim on a timer of its own. The blocking read above uses BLOCK 0, so
+	// XReadGroup never returns redis.Nil on a real server -- which was the ONLY
+	// trigger for claimPendingMessages, making it unreachable: a relay
+	// delivered to a consumer whose pod died before acking sat in that dead
+	// consumer's PEL forever, and its supplier's whole claim silently vanished
+	// (issue #25). The ticker runs regardless of what the read loop is doing;
+	// the lastClaimTime guard inside claimPendingMessages' caller path keeps
+	// the two triggers from stacking.
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		defer producers.Done()
+		c.reclaimLoop(ctx)
+	}()
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		producers.Wait()
+		close(c.msgCh)
+	}()
 
 	c.logger.Info().
 		Str("stream", c.streamName).
@@ -132,13 +183,35 @@ func (c *StreamsConsumer) ensureConsumerGroup(ctx context.Context) error {
 	return nil
 }
 
+// reclaimLoop periodically recovers messages stuck in dead consumers' PELs.
+// It runs as a producer on msgCh alongside consumeLoop; the channel close is
+// owned by the coordinator in Consume, never by either producer.
+func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
+	interval := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.claimMu.Lock()
+			due := time.Since(c.lastClaimTime) >= interval
+			if due {
+				c.lastClaimTime = time.Now()
+			}
+			c.claimMu.Unlock()
+			if due {
+				c.claimPendingMessages(ctx)
+			}
+		}
+	}
+}
+
 // consumeLoop is the main consumption loop with automatic reconnection.
 // This wraps the message consumption with exponential backoff reconnection,
 // matching the pattern in client/block_subscriber.go:145-194
 func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
-	defer c.wg.Done()
-	defer close(c.msgCh)
-
 	// Create reconnection loop
 	reconnectLoop := NewReconnectionLoop(
 		c.logger,
@@ -181,7 +254,6 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			Count:    c.config.BatchSize,
 			Block:    0, // TRUE PUSH: infinite wait, context cancellation interrupts
 		}).Result()
-
 		if err != nil {
 			// With BLOCK 0, context cancellation is the normal shutdown path
 			if ctx.Err() != nil {
@@ -278,62 +350,164 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 	}
 }
 
-// claimPendingMessages claims messages that have been pending too long.
-// This is only called when normal XREADGROUP consumption returns no new messages (idle state).
-// It recovers messages from consumers that crashed without acknowledging.
-func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
-	// Claim idle messages from the single supplier stream
-	messages, _, err := c.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+// claimIdleFromOtherConsumers returns one page of pending entries that belong
+// to OTHER consumers and have been idle past ClaimIdleTimeout, reassigned to
+// this consumer, plus the cursor to continue from ("0-0" when the scan is
+// done).
+//
+// It replaces a plain XAUTOCLAIM, which filters on idle time ALONE and never
+// on whether the owning consumer is alive — verified against a live Redis: a
+// consumer running XAUTOCLAIM reclaims its OWN pending entries. This reclaim
+// exists to rescue deliveries stranded in a DEAD pod's PEL, so re-claiming
+// our own in-flight work is never the goal: under a backlog, anything sitting
+// in the delivery buffer longer than the timeout got re-delivered to us as a
+// duplicate, and the deeper the lag the more duplicates it produced. Dedup
+// kept the accounting right; the wasted work compounded.
+func (c *StreamsConsumer) claimIdleFromOtherConsumers(
+	ctx context.Context,
+	start string,
+) (msgs []redis.XMessage, next string, err error) {
+	minIdle := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
+	if start == "0-0" {
+		start = "-"
+	}
+
+	// No Idle filter here on purpose: the age check belongs to XCLAIM below,
+	// which Redis applies authoritatively (entries younger than MinIdle are
+	// simply not handed over). XPENDING is used only to learn WHO owns each
+	// entry, which XAUTOCLAIM never reveals.
+	pending, err := c.client.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: c.streamName,
+		Group:  c.config.ConsumerGroup,
+		Start:  start,
+		End:    "+",
+		Count:  50, // page size; claimPendingMessages loops until drained
+	}).Result()
+	if err != nil {
+		return nil, "0-0", err
+	}
+	if len(pending) == 0 {
+		return nil, "0-0", nil
+	}
+
+	ids := make([]string, 0, len(pending))
+	for _, entry := range pending {
+		if entry.Consumer == c.config.ConsumerName {
+			continue // our own in-flight delivery, not a stranded one
+		}
+		ids = append(ids, entry.ID)
+	}
+
+	// Advance past the last entry EXAMINED, not the last one claimed: a
+	// reclaimed entry stays in the PEL (owned by us now), so restarting from
+	// the same point would return the same page forever. The successor of
+	// "<ms>-<seq>" is "<ms>-<seq+1>"; computing it avoids the exclusive-range
+	// syntax "(", which not every Redis implementation accepts.
+	next = nextStreamID(pending[len(pending)-1].ID)
+	if len(pending) < 50 {
+		next = "0-0" // last page
+	}
+
+	if len(ids) == 0 {
+		return nil, next, nil // this page was all ours; keep scanning
+	}
+
+	msgs, err = c.client.XClaim(ctx, &redis.XClaimArgs{
 		Stream:   c.streamName,
 		Group:    c.config.ConsumerGroup,
 		Consumer: c.config.ConsumerName,
-		MinIdle:  time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond,
-		Start:    "0-0",
-		Count:    50, // Reasonable batch size for claiming
+		MinIdle:  minIdle,
+		Messages: ids,
 	}).Result()
-
 	if err != nil {
-		// Stream may not exist yet - skip
-		if strings.Contains(err.Error(), "no such key") ||
-			strings.Contains(err.Error(), "NOGROUP") {
+		return nil, "0-0", err
+	}
+	return msgs, next, nil
+}
+
+// nextStreamID returns the smallest stream ID greater than id, so a scan can
+// continue without the exclusive-range syntax.
+func nextStreamID(id string) string {
+	ms, seq, found := strings.Cut(id, "-")
+	if !found {
+		return id
+	}
+	n, err := strconv.ParseUint(seq, 10, 64)
+	if err != nil {
+		return id
+	}
+	return ms + "-" + strconv.FormatUint(n+1, 10)
+}
+
+// claimPendingMessages recovers messages stranded in the PEL of a consumer
+// that crashed without acknowledging them.
+//
+// It drains the WHOLE eligible PEL, not just the first page: each
+// claimIdleFromOtherConsumers call examines at most one page of pending
+// entries and returns the cursor to continue the scan from, and a dead
+// consumer can leave thousands of deliveries behind (a full read batch plus
+// the delivery channel buffer). Stopping after one page would recover them at
+// one page per tick — far slower than the claim window this reclaim exists to
+// beat.
+func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
+	start := "0-0"
+	totalClaimed := 0
+
+	for {
+		messages, next, err := c.claimIdleFromOtherConsumers(ctx, start)
+		if err != nil {
+			// Stream may not exist yet - skip
+			if isStreamNotFoundError(err) {
+				return
+			}
+			if ctx.Err() == nil {
+				c.logger.Debug().Err(err).Msg("error claiming idle messages")
+			}
 			return
 		}
-		if ctx.Err() == nil {
-			c.logger.Debug().Err(err).Msg("error claiming idle messages")
+
+		if len(messages) > 0 {
+			totalClaimed += len(messages)
+			claimedMessages.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(messages)))
 		}
-		return
-	}
 
-	if len(messages) == 0 {
-		return
-	}
+		// Process claimed messages. These are reclaims — mark them so downstream
+		// workers know to run duplicate-detection before incrementing the
+		// per-session counter.
+		for _, message := range messages {
+			msg, parseErr := c.parseMessage(message, c.streamName)
+			if parseErr != nil {
+				deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
+				// Acknowledge AND delete bad message to keep stream clean
+				_ = c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID)
+				continue
+			}
+			msg.IsReclaim = true
 
-	claimedMessages.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(messages)))
-
-	c.logger.Debug().
-		Int("count", len(messages)).
-		Str("stream", c.streamName).
-		Msg("claimed idle messages")
-
-	// Process claimed messages. These are reclaims — mark them so downstream
-	// workers know to run duplicate-detection before inserting into the SMST
-	// and incrementing the per-session counter. Normal XREADGROUP `>` delivery
-	// never redelivers, so only this path needs the dedup check.
-	for _, message := range messages {
-		msg, parseErr := c.parseMessage(message, c.streamName)
-		if parseErr != nil {
-			deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
-			// Acknowledge AND delete bad message to keep stream clean
-			_ = c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID)
-			continue
+			select {
+			case c.msgCh <- msg:
+			case <-ctx.Done():
+				return
+			}
 		}
-		msg.IsReclaim = true
 
-		select {
-		case c.msgCh <- msg:
-		case <-ctx.Done():
+		// A returned cursor of "0-0" means the scan wrapped: the whole PEL has
+		// been examined. The empty-string check is defensive.
+		if next == "0-0" || next == "" {
+			break
+		}
+		start = next
+
+		if ctx.Err() != nil {
 			return
 		}
+	}
+
+	if totalClaimed > 0 {
+		c.logger.Debug().
+			Int("count", totalClaimed).
+			Str("stream", c.streamName).
+			Msg("claimed idle messages")
 	}
 }
 
@@ -454,8 +628,7 @@ func (c *StreamsConsumer) Pending(ctx context.Context) (int64, error) {
 	info, err := c.client.XPending(ctx, c.streamName, c.config.ConsumerGroup).Result()
 	if err != nil {
 		// Stream may not exist yet
-		if strings.Contains(err.Error(), "no such key") ||
-			strings.Contains(err.Error(), "NOGROUP") {
+		if isStreamNotFoundError(err) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("failed to get pending info: %w", err)
@@ -499,7 +672,7 @@ func (c *StreamsConsumer) TrimStream(ctx context.Context, maxAge time.Duration) 
 	trimmed, err := c.client.XTrimMinID(ctx, c.streamName, minID).Result()
 	if err != nil {
 		// Stream may not exist - not an error
-		if strings.Contains(err.Error(), "no such key") {
+		if isStreamNotFoundError(err) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("failed to trim stream %s: %w", c.streamName, err)

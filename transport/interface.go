@@ -90,6 +90,11 @@ type ConsumerConfig struct {
 	// ClaimIdleTimeout is how long a message can be pending before being claimed
 	// by another consumer. This handles consumer crashes.
 	ClaimIdleTimeout int64
+
+	// ChannelBufferSize is the capacity of the delivery channel between the
+	// consumer's read loop and the worker draining it. Defaults to 5000
+	// (matching the default BatchSize) when zero or negative.
+	ChannelBufferSize int64
 }
 
 // SupplierStreamName returns the Redis stream name for a supplier.

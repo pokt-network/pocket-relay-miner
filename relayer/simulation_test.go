@@ -252,7 +252,19 @@ func TestSimVerify_BadSignature(t *testing.T) {
 func TestSimVerify_DedupUnavailableFailsClosed(t *testing.T) {
 	f := newSimFixture(t)
 	rr := f.validRelay(t)
-	f.mr.Close() // Redis down before verify
+
+	// SetError rather than Close. Closing miniredis was the whole setup here,
+	// and it made this test flaky: the dial then fails, go-redis retries it
+	// five times with backoff, and while it retries the freed port is up for
+	// grabs. Package test binaries run concurrently (`go test -p 4`), each
+	// starting its own miniredis on a kernel-assigned port, so one of them can
+	// bind the address this fixture just released -- at which point SetNX
+	// lands on a FOREIGN Redis, succeeds, and Verify returns nil. Proven by
+	// binding a second miniredis to the freed address: the assertion below
+	// fails with "got nil". A pre-hook error keeps the connection and breaks
+	// every command, so there is no port to race for.
+	f.mr.SetError("LOADING Redis is loading the dataset in memory")
+
 	err := f.verifier.Verify(context.Background(), simTestKeyID, rr)
 	require.ErrorIs(t, err, ErrSimDedupUnavailable, "replay dedup must fail closed when Redis is unreachable")
 }

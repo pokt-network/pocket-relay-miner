@@ -435,10 +435,6 @@ properties:
         type: boolean
         description: Enable metering and rate limiting
         default: true
-      redis_key_prefix:
-        type: string
-        description: Prefix for Redis keys used by relay meter
-        default: ha
       fail_behavior:
         type: string
         enum:

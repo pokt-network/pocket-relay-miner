@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -178,16 +177,6 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	// Create metrics collector
 	metrics := NewRelayMetrics()
 
-	// Worker pool pattern with semaphore
-	semaphore := make(chan struct{}, RelayConcurrency)
-	var wg sync.WaitGroup
-
-	// Create rate limiter if RPS targeting is enabled
-	rateLimiter := NewRateLimiter(RelayRPS)
-	if rateLimiter != nil {
-		defer rateLimiter.Stop()
-	}
-
 	// Supplier targeting mirrors the HTTP load test (http.go): fixed supplier
 	// by default, or per-request round-robin across the session's suppliers
 	// with --all-suppliers. Unlike WebSocket, gRPC does not pin the supplier at
@@ -204,26 +193,15 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	}
 	var supplierIdx atomic.Uint64
 
-	logger.Info().
-		Int("count", RelayCount).
-		Int("concurrency", RelayConcurrency).
-		Int("rps", RelayRPS).
-		Msg("starting gRPC load test")
-
-	metrics.Start()
-
-	// Spawn workers
-	for i := 0; i < RelayCount; i++ {
-		// Wait for rate limiter if enabled (pace request launches)
-		WaitForRateLimit(rateLimiter)
-
-		wg.Add(1)
-		semaphore <- struct{}{} // Acquire slot
-
-		go func(reqNum int) {
-			defer wg.Done()
-			defer func() { <-semaphore }() // Release slot
-
+	runLoadTest(RelayCount, RelayConcurrency, RelayRPS, metrics,
+		func() {
+			logger.Info().
+				Int("count", RelayCount).
+				Int("concurrency", RelayConcurrency).
+				Int("rps", RelayRPS).
+				Msg("starting gRPC load test")
+		},
+		func(reqNum int) {
 			// Send relay with timeout
 			requestCtx, cancel := context.WithTimeout(ctx, time.Duration(RelayTimeout)*time.Second)
 			defer cancel()
@@ -297,15 +275,8 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 				Int("request_num", reqNum).
 				Float64("latency_ms", latencyMs).
 				Msg("gRPC relay request succeeded")
-		}(i)
-	}
-
-	// Wait for all workers to finish
-	wg.Wait()
-	metrics.End()
-
-	// Display results
-	fmt.Println(metrics.GetSummary())
+		},
+	)
 
 	return nil
 }

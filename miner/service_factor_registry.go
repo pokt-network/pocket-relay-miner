@@ -170,39 +170,6 @@ func (r *ServiceFactorRegistry) publishInvalidation(ctx context.Context, service
 	return nil
 }
 
-// GetServiceFactor returns the service factor for a given service ID.
-// It checks per-service override first, then falls back to default.
-// Returns (factor, true) if found, (0, false) if not configured.
-func (r *ServiceFactorRegistry) GetServiceFactor(serviceID string) (float64, bool) {
-	// Check per-service override
-	if factor, exists := r.config.ServiceFactors[serviceID]; exists && factor > 0 {
-		return factor, true
-	}
-
-	// Fall back to default
-	if r.config.DefaultServiceFactor > 0 {
-		return r.config.DefaultServiceFactor, true
-	}
-
-	return 0, false
-}
-
-// ClearAll removes all service factor data from Redis.
-// Used primarily for testing.
-func (r *ServiceFactorRegistry) ClearAll(ctx context.Context) error {
-	// Clear default
-	key := r.keyBuilder.ServiceFactorDefaultKey()
-	r.redisClient.Del(ctx, key)
-
-	// Clear per-service
-	for serviceID := range r.config.ServiceFactors {
-		sfKey := r.keyBuilder.ServiceFactorServiceKey(serviceID)
-		r.redisClient.Del(ctx, sfKey)
-	}
-
-	return nil
-}
-
 // nowUnix returns the current Unix timestamp.
 func nowUnix() int64 {
 	return time.Now().Unix()

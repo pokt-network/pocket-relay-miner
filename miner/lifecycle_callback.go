@@ -24,7 +24,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
-	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -33,12 +32,6 @@ import (
 // TestConfig holds test mode flags read once at initialization.
 // These environment variables are only for testing and should not be set in production.
 type TestConfig struct {
-	// ForceClaimTxError forces claim transaction submission to fail (for testing claim error path)
-	ForceClaimTxError bool
-
-	// ForceProofTxError forces proof transaction submission to fail (for testing proof error path)
-	ForceProofTxError bool
-
 	// ClaimDelaySeconds delays claim submission by N seconds (for testing claim window timeout)
 	ClaimDelaySeconds int
 
@@ -54,9 +47,6 @@ var (
 // getTestConfig returns the test configuration, reading environment variables once.
 func getTestConfig() TestConfig {
 	cachedTestConfigOnce.Do(func() {
-		cachedTestConfig.ForceClaimTxError = os.Getenv("TEST_FORCE_CLAIM_TX_ERROR") == "true"
-		cachedTestConfig.ForceProofTxError = os.Getenv("TEST_FORCE_PROOF_TX_ERROR") == "true"
-
 		if delayStr := os.Getenv("TEST_CLAIM_DELAY_SECONDS"); delayStr != "" {
 			if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
 				cachedTestConfig.ClaimDelaySeconds = delay
@@ -152,19 +142,6 @@ type SessionQueryClient interface {
 	GetSession(ctx context.Context, appAddr, serviceID string, blockHeight int64) (*sessiontypes.Session, error)
 }
 
-// ApplicationQueryClient queries application information from the blockchain.
-type ApplicationQueryClient interface {
-	GetApplication(ctx context.Context, appAddress string) (*apptypes.Application, error)
-}
-
-// ServiceFactorProvider provides service factor configuration.
-// This allows the lifecycle callback to check claim amounts against configured ceilings.
-type ServiceFactorProvider interface {
-	// GetServiceFactor returns the service factor for a service.
-	// Returns (factor, true) if configured, (0, false) if not.
-	GetServiceFactor(serviceID string) (float64, bool)
-}
-
 // StreamDeleter deletes session streams after settlement.
 // This stops late relays from being consumed and frees Redis memory.
 type StreamDeleter interface {
@@ -188,14 +165,6 @@ type LifecycleCallback struct {
 	// proofChecker determines if a proof is required for a claimed session.
 	// If nil, proofs are always submitted (legacy behavior).
 	proofChecker *ProofRequirementChecker
-
-	// serviceFactorProvider provides service factor configuration for claim ceiling warnings.
-	// If nil, no ceiling warnings are logged.
-	serviceFactorProvider ServiceFactorProvider
-
-	// appClient queries application data for claim ceiling calculations.
-	// If nil, ceiling warnings are skipped.
-	appClient ApplicationQueryClient
 
 	// serviceClient queries the current service CUPR for the claim-build
 	// CUPR-mismatch guard. If nil, the guard is skipped.
@@ -273,18 +242,6 @@ func NewLifecycleCallback(
 		proofChecker:       proofChecker,
 		sessionLocks:       make(map[string]*sync.Mutex),
 	}
-}
-
-// SetServiceFactorProvider sets the service factor provider for claim ceiling warnings.
-// This is optional - if not set, no ceiling warnings are logged.
-func (lc *LifecycleCallback) SetServiceFactorProvider(provider ServiceFactorProvider) {
-	lc.serviceFactorProvider = provider
-}
-
-// SetAppClient sets the application query client for claim ceiling calculations.
-// This is optional - if not set, ceiling warnings are skipped.
-func (lc *LifecycleCallback) SetAppClient(client ApplicationQueryClient) {
-	lc.appClient = client
 }
 
 // SetServiceClient sets the service query client used by the claim-build
@@ -1076,6 +1033,11 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			Dur("tx_deadline", rawClaimTimeout).
 			Int("batch_size", len(claimMsgs)).
 			Msg("submitting claims")
+
+		// Count each claim built into this batch (attempts; submitted/errors tracked separately).
+		for _, snapshot := range validSnapshots {
+			RecordClaimCreated(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
+		}
 
 		// Submit all claims in a single transaction with retries
 		var lastErr error
@@ -1909,6 +1871,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			Dur("tx_deadline", rawProofTimeout).
 			Int("batch_size", len(proofMsgs)).
 			Msg("submitting proofs")
+
+		// Count each proof built into this batch (attempts; submitted tracked separately).
+		for _, snapshot := range validProofSnapshots {
+			RecordProofCreated(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
+		}
 
 		// Submit all proofs in a single transaction with retries
 		var lastErr error

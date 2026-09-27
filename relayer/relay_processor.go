@@ -288,15 +288,6 @@ func (rp *relayProcessor) getComputeUnits(ctx context.Context, serviceID string,
 	return provider.GetServiceComputeUnits(ctx, serviceID, sessionStartHeight)
 }
 
-// BaseDifficultyProvider always returns the base difficulty (all relays applicable).
-// Useful for testing or when on-chain difficulty queries are not available.
-type BaseDifficultyProvider struct{}
-
-// GetTargetHash returns the base difficulty hash (sessionStartHeight is ignored).
-func (p *BaseDifficultyProvider) GetTargetHash(ctx context.Context, serviceID string, sessionStartHeight int64) ([]byte, error) {
-	return protocol.BaseRelayDifficultyHashBz, nil
-}
-
 // ServiceDifficultyQueryClient queries on-chain service difficulty at a specific height.
 type ServiceDifficultyQueryClient interface {
 	// GetServiceRelayDifficulty returns the relay mining difficulty for a service at a given session start height.
@@ -350,6 +341,5 @@ func (p *QueryDifficultyProvider) GetTargetHash(ctx context.Context, serviceID s
 
 // Verify interface compliance.
 var _ RelayProcessor = (*relayProcessor)(nil)
-var _ DifficultyProvider = (*BaseDifficultyProvider)(nil)
 var _ DifficultyProvider = (*QueryDifficultyProvider)(nil)
 var _ ServiceComputeUnitsProvider = (*serviceCacheComputeUnitsProvider)(nil)

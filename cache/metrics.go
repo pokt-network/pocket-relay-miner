@@ -117,27 +117,6 @@ var (
 		[]string{"cache_type", "level"}, // level indicates which cache level resolved the query
 	)
 
-	// Session cache specific metrics
-	sessionRewardableChecks = observability.SharedFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_rewardable_checks_total",
-			Help:      "Total number of session rewardability checks",
-		},
-		[]string{"result"}, // result: rewardable, non_rewardable
-	)
-
-	sessionMarkedNonRewardable = observability.SharedFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "sessions_marked_non_rewardable_total",
-			Help:      "Total number of sessions marked as non-rewardable",
-		},
-		[]string{"reason"},
-	)
-
 	// Block event metrics
 	blockEventsPublished = observability.SharedFactory.NewCounter(
 		prometheus.CounterOpts{

@@ -15,11 +15,11 @@
 # the flush→proof gap (or hit a non-leader pod).
 #
 # Timing (with current localnet genesis):
-#   num_blocks_per_session:          10
-#   claim_window_open_offset_blocks: 1   → flush at block 10N+1
-#   claim_window_close_offset:       8
-#   proof_window_open_offset:        0   → proof window opens at 10N+9
-#   proof_window_close_offset:       8   → proof window closes at 10N+17
+#   num_blocks_per_session:          20
+#   claim_window_open_offset_blocks: 11  → flush at block 20N+11
+#   claim_window_close_offset:       10
+#   proof_window_open_offset:        1   → proof window opens at 20N+22
+#   proof_window_close_offset:       10  → proof window closes at 20N+32
 #   leader_ttl_seconds:              30  (config)
 #   heartbeat_rate_seconds:          10  (config)
 #
@@ -53,7 +53,7 @@ REDIS_CMD="${REDIS_CMD:-redis-cli}"
 # Load params
 HTTP_RPS="${HTTP_RPS:-300}"
 HTTP_WORKERS="${HTTP_WORKERS:-100}"
-DURATION="${DURATION:-180}"            # covers ~2 session cycles (10 blocks each)
+DURATION="${DURATION:-420}"            # covers ~2 session cycles (20 blocks each)
 MAX_KILLS="${MAX_KILLS:-3}"             # kill leader after N flushes observed
 POLL_INTERVAL="${POLL_INTERVAL:-2}"     # seconds between flush-checks
 KILL_GRACE="${KILL_GRACE:-5}"           # k8s grace period (SIGTERM→SIGKILL)

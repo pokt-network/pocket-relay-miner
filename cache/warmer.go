@@ -233,13 +233,6 @@ func (w *CacheWarmer) warmApp(ctx context.Context, appAddr string) error {
 	return nil
 }
 
-// GetStats returns warmup statistics.
-func (w *CacheWarmer) GetStats() (warmed, failed int64, warmupMs int64) {
-	return atomic.LoadInt64(&w.warmedApps),
-		atomic.LoadInt64(&w.failedApps),
-		atomic.LoadInt64(&w.warmupTimeMs)
-}
-
 // Stop stops the cache warmer and cleans up resources.
 // This should be called when the cache warmer is no longer needed.
 func (w *CacheWarmer) Stop() {

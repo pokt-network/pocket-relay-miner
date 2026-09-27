@@ -80,7 +80,6 @@ health_check:
 
 relay_meter:
   enabled: true
-  redis_key_prefix: "ha"
   fail_behavior: "open"
   cache_ttl: 2h
 

@@ -165,14 +165,6 @@ type SupplierManagerConfig struct {
 	// reconciler + rebroadcaster. See miner.InclusionReconcilerConfig for fields.
 	InclusionReconcilerConfig InclusionReconcilerConfig
 
-	// ServiceFactorProvider provides service factor configuration for claim ceiling warnings.
-	// If nil, no ceiling warnings are logged.
-	ServiceFactorProvider ServiceFactorProvider
-
-	// AppClient queries application data for claim ceiling calculations.
-	// If nil, ceiling warnings are skipped.
-	AppClient ApplicationQueryClient
-
 	// ServiceClient queries the current service CUPR for the claim-build
 	// CUPR-mismatch guard. If nil, the guard is skipped.
 	ServiceClient client.ServiceQueryClient
@@ -1193,13 +1185,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			lifecycleCallbackConfig,
 		)
 
-		// Wire optional providers for claim ceiling warnings
-		if m.config.ServiceFactorProvider != nil {
-			lifecycleCallback.SetServiceFactorProvider(m.config.ServiceFactorProvider)
-		}
-		if m.config.AppClient != nil {
-			lifecycleCallback.SetAppClient(m.config.AppClient)
-		}
 		if m.config.ServiceClient != nil {
 			lifecycleCallback.SetServiceClient(m.config.ServiceClient)
 		}

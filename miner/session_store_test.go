@@ -206,7 +206,6 @@ func TestIncrementRelayCount_PreservesOtherFields(t *testing.T) {
 		RelayCount:              5,
 		TotalComputeUnits:       500,
 		ClaimTxHash:             "",
-		LastWALEntryID:          "wal-123",
 	})
 	require.NoError(t, err)
 
@@ -225,7 +224,6 @@ func TestIncrementRelayCount_PreservesOtherFields(t *testing.T) {
 	assert.Equal(t, int64(100), snapshot.SessionStartHeight)
 	assert.Equal(t, int64(110), snapshot.SessionEndHeight)
 	assert.Equal(t, SessionStateActive, snapshot.State)
-	assert.Equal(t, "wal-123", snapshot.LastWALEntryID)
 }
 
 // --- Save State Index Tests (BUG-6) ---
@@ -294,7 +292,6 @@ func TestSave_HashFieldRoundTrip(t *testing.T) {
 		ClaimedRootHash:   bytes.Repeat([]byte{0x5a}, SMSTRootLen),
 		ClaimTxHash:       "claimtx",
 		ProofTxHash:       "prooftx",
-		LastWALEntryID:    "wal-999",
 		SettlementOutcome: &outcome,
 		SettlementHeight:  &height,
 		SettlementTxHash:  &txHash,
@@ -322,7 +319,6 @@ func TestSave_HashFieldRoundTrip(t *testing.T) {
 	assert.Equal(t, original.ClaimedRootHash, got.ClaimedRootHash)
 	assert.Equal(t, original.ClaimTxHash, got.ClaimTxHash)
 	assert.Equal(t, original.ProofTxHash, got.ProofTxHash)
-	assert.Equal(t, original.LastWALEntryID, got.LastWALEntryID)
 	require.NotNil(t, got.SettlementOutcome)
 	assert.Equal(t, outcome, *got.SettlementOutcome)
 	require.NotNil(t, got.SettlementHeight)
@@ -348,7 +344,6 @@ func TestSave_ClearsStaleOptionalFields(t *testing.T) {
 		SessionEndHeight:        2,
 		State:                   SessionStateActive,
 		ClaimTxHash:             "initial-tx",
-		LastWALEntryID:          "wal-1",
 		ClaimedRootHash:         []byte("roothash"),
 	}))
 
@@ -367,7 +362,6 @@ func TestSave_ClearsStaleOptionalFields(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Empty(t, got.ClaimTxHash, "stale optional string field must not leak")
-	assert.Empty(t, got.LastWALEntryID, "stale optional string field must not leak")
 	assert.Empty(t, got.ClaimedRootHash, "stale optional bytes field must not leak")
 	assert.Nil(t, got.SettlementOutcome)
 }

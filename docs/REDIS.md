@@ -81,7 +81,8 @@ kb.MinerSessionKey(supplier, sessionID)   // ha:miner:sessions:{supplier}:{sessi
 kb.MinerSMSTNodesKey(sessionID)           // ha:smst:{sessionID}:nodes
 kb.StreamKey(supplier)                     // ha:relays:{supplier}
 kb.CacheKey("application", address)       // ha:cache:application:{address}
-kb.MeterKey(sessionID)                    // ha:meter:{sessionID}
+kb.MeterMetaKey(sessionID, supplier)      // ha:meter:{sessionID}:{supplier}:meta
+kb.MeterConsumedKey(sessionID, supplier)  // ha:meter:{sessionID}:{supplier}:consumed
 kb.ServiceFactorDefaultKey()              // ha:service_factor:default
 kb.ServiceFactorServiceKey(serviceID)     // ha:service_factor:service:{serviceID}
 ```

@@ -616,29 +616,12 @@ type KeyringConfig struct {
 	KeyNames []string `yaml:"key_names,omitempty"`
 }
 
-// SupplierCacheConfig contains configuration for the shared supplier state cache.
-type SupplierCacheConfig struct {
-	// KeyPrefix is the Redis key prefix for supplier state.
-	// Default: "ha:supplier"
-	KeyPrefix string `yaml:"key_prefix"`
-
-	// FailOpen determines behavior when Redis is unavailable.
-	// If true, accept relays when cache unavailable (safer for traffic).
-	// If false, reject relays when cache unavailable (safer for validation).
-	// Default: true (fail open - prioritize serving traffic)
-	FailOpen bool `yaml:"fail_open"`
-}
-
 // RelayMeterYAMLConfig contains YAML configuration for the relay meter.
 // This is converted to relayer.RelayMeterConfig when instantiating the RelayMeter.
 type RelayMeterYAMLConfig struct {
 	// Enabled enables relay metering and rate limiting.
 	// Default: true
 	Enabled bool `yaml:"enabled"`
-
-	// RedisKeyPrefix is the prefix for Redis keys used by the relay meter.
-	// Default: "ha"
-	RedisKeyPrefix string `yaml:"redis_key_prefix"`
 
 	// FailBehavior determines behavior when Redis is unavailable.
 	// "open" - Allow relays when Redis down (prioritize availability)
@@ -650,6 +633,17 @@ type RelayMeterYAMLConfig struct {
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
+
+	// RemovedRedisKeyPrefix is the tombstone for the retired redis_key_prefix
+	// setting. Meter keys and the cleanup channel are now built by the shared
+	// KeyBuilder from redis.namespace, so this field configures nothing -- but
+	// the YAML decoder is lenient (unknown fields are silently dropped), and a
+	// config still carrying a non-default value here would otherwise upgrade
+	// into a silent key migration: meter meta/consumed keys move namespaces
+	// mid-session, in-flight consumed counters reset to a fresh budget, and a
+	// rolling deploy meters one session under two different keys. Validate()
+	// turns that case into a hard, explicit error instead.
+	RemovedRedisKeyPrefix string `yaml:"redis_key_prefix,omitempty"`
 }
 
 // CacheWarmupConfig contains configuration for cache pre-warming at startup.
@@ -696,10 +690,9 @@ func DefaultConfig() Config {
 			Addr:    "0.0.0.0:8081",
 		},
 		RelayMeter: RelayMeterYAMLConfig{
-			Enabled:        true,
-			RedisKeyPrefix: "ha",
-			FailBehavior:   "open",
-			CacheTTL:       2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
+			Enabled:      true,
+			FailBehavior: "open",
+			CacheTTL:     2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
 		},
 		HTTPTransport: HTTPTransportConfig{
 			MaxIdleConns:                 500,  // Total idle connections across all hosts (5x for 1000+ RPS)
@@ -763,6 +756,35 @@ func (c *Config) Validate() error {
 
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
+	}
+
+	// The retired relay_meter.redis_key_prefix documented where meter keys
+	// USED to live: "{retired}:meter:...". Compare that against where the
+	// effective namespace puts them now ("{base}:{meter}:..."): equal means
+	// the keys do not move and the stale line is harmless; different means
+	// upgrading would silently relocate meter meta/consumed keys mid-session
+	// (each replica re-creating a fresh budget at the new location), so it is
+	// a hard error. The comparison is on the FULL meter prefix, not just the
+	// base: a custom redis.namespace.meter_prefix moves the keys even when
+	// the base prefix matches the retired value.
+	if c.RelayMeter.RemovedRedisKeyPrefix != "" {
+		ns := c.Redis.Namespace.WithDefaults()
+		legacyMeterPrefix := c.RelayMeter.RemovedRedisKeyPrefix + ":meter"
+		effectiveMeterPrefix := ns.BasePrefix + ":" + ns.MeterPrefix
+		if legacyMeterPrefix != effectiveMeterPrefix {
+			return fmt.Errorf(
+				"relay_meter.redis_key_prefix is no longer supported: meter keys now derive from redis.namespace. "+
+					"Your config would move them from %q to %q, silently resetting in-flight session budgets. "+
+					"Remove the relay_meter.redis_key_prefix line; if your meter keys really live under %q, "+
+					"drain in-flight sessions before upgrading (meter keys are ephemeral and session-scoped, "+
+					"so a drained fleet migrates with no data to move). Do NOT point redis.namespace.base_prefix "+
+					"at the retired value to preserve them: that would relocate the relayer's ENTIRE keyspace, "+
+					"including the WAL stream the miner consumes from",
+				legacyMeterPrefix, effectiveMeterPrefix, legacyMeterPrefix,
+			)
+		}
+		// Equal full meter prefix: nothing moves. Accepted so that configs
+		// shipped with the old default ("ha") upgrade without editing.
 	}
 
 	// Validate Redis pool settings (all are optional, 0 = use defaults)

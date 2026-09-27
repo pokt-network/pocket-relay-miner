@@ -1248,7 +1248,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			threshold := p.getCircuitBreakerThreshold(serviceID, "websocket")
 			transition := wsPool.RecordResult(wsEndpoint, 0, err, threshold)
 			if transition != nil {
-				p.logCircuitBreakerTransition(transition, serviceID, "websocket")
+				logCircuitBreakerTransition(p.logger, transition, serviceID, "websocket", threshold)
 			}
 			return
 		}
@@ -1257,7 +1257,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		threshold := p.getCircuitBreakerThreshold(serviceID, "websocket")
 		transition := wsPool.RecordResult(wsEndpoint, 200, nil, threshold)
 		if transition != nil {
-			p.logCircuitBreakerTransition(transition, serviceID, "websocket")
+			logCircuitBreakerTransition(p.logger, transition, serviceID, "websocket", threshold)
 		}
 
 		// Run bridge (blocking)

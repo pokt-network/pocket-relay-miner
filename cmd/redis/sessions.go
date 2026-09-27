@@ -91,7 +91,6 @@ func showSession(ctx context.Context, client *DebugRedisClient, supplier, sessio
 	fmt.Printf("Total Compute Units: %v\n", snapshot["total_compute_units"])
 	fmt.Printf("Session Start Height: %v\n", snapshot["session_start_height"])
 	fmt.Printf("Session End Height: %v\n", snapshot["session_end_height"])
-	fmt.Printf("Last WAL Entry ID: %v\n", snapshot["last_wal_entry_id"])
 	fmt.Printf("Created At: %v\n", snapshot["created_at"])
 	fmt.Printf("Last Updated At: %v\n", snapshot["last_updated_at"])
 

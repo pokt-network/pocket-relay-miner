@@ -82,6 +82,81 @@
             "amount": "10000000000",
             "denom": "upokt"
           }
+        },
+        {
+          "address": "pokt135udjq8t665vnq4emzdmxz2awm99ae0hckc7sw",
+          "delegatee_gateway_addresses": [
+            "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4"
+          ],
+          "service_configs": [
+            {
+              "service_id": "develop-http-eager"
+            }
+          ],
+          "stake": {
+            "amount": "10000000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "address": "pokt1mcs2ugzqtefy2nw9t7hhn8089t4mettryedgv8",
+          "delegatee_gateway_addresses": [
+            "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4"
+          ],
+          "service_configs": [
+            {
+              "service_id": "develop-websocket-optimistic"
+            }
+          ],
+          "stake": {
+            "amount": "10000000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "address": "pokt1t02uc434darm3d7uuf785jhekvs970885mwxxr",
+          "delegatee_gateway_addresses": [
+            "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4"
+          ],
+          "service_configs": [
+            {
+              "service_id": "develop-grpc-optimistic"
+            }
+          ],
+          "stake": {
+            "amount": "10000000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "address": "pokt1ftyauk249vqx9ph3602sx3xqt5zfhyyjlch5tg",
+          "delegatee_gateway_addresses": [
+            "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4"
+          ],
+          "service_configs": [
+            {
+              "service_id": "develop-stream-optimistic"
+            }
+          ],
+          "stake": {
+            "amount": "10000000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "address": "pokt1lzl42krd9p9g3p74jtlxtyk0shxjpspha7gda0",
+          "delegatee_gateway_addresses": [
+            "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4"
+          ],
+          "service_configs": [
+            {
+              "service_id": "develop-cometbft-optimistic"
+            }
+          ],
+          "stake": {
+            "amount": "10000000000",
+            "denom": "upokt"
+          }
         }
       ],
       "application_list": [],
@@ -275,6 +350,36 @@
           "address": "pokt1ppuhmrhphj0gawkhrs7d45u85gp4fw06tjg3j5",
           "pub_key": null,
           "account_number": "24",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt135udjq8t665vnq4emzdmxz2awm99ae0hckc7sw",
+          "account_number": "3",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1mcs2ugzqtefy2nw9t7hhn8089t4mettryedgv8",
+          "account_number": "3",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1t02uc434darm3d7uuf785jhekvs970885mwxxr",
+          "account_number": "3",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1ftyauk249vqx9ph3602sx3xqt5zfhyyjlch5tg",
+          "account_number": "3",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1lzl42krd9p9g3p74jtlxtyk0shxjpspha7gda0",
+          "account_number": "3",
           "sequence": "0"
         }
       ]
@@ -913,6 +1018,51 @@
               "amount": "1000000000000"
             }
           ]
+        },
+        {
+          "address": "pokt135udjq8t665vnq4emzdmxz2awm99ae0hckc7sw",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1mcs2ugzqtefy2nw9t7hhn8089t4mettryedgv8",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1t02uc434darm3d7uuf785jhekvs970885mwxxr",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1ftyauk249vqx9ph3602sx3xqt5zfhyyjlch5tg",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1lzl42krd9p9g3p74jtlxtyk0shxjpspha7gda0",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
         }
       ],
       "supply": [
@@ -922,7 +1072,7 @@
         },
         {
           "denom": "upokt",
-          "amount": "1001617944032000083"
+          "amount": "1001622944032000083"
         }
       ],
       "denom_metadata": [],
@@ -1221,6 +1371,36 @@
           "id": "develop-cometbft",
           "name": "develop-cometbft",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
+        },
+        {
+          "compute_units_per_relay": 1000,
+          "id": "develop-http-eager",
+          "name": "develop-http-eager",
+          "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
+        },
+        {
+          "compute_units_per_relay": 1000,
+          "id": "develop-websocket-optimistic",
+          "name": "develop-websocket-optimistic",
+          "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
+        },
+        {
+          "compute_units_per_relay": 1000,
+          "id": "develop-grpc-optimistic",
+          "name": "develop-grpc-optimistic",
+          "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
+        },
+        {
+          "compute_units_per_relay": 1000,
+          "id": "develop-stream-optimistic",
+          "name": "develop-stream-optimistic",
+          "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
+        },
+        {
+          "compute_units_per_relay": 1000,
+          "id": "develop-cometbft-optimistic",
+          "name": "develop-cometbft-optimistic",
+          "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
         }
       ],
       "service_list": []
@@ -1233,15 +1413,15 @@
     "shared": {
       "params": {
         "application_unbonding_period_sessions": 2,
-        "claim_window_close_offset_blocks": 8,
-        "claim_window_open_offset_blocks": 1,
+        "claim_window_close_offset_blocks": 10,
+        "claim_window_open_offset_blocks": 11,
         "compute_unit_cost_granularity": 1,
         "compute_units_to_tokens_multiplier": 100,
         "gateway_unbonding_period_sessions": 1,
-        "grace_period_end_offset_blocks": 1,
-        "num_blocks_per_session": 10,
-        "proof_window_close_offset_blocks": 8,
-        "proof_window_open_offset_blocks": 0,
+        "grace_period_end_offset_blocks": 10,
+        "num_blocks_per_session": 20,
+        "proof_window_close_offset_blocks": 10,
+        "proof_window_open_offset_blocks": 1,
         "supplier_unbonding_period_sessions": 20
       }
     },
@@ -1368,6 +1548,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -1458,6 +1718,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -1548,6 +1888,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -1638,6 +2058,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -1728,6 +2228,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -1818,6 +2398,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -1908,6 +2568,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -1998,6 +2738,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -2088,6 +2908,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -2178,6 +3078,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -2268,6 +3248,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -2358,6 +3418,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -2448,6 +3588,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -2538,6 +3758,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {
@@ -2628,6 +3928,86 @@
                 }
               ],
               "service_id": "develop-cometbft"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http-eager"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream-optimistic"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-cometbft-optimistic"
             }
           ],
           "stake": {

@@ -56,7 +56,7 @@ func TestGetSessionParams_ReflectsChangedNumSuppliers(t *testing.T) {
 		&fakeSharedParamCache{params: &sharedtypes.Params{ComputeUnitsToTokensMultiplier: 1, ComputeUnitCostGranularity: 1}},
 		nil, // serviceCache
 		staticServiceFactor{f: 1},
-		RelayMeterConfig{RedisKeyPrefix: "ha"},
+		RelayMeterConfig{},
 	)
 
 	p1, err := meter.getSessionParams(ctx)

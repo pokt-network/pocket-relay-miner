@@ -25,6 +25,12 @@ redis:
   # Namespace configuration (optional - defaults match historical "ha:" prefix structure)
   # All Redis key prefixes are derived from this config.
   # Must match miner configuration for proper operation.
+  # WARNING: changing any prefix on a LIVE deployment relocates the keys it
+  # governs (WAL streams, meter budgets, cache, sessions). In-flight meter
+  # counters are re-created from zero at the new location and old/new replicas
+  # enforce separate budgets during a rolling deploy. Only change prefixes on
+  # a drained fleet (no in-flight sessions), and update relayer and miner
+  # configs together.
   # namespace:
   #   base_prefix: "ha"                # Root prefix for all keys (default: "ha")
   #   cache_prefix: "cache"            # Cache data: ha:cache:* (default: "cache")
@@ -233,8 +239,6 @@ relay_meter:
   # Enable metering and rate limiting
   enabled: true
 
-  # Redis key prefix for metering data
-  redis_key_prefix: "ha"
 
   # Fail behavior when Redis is unavailable
   # - "open": Allow relays when Redis down (prioritize availability)

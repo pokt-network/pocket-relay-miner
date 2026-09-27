@@ -102,10 +102,6 @@ const (
 
 	ComponentSessionLifecycle      = "session_lifecycle"
 	ComponentSessionStore          = "session_store"
-	ComponentClaimPipeline         = "claim_pipeline"
-	ComponentClaimBatcher          = "claim_batcher"
-	ComponentProofPipeline         = "proof_pipeline"
-	ComponentProofBatcher          = "proof_batcher"
 	ComponentProofChecker          = "proof_requirement_checker"
 	ComponentLeaderElector         = "leader_elector"
 	ComponentLeaderController      = "leader_controller"
@@ -119,7 +115,6 @@ const (
 	ComponentCacheOrchestrator     = "cache_orchestrator"
 	ComponentWAL                   = "wal"
 	ComponentDeduplicator          = "deduplicator"
-	ComponentSupplierDrain         = "supplier_drain"
 	ComponentSupplierClaimer       = "supplier_claimer"
 
 	ComponentTxClient = "tx_client"

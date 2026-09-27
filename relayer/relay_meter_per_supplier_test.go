@@ -77,7 +77,7 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 		&fakeSharedParamCache{params: sharedParams},
 		nil, // serviceCache (unused — fallback compute_units=1)
 		staticServiceFactor{f: 0.5},
-		RelayMeterConfig{RedisKeyPrefix: "ha"},
+		RelayMeterConfig{},
 	)
 	require.NoError(t, meter.Start(ctx))
 	defer func() { _ = meter.Close() }()
@@ -181,7 +181,7 @@ func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
 		}},
 		nil,
 		staticServiceFactor{f: 0.5},
-		RelayMeterConfig{RedisKeyPrefix: "ha"},
+		RelayMeterConfig{},
 	)
 	require.NoError(t, meter.Start(ctx))
 	defer func() { _ = meter.Close() }()

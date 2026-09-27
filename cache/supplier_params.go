@@ -290,39 +290,6 @@ func (c *RedisSupplierParamCache) Refresh(ctx context.Context) error {
 	return nil
 }
 
-// InvalidateSupplierParams invalidates the cached supplier params.
-func (c *RedisSupplierParamCache) InvalidateSupplierParams(ctx context.Context) error {
-	c.mu.RLock()
-	if c.closed {
-		c.mu.RUnlock()
-		return fmt.Errorf("cache is closed")
-	}
-	c.mu.RUnlock()
-
-	key := c.keys.SupplierParams()
-
-	// Clear L1
-	c.localCacheMu.Lock()
-	c.localCache = nil
-	c.localCacheSet = false
-	c.localCacheMu.Unlock()
-
-	// Clear L2
-	if err := c.redisClient.Del(ctx, key).Err(); err != nil {
-		return fmt.Errorf("failed to delete from Redis: %w", err)
-	}
-
-	// Notify other instances
-	channel := c.redisClient.KB().SupplierParamsInvalidateChannel()
-	if err := c.redisClient.Publish(ctx, channel, "invalidate").Err(); err != nil {
-		c.logger.Warn().Err(err).Msg("failed to publish invalidation")
-	}
-
-	cacheInvalidations.WithLabelValues("supplier_params", "manual").Inc()
-	c.logger.Info().Msg("supplier params cache invalidated")
-	return nil
-}
-
 // WarmupFromRedis populates L1 cache from Redis.
 func (c *RedisSupplierParamCache) WarmupFromRedis(ctx context.Context) error {
 	c.logger.Info().Msg("warming up supplier params cache from Redis")
