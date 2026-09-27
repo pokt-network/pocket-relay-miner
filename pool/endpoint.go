@@ -25,7 +25,6 @@ type BackendEndpoint struct {
 	// Health state (atomic for lock-free concurrent access)
 	healthy             atomic.Bool
 	consecutiveFailures atomic.Int32
-	lastCheckUnixNano   atomic.Int64
 
 	// Recovery timeout: auto-recover unhealthy endpoints after this duration.
 	// Prevents circuit breaker death spiral when no active health checks are configured.
@@ -140,18 +139,4 @@ func (ep *BackendEndpoint) SetRecoveryTimeout(d time.Duration) {
 // RecoveryTimeout returns the configured recovery timeout.
 func (ep *BackendEndpoint) RecoveryTimeout() time.Duration {
 	return ep.recoveryTimeout
-}
-
-// SetLastCheck records the time of the last health check.
-func (ep *BackendEndpoint) SetLastCheck(t time.Time) {
-	ep.lastCheckUnixNano.Store(t.UnixNano())
-}
-
-// LastCheck returns the time of the last health check.
-func (ep *BackendEndpoint) LastCheck() time.Time {
-	ns := ep.lastCheckUnixNano.Load()
-	if ns == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, ns)
 }

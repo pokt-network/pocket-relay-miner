@@ -2310,11 +2310,7 @@ func (p *ProxyServer) InitializeRelayPipeline() {
 	p.relayPipeline = NewRelayPipeline(
 		p.validator,
 		p.relayMeter,
-		p.responseSigner,
-		p.relayProcessor,
 		p.logger,
-		p.metricRecorder,
-		p.config,
 	)
 
 	p.logger.Info().Msg("relay pipeline initialized successfully")

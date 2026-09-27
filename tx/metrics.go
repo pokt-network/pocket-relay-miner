@@ -18,9 +18,9 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "broadcasts_total",
-			Help:      "Total number of transaction broadcasts",
+			Help:      "Total number of successful transaction broadcasts (a failed broadcast increments claim/proof error counters instead)",
 		},
-		[]string{"supplier", "status"},
+		[]string{"supplier"},
 	)
 
 	txBroadcastLatency = observability.MinerFactory.NewHistogramVec(
@@ -52,7 +52,7 @@ var (
 			Name:      "claim_errors_total",
 			Help:      "Total number of claim submission errors",
 		},
-		[]string{"supplier", "error_type"},
+		[]string{"supplier"},
 	)
 
 	// Proof metrics
@@ -73,7 +73,7 @@ var (
 			Name:      "proof_errors_total",
 			Help:      "Total number of proof submission errors",
 		},
-		[]string{"supplier", "error_type"},
+		[]string{"supplier"},
 	)
 
 	// NOTE: Gas tracking metrics (txGasUsed, txGasWanted, txActualFeeUpokt) removed

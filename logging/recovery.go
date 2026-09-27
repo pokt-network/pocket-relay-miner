@@ -6,20 +6,23 @@ import (
 	"runtime/debug"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-var (
-	// PanicRecoveriesTotal tracks panic recoveries by component.
-	// Exported to allow other packages (e.g., middleware, interceptors) to increment it.
-	PanicRecoveriesTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "ha",
-			Name:      "panic_recoveries_total",
-			Help:      "Total number of panic recoveries by component",
-		},
-		[]string{"component"},
-	)
+// PanicRecoveriesTotal tracks panic recoveries by component.
+// Exported to allow other packages (e.g., middleware, interceptors) to
+// increment it. NOT created through promauto: that would register it in
+// the prometheus DEFAULT registry, which no binary in this repo serves —
+// the panic signal would be written into a registry nobody scrapes.
+// The observability package registers this collector into its
+// SharedRegistry (served by both binaries) at init; logging cannot do
+// that itself without an import cycle.
+var PanicRecoveriesTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "ha",
+		Name:      "panic_recoveries_total",
+		Help:      "Total number of panic recoveries by component",
+	},
+	[]string{"component"},
 )
 
 // RecoverGoRoutine wraps a goroutine with panic recovery and structured logging.
@@ -56,41 +59,4 @@ func RecoverGoRoutine(logger Logger, component string, fn func(context.Context))
 
 		fn(ctx)
 	}
-}
-
-// RecoverWithLogger wraps arbitrary functions with panic recovery and logging.
-// Use this for non-goroutine code paths that need panic protection.
-//
-// Unlike RecoverGoRoutine, this is for synchronous code that you want to protect
-// without spawning a goroutine.
-//
-// Example usage:
-//
-//	err := RecoverWithLogger(logger, "session_builder", "build_session", func() error {
-//	    return buildSession(sessionID)
-//	})
-//	if err != nil {
-//	    // Handle error (could be from panic recovery or function error)
-//	}
-//
-// The function returns the original error from fn(), or creates a new error if
-// a panic occurred.
-func RecoverWithLogger(logger Logger, component string, operation string, fn func() error) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			PanicRecoveriesTotal.WithLabelValues(component).Inc()
-
-			logger.Error().
-				Str(FieldComponent, component).
-				Str(FieldOperation, operation).
-				Str("panic_value", fmt.Sprintf("%v", r)).
-				Str("stack_trace", string(debug.Stack())).
-				Msg("PANIC RECOVERED")
-
-			// Convert panic to error
-			err = fmt.Errorf("panic recovered: %v", r)
-		}
-	}()
-
-	return fn()
 }

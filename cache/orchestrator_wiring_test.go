@@ -182,9 +182,6 @@ func newSmokeOrchestrator(t *testing.T, svcCUPR uint64, appDelegatees []string) 
 	proofCache := NewProofParamsCache(log, redisClient, &smokeProofClient{}, &stubSharedQueryClient{}, 10)
 	supplierParams := NewRedisSupplierParamCache(log, redisClient, &smokeSupplierParamsClient{}, CacheConfig{})
 	supplierCache := NewSupplierCache(log, redisClient, SupplierCacheConfig{})
-	sessionCache := NewRedisSessionCache(log, redisClient,
-		&frozenSessionQueryClient{frozenID: "s", endHeight: 110},
-		&stubSharedQueryClient{}, &stubBlockClient{height: 100}, CacheConfig{})
 
 	// A second service cache instance simulates the RELAYER: it has no
 	// orchestrator and follows only via pub/sub + its own L1 TTL.
@@ -228,7 +225,6 @@ func newSmokeOrchestrator(t *testing.T, svcCUPR uint64, appDelegatees []string) 
 		appCache,
 		leaderSvc,
 		supplierCache,
-		sessionCache,
 		// Mirror NewCacheOrchestrator's own master-pool sizing assumption
 		// (numCPU*8) so its 15% refresh subpool fits.
 		pond.NewPool(runtime.NumCPU()*8),

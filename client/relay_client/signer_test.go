@@ -1,16 +1,12 @@
 package relay_client
 
 import (
-	"context"
 	"encoding/hex"
 	"testing"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	ring_secp256k1 "github.com/pokt-network/go-dleq/secp256k1"
 	"github.com/stretchr/testify/require"
-
-	apptypes "github.com/pokt-network/poktroll/x/application/types"
-	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
 const (
@@ -101,32 +97,6 @@ func TestDeriveAddressFromPubKey(t *testing.T) {
 	require.Equal(t, testExpectedAddress, address, "Address should match expected value")
 }
 
-// TestSignRelayRequest_NilRequest tests that nil request is rejected.
-func TestSignRelayRequest_NilRequest(t *testing.T) {
-	signer, err := NewSignerFromHex(testPrivKeyHex)
-	require.NoError(t, err)
-
-	err = signer.SignRelayRequest(context.Background(), nil, &apptypes.Application{}, nil)
-	require.Error(t, err, "SignRelayRequest should fail with nil request")
-	require.Contains(t, err.Error(), "relay request is nil")
-}
-
-// TestSignRelayRequest_MissingSessionHeader tests that missing session header is rejected.
-func TestSignRelayRequest_MissingSessionHeader(t *testing.T) {
-	signer, err := NewSignerFromHex(testPrivKeyHex)
-	require.NoError(t, err)
-
-	relayRequest := &servicetypes.RelayRequest{
-		Meta: servicetypes.RelayRequestMetadata{
-			SessionHeader: nil, // Missing
-		},
-	}
-
-	err = signer.SignRelayRequest(context.Background(), relayRequest, &apptypes.Application{}, nil)
-	require.Error(t, err, "SignRelayRequest should fail with missing session header")
-	require.Contains(t, err.Error(), "missing session header")
-}
-
 // TestScalarConversion tests private key to scalar conversion.
 func TestScalarConversion(t *testing.T) {
 	// Create test private key
@@ -135,7 +105,7 @@ func TestScalarConversion(t *testing.T) {
 
 	privKey := secp256k1.GenPrivKeyFromSecret(keyBytes)
 
-	// Convert to scalar (same logic as in SignRelayRequest)
+	// Convert to scalar (same logic as in SignRelayRequestWithRing)
 	curve := ring_secp256k1.NewCurve()
 	scalar, err := curve.DecodeToScalar(privKey.Bytes())
 	require.NoError(t, err, "DecodeToScalar should succeed")

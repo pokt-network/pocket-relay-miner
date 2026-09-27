@@ -19,13 +19,6 @@ type MinedRelayPublisher interface {
 	// The publisher should handle transient failures with internal retries.
 	Publish(ctx context.Context, msg *MinedRelayMessage) error
 
-	// PublishBatch sends multiple mined relay messages in a single operation.
-	// More efficient than individual Publish calls for high throughput scenarios.
-	//
-	// All messages in the batch should be for the same supplier (same stream).
-	// Returns error if any message fails to publish.
-	PublishBatch(ctx context.Context, msgs []*MinedRelayMessage) error
-
 	// Close gracefully shuts down the publisher, flushing any buffered messages.
 	Close() error
 }
@@ -46,18 +39,9 @@ type MinedRelayConsumer interface {
 	// Callers should handle channel closure gracefully.
 	Consume(ctx context.Context) <-chan StreamMessage
 
-	// Pending returns the number of messages that have been delivered but not yet acknowledged.
-	// Useful for monitoring consumer health and backpressure.
-	Pending(ctx context.Context) (int64, error)
-
 	// Close gracefully shuts down the consumer.
 	// Any unacknowledged messages will be redelivered to other consumers in the group.
 	Close() error
-
-	// DeleteStream deletes a session stream after the session settles.
-	// This stops the consumer from reading stale messages and frees Redis memory.
-	// Safe to call even if the stream doesn't exist.
-	DeleteStream(ctx context.Context, sessionID string) error
 }
 
 // ConsumerConfig contains configuration for a MinedRelayConsumer.
@@ -82,10 +66,6 @@ type ConsumerConfig struct {
 
 	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption.
 	// This is hardcoded in the consumer and not configurable.
-
-	// MaxRetries is the maximum number of times to retry a failed message.
-	// After this, the message is moved to the dead letter queue.
-	MaxRetries int64
 
 	// ClaimIdleTimeout is how long a message can be pending before being claimed
 	// by another consumer. This handles consumer crashes.

@@ -43,13 +43,11 @@ Cache types:
   - account: ha:cache:account:{address}
   - supplier: ha:supplier:{address}
   - shared_params: ha:cache:shared_params
-  - session_params: ha:cache:session_params
   - proof_params: ha:cache:proof_params
 
 Cache tracking sets:
   - ha:cache:known:applications
   - ha:cache:known:services
-  - ha:cache:known:suppliers
 
 Examples:
   # Inspect a single entry
@@ -157,7 +155,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&cacheType, "type", "", "Cache type (application|service|account|supplier|shared_params|session_params|proof_params|all)")
+	cmd.Flags().StringVar(&cacheType, "type", "", "Cache type (application|service|account|supplier|shared_params|proof_params|all)")
 	cmd.Flags().StringVar(&key, "key", "", "Cache key (address, service ID, etc)")
 	cmd.Flags().BoolVar(&invalidate, "invalidate", false, "Invalidate the cache entry")
 	cmd.Flags().BoolVar(&all, "all", false, "With --invalidate, invalidate every entry matching the type's prefix")
@@ -209,7 +207,7 @@ func inspectCacheKey(ctx context.Context, client *DebugRedisClient, cacheType, k
 }
 
 // cachePattern returns the SCAN pattern and known-set key (if any) for a cache type.
-// For singleton types (shared_params, session_params, proof_params) the pattern
+// For singleton types (shared_params, proof_params) the pattern
 // matches the single Redis key.
 func cachePattern(kb *transportredis.KeyBuilder, cacheType string) (pattern string, knownSet string, err error) {
 	switch cacheType {
@@ -220,11 +218,10 @@ func cachePattern(kb *transportredis.KeyBuilder, cacheType string) (pattern stri
 	case "account":
 		return kb.CacheKey("account", "*"), "", nil
 	case "supplier":
-		return kb.SupplierStatePattern(), kb.CacheKnownKey("suppliers"), nil
+		return kb.SupplierStatePattern(), "", nil // no known-set: nothing writes cache:known:suppliers
 	case "shared_params":
 		return kb.ParamsSharedCacheKey(), "", nil
-	case "session_params":
-		return kb.ParamsSessionKey(), "", nil
+
 	case "proof_params":
 		return kb.ParamsProofKey(), "", nil
 	default:
@@ -533,8 +530,7 @@ func buildCacheKey(kb *transportredis.KeyBuilder, cacheType, key string) string 
 		return kb.SupplierStateKey(key)
 	case "shared_params":
 		return kb.ParamsSharedCacheKey()
-	case "session_params":
-		return kb.ParamsSessionKey()
+
 	case "proof_params":
 		return kb.ParamsProofKey()
 	default:

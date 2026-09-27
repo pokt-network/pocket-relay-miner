@@ -148,14 +148,3 @@ func (p *Pool) NextExcluding(exclude *BackendEndpoint) *BackendEndpoint {
 	}
 	return nil
 }
-
-// Healthy returns only the currently healthy endpoints (for logging/debug).
-func (p *Pool) Healthy() []*BackendEndpoint {
-	var healthy []*BackendEndpoint
-	for _, ep := range p.endpoints {
-		if ep.IsHealthy() {
-			healthy = append(healthy, ep)
-		}
-	}
-	return healthy
-}

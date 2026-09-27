@@ -1,0 +1,10 @@
+# Supplier signing keys — the format parsed by keys/supplier_keys_file.go:
+# a `keys:` list of hex-encoded secp256k1 private keys (64 hex chars =
+# 32 bytes; a "0x" prefix is optional). The supplier address is derived
+# from each private key.
+#
+# Copy to supplier-keys.yaml and replace the placeholder with your real
+# keys. NEVER commit real keys — supplier-keys.yaml is gitignored; keep it
+# that way.
+keys:
+  - "00000000000000000000000000000000000000000000000000000000deadbeef" # placeholder, NOT a real key

@@ -2,7 +2,6 @@ package observability
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 const (
@@ -23,16 +22,6 @@ var (
 )
 
 var (
-	// StartupDurationSeconds tracks startup time of components.
-	StartupDurationSeconds = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "startup_duration_seconds",
-			Help:      "Time taken to start components",
-		},
-		[]string{"component"},
-	)
 
 	// SMSTRedisOperations tracks Redis operations for SMST storage.
 	SMSTRedisOperations = MinerFactory.NewCounterVec(

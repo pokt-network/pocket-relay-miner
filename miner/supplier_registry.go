@@ -30,14 +30,6 @@ type SupplierRegistryData struct {
 	UpdatedAt    int64    `json:"updated_at"`
 }
 
-// SupplierUpdateEvent is published to the Redis channel when suppliers change.
-type SupplierUpdateEvent struct {
-	Action       SupplierUpdateAction `json:"action"`
-	OperatorAddr string               `json:"operator_addr"`
-	Services     []string             `json:"services,omitempty"`
-	Reason       string               `json:"reason,omitempty"`
-}
-
 // SupplierRegistryConfig contains configuration for the SupplierRegistry.
 type SupplierRegistryConfig struct {
 	// KeyPrefix is the prefix for supplier registry keys.
@@ -47,10 +39,6 @@ type SupplierRegistryConfig struct {
 	// IndexKey is the key for the supplier index set.
 	// Default: "ha:suppliers:index"
 	IndexKey string
-
-	// EventChannel is the Redis channel for supplier updates.
-	// Default: "ha:events:supplier_update"
-	EventChannel string
 }
 
 // SupplierRegistry manages supplier registration in Redis.
@@ -73,9 +61,6 @@ func NewSupplierRegistry(
 	if config.IndexKey == "" {
 		config.IndexKey = redisClient.KB().SuppliersRegistryIndexKey()
 	}
-	if config.EventChannel == "" {
-		config.EventChannel = redisClient.KB().SupplierUpdateChannel()
-	}
 
 	return &SupplierRegistry{
 		logger:      logging.ForComponent(logger, logging.ComponentSupplierRegistry),
@@ -84,8 +69,11 @@ func NewSupplierRegistry(
 	}
 }
 
-// PublishSupplierUpdate publishes a supplier update to Redis.
-// It updates the supplier data and publishes an event.
+// PublishSupplierUpdate updates the supplier's registry entry in Redis.
+// The name is historical: it used to also publish to a pub/sub channel that
+// never had a subscriber anywhere in the fleet; the write to the registry
+// keys (read by the CLI and the relayer's supplier discovery) is the real
+// mechanism, and the phantom channel was removed.
 func (r *SupplierRegistry) PublishSupplierUpdate(
 	ctx context.Context,
 	action SupplierUpdateAction,
@@ -145,26 +133,6 @@ func (r *SupplierRegistry) PublishSupplierUpdate(
 			return fmt.Errorf("failed to remove from supplier index: %w", err)
 		}
 	}
-
-	// Publish event
-	event := SupplierUpdateEvent{
-		Action:       action,
-		OperatorAddr: operatorAddr,
-		Services:     services,
-	}
-	eventData, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("failed to marshal event: %w", err)
-	}
-
-	if err := r.redisClient.Publish(ctx, r.config.EventChannel, eventData).Err(); err != nil {
-		return fmt.Errorf("failed to publish event: %w", err)
-	}
-
-	r.logger.Debug().
-		Str("action", string(action)).
-		Str("operator", operatorAddr).
-		Msg("published supplier update")
 
 	supplierRegistryUpdatesTotal.WithLabelValues(string(action)).Inc()
 

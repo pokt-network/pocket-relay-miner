@@ -199,48 +199,35 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 	// Calculate TTL based on session end height
 	ttl := c.calculateSessionTTL(ctx, session.Header.SessionEndBlockHeight)
 
-	// Cache in Redis (L2)
+	// Cache in Redis (L2). The sha256 stays at Debug as a cheap determinism
+	// probe (two instances fetching the same session must log the same hash);
+	// the raw session dump this block used to emit at Info on EVERY L3 miss
+	// predates that investigation closing and violated the per-request
+	// logging policy.
 	data, err = json.Marshal(session)
-	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-	// ADDING SESSION DEBUG INFORMATION SINCE WE ARE OBSERVING THAN SOME SESSIONS ARE NOT DETERMINISTIC AT THE END
-	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-	bytes, _ := session.Marshal()
-	hash := sha256.Sum256(data)
-	sessionHash := hex.EncodeToString(hash[:])
-	c.logger.Info().
-		Str("session_id", session.SessionId).
-		Str("service_id", serviceId).
-		Str("app_address", appAddress).
-		Int64("height", height).
-		Str("raw", string(bytes)).
-		Str("sha256", sessionHash).
-		Msg("session fetched from chain")
-	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 	if err == nil {
+		hash := sha256.Sum256(data)
+		c.logger.Debug().
+			Str("session_id", session.SessionId).
+			Str("service_id", serviceId).
+			Str("app_address", appAddress).
+			Int64("height", height).
+			Str("sha256", hex.EncodeToString(hash[:])).
+			Msg("session fetched from chain")
 		if err = c.redisClient.Set(ctx, key, data, ttl).Err(); err != nil {
 			c.logger.Warn().Err(err).Msg("failed to cache session in Redis")
-		} else {
-			c.logger.Info().
-				Str("session_id", session.SessionId).
-				Str("service_id", serviceId).
-				Str("app_address", appAddress).
-				Int64("height", height).
-				Str("raw", string(data)).
-				Str("sha256", sessionHash).
-				Msg("session write from L3 to L2")
 		}
 	} else {
-		c.logger.Error().Err(err).Msg("failed to marshal session for caching in Redis (Saving to L2")
+		c.logger.Error().Err(err).Msg("failed to marshal session for caching in Redis (L2)")
 	}
 
 	// Cache in L1
 	c.storeSession(key, height, session)
-	c.logger.Info().
+	c.logger.Debug().
 		Str("app_address", appAddress).
 		Str("service_id", serviceId).
 		Int64("height", height).
-		Msg("session cache miss (L3) → stored in L1 and L2")
+		Msg("session cache miss (L3) -> stored in L1 and L2")
 
 	return session, nil
 }

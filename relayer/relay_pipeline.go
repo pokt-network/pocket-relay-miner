@@ -15,33 +15,21 @@ import (
 //
 // This is the single source of truth for relay processing.
 type RelayPipeline struct {
-	validator      RelayValidator
-	relayMeter     *RelayMeter
-	responseSigner *ResponseSigner
-	relayProcessor RelayProcessor
-	logger         logging.Logger
-	metricRecorder *MetricRecorder
-	config         *Config
+	validator  RelayValidator
+	relayMeter *RelayMeter
+	logger     logging.Logger
 }
 
 // NewRelayPipeline creates a new relay processing pipeline.
 func NewRelayPipeline(
 	validator RelayValidator,
 	relayMeter *RelayMeter,
-	responseSigner *ResponseSigner,
-	relayProcessor RelayProcessor,
 	logger logging.Logger,
-	metricRecorder *MetricRecorder,
-	config *Config,
 ) *RelayPipeline {
 	return &RelayPipeline{
-		validator:      validator,
-		relayMeter:     relayMeter,
-		responseSigner: responseSigner,
-		relayProcessor: relayProcessor,
-		logger:         logging.ForComponent(logger, logging.ComponentRelayPipeline),
-		metricRecorder: metricRecorder,
-		config:         config,
+		validator:  validator,
+		relayMeter: relayMeter,
+		logger:     logging.ForComponent(logger, logging.ComponentRelayPipeline),
 	}
 }
 
@@ -49,9 +37,6 @@ func NewRelayPipeline(
 type RelayContext struct {
 	// Request is the relay request from the gateway client
 	Request *servicev1.RelayRequest
-
-	// Response is the relay response from the backend (to be signed)
-	Response *servicev1.RelayResponse
 
 	// ServiceID is the service identifier
 	ServiceID string
@@ -61,12 +46,6 @@ type RelayContext struct {
 
 	// SessionID is the session identifier
 	SessionID string
-
-	// Payload is the backend response payload
-	Payload []byte
-
-	// ComputeUnits is the compute units for this relay
-	ComputeUnits uint64
 
 	// ArrivalBlockHeight is the block height when the relay arrived
 	ArrivalBlockHeight int64

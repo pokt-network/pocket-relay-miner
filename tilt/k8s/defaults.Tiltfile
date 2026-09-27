@@ -3,10 +3,10 @@
 def get_defaults():
     """Returns default configuration for Tilt environment"""
     return {
-        "hot_reload": True,
+
         "global": {
             "image": "pocket-relay-miner",
-            "namespace": "default",
+
             "debug": True,
         },
         "validator": {
@@ -14,7 +14,7 @@ def get_defaults():
             "image": "ghcr.io/pokt-network/pocketd",
             "tag": "0.1.34",
             "chain_id": "pocket",
-            "clean_on_restart": True,
+
             "ports": {
                 "grpc": 9090,
                 "rpc": 26657,
@@ -65,7 +65,7 @@ def get_defaults():
             },
             "grafana": {
                 "port": 3000,
-                "dashboards": ["redis", "relayer", "miner"],
+
             },
         },
         # PATH gateway (optional - for testing full relay flow with gateway signing)

@@ -45,10 +45,6 @@ type Config struct {
 	// Default: 100
 	BatchSize int64 `yaml:"batch_size"`
 
-	// AckBatchSize is the number of messages to acknowledge in a batch.
-	// Default: 50
-	AckBatchSize int64 `yaml:"ack_batch_size"`
-
 	// HotReloadEnabled enables hot-reload of keys.
 	// Default: true
 	HotReloadEnabled bool `yaml:"hot_reload_enabled"`
@@ -107,9 +103,6 @@ type Config struct {
 
 	// BlockHealthMonitor configures block time health monitoring.
 	BlockHealthMonitor BlockHealthConfig `yaml:"block_health_monitor,omitempty"`
-
-	// SettlementMonitor configures on-chain claim settlement tracking.
-	SettlementMonitor SettlementMonitorConfigYAML `yaml:"settlement_monitor,omitempty"`
 
 	// DefaultServiceFactor is the global serviceFactor applied to all services.
 	// If set, effectiveLimit = appStake × DefaultServiceFactor
@@ -213,13 +206,6 @@ type BalanceMonitorConfigYAML struct {
 	StakeCriticalProofThreshold int64 `yaml:"stake_critical_proof_threshold,omitempty"`
 }
 
-// SettlementMonitorConfigYAML contains configuration for on-chain settlement tracking.
-type SettlementMonitorConfigYAML struct {
-	// Enabled enables on-chain claim settlement tracking.
-	// Default: false
-	Enabled bool `yaml:"enabled,omitempty"`
-}
-
 // BlockHealthConfig contains configuration for block time health monitoring.
 type BlockHealthConfig struct {
 	// Enabled enables block time health monitoring.
@@ -256,11 +242,6 @@ type WorkerPoolConfigYAML struct {
 	// Used for startup queries, cache refresh, supplier registry.
 	// Default: 20
 	QueryWorkers int `yaml:"query_workers,omitempty"`
-
-	// SettlementWorkers is the fixed number of workers for settlement event processing.
-	// block_results can be 1GB+ on mainnet, needs dedicated workers.
-	// Default: 2
-	SettlementWorkers int `yaml:"settlement_workers,omitempty"`
 }
 
 // RedisConfig embeds shared RedisConfig and adds miner-specific fields.
@@ -413,18 +394,6 @@ func (c TransactionConfig) InclusionReconcilerConfig() InclusionReconcilerConfig
 	return cfg
 }
 
-type SupplierConfig struct {
-	// OperatorAddress is the supplier's operator address (bech32).
-	OperatorAddress string `yaml:"operator_address"`
-
-	// SigningKeyName is the name of the key in the keyring used for signing.
-	SigningKeyName string `yaml:"signing_key_name"`
-
-	// Services is a list of service IDs this supplier serves.
-	// Used for filtering relays from the stream.
-	Services []string `yaml:"services,omitempty"`
-}
-
 // Validate validates the configuration.
 func (c *Config) Validate() error {
 	if c.Redis.URL == "" {
@@ -460,9 +429,22 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("pocket_node.query_node_grpc_url is required")
 	}
 
+	// The retired keys.keys_dir loaded supplier keys from a directory. A
+	// lenient decoder would drop the field and boot WITHOUT those keys: the
+	// miner claims and proves nothing for those suppliers and the revenue
+	// loss carries no diagnostic. Any non-empty value is therefore a hard error.
+	if c.Keys.RemovedKeysDir != "" {
+		return fmt.Errorf(
+			"keys.keys_dir is no longer supported: migrate the keys in %q to a keys_file "+
+				"(supplier addresses are derived from each private key) or import them into the "+
+				"keyring, then remove the keys_dir line",
+			c.Keys.RemovedKeysDir,
+		)
+	}
+
 	// Keys config is required (suppliers are auto-discovered from keys)
 	if !c.HasKeySource() {
-		return fmt.Errorf("keys config is required (at least one of: keys_file, keys_dir, or keyring)")
+		return fmt.Errorf("keys config is required (at least one of: keys_file or keyring)")
 	}
 
 	// Validate keyring config if provided
@@ -519,14 +501,6 @@ func (c *Config) GetBatchSize() int64 {
 		return c.BatchSize
 	}
 	return 1000 // Default (increased from 100 for better throughput)
-}
-
-// GetAckBatchSize returns the ack batch size with defaults.
-func (c *Config) GetAckBatchSize() int64 {
-	if c.AckBatchSize > 0 {
-		return c.AckBatchSize
-	}
-	return 50 // Default
 }
 
 // GetTxGasLimit returns the transaction gas limit with defaults.
@@ -683,11 +657,6 @@ func (c *Config) GetBlockHealthSlownessThreshold() float64 {
 	return 1.5 // Default: 50% slower than expected
 }
 
-// GetSettlementMonitorEnabled returns whether on-chain settlement tracking is enabled.
-func (c *Config) GetSettlementMonitorEnabled() bool {
-	return c.SettlementMonitor.Enabled
-}
-
 // GetCacheTTL returns the cache TTL for Redis cached data.
 func (c *Config) GetCacheTTL() time.Duration {
 	if c.CacheTTL > 0 {
@@ -816,8 +785,8 @@ func maxInt(a, b int) int {
 
 // GetMasterPoolSize returns the master pool size, auto-calculating if not explicitly set.
 // Formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
-// Overhead = query_workers (+ settlement_workers if settlement_monitor enabled)
-// Example (4 CPU, 78 suppliers, settlement enabled): max(4×4, 78×6) + 22 = max(16, 468) + 22 = 490
+// Overhead = query_workers
+// Example (4 CPU, 78 suppliers): max(4×4, 78×6) + 20 = max(16, 468) + 20 = 488
 func (c *Config) GetMasterPoolSize(numSuppliers int) int {
 	if c.WorkerPools.MasterPoolSize > 0 {
 		return c.WorkerPools.MasterPoolSize
@@ -827,9 +796,6 @@ func (c *Config) GetMasterPoolSize(numSuppliers int) int {
 	cpuBased := getEffectiveCPUCount() * c.GetCPUMultiplier()
 	supplierBased := numSuppliers * c.GetWorkersPerSupplier()
 	overhead := c.GetQueryWorkers()
-	if c.GetSettlementMonitorEnabled() {
-		overhead += c.GetSettlementWorkers()
-	}
 
 	baseSize := cpuBased
 	if supplierBased > cpuBased {
@@ -896,15 +862,6 @@ func (c *Config) GetQueryWorkers() int {
 	return 20 // Default
 }
 
-// GetSettlementWorkers returns the fixed number of settlement workers.
-// Default: 2
-func (c *Config) GetSettlementWorkers() int {
-	if c.WorkerPools.SettlementWorkers > 0 {
-		return c.WorkerPools.SettlementWorkers
-	}
-	return 2 // Default
-}
-
 // GetChainID returns the chain ID for transaction signing.
 // Default: "pocket" (mainnet) for backward compatibility
 func (c *Config) GetChainID() string {
@@ -950,15 +907,11 @@ func DefaultConfig() *Config {
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
-		AckBatchSize:           50,
 		HotReloadEnabled:       true,
 		// SessionTTL: 0 means use CacheTTL (default 2h) - ensures SMST trees and sessions expire together
 		// This prevents orphaned sessions causing "SMST missing but relay count > 0" warnings
 		CacheTTL:              2 * time.Hour,  // Covers ~15 session lifecycles at 30s blocks
 		SubmissionTrackingTTL: 24 * time.Hour, // 24h for debugging (was 7 days)
-		SettlementMonitor: SettlementMonitorConfigYAML{
-			Enabled: false, // Off by default — operators opt-in
-		},
 		BalanceMonitor: BalanceMonitorConfigYAML{
 			Enabled:                     true,    // Enable by default
 			BalanceThresholdUpokt:       1000000, // 1 POKT = 1,000,000 upokt
@@ -998,6 +951,5 @@ func LoadConfig(path string) (*Config, error) {
 // HasKeySource returns true if at least one key source is configured.
 func (c *Config) HasKeySource() bool {
 	return c.Keys.KeysFile != "" ||
-		c.Keys.KeysDir != "" ||
 		(c.Keys.Keyring != nil && c.Keys.Keyring.Backend != "")
 }

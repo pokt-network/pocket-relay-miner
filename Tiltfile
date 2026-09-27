@@ -15,8 +15,6 @@ metadata:
   name: redis-operator
 """))
 
-# Load Tilt extensions
-load("ext://restart_process", "docker_build_with_restart")
 load("ext://secret", "secret_create_generic")
 
 # Load local modules
@@ -43,7 +41,6 @@ print("  Chain ID: {}".format(config["validator"]["chain_id"]))
 print("  Relayers: {}".format(config["relayer"]["count"]))
 print("  Miners: {}".format(config["miner"]["count"]))
 print("  Redis mode: {}".format(config["redis"]["mode"]))
-print("  Hot reload: {}".format(config["hot_reload"]))
 print("  Observability: {}".format(config["observability"]["enabled"]))
 print()
 

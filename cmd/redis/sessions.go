@@ -29,7 +29,7 @@ Session data is stored at:
   - Index: ha:miner:sessions:{supplier}:index
   - State Index: ha:miner:sessions:{supplier}:state:{state}
 
-States: active, claiming, claimed, proving, settled, expired`,
+States: active, claiming, claimed, claim_window_closed, claim_tx_error, claim_missing, claim_skipped, proving, proved, probabilistic_proved, proof_window_closed, proof_tx_error`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			client, err := CreateRedisClient(ctx)
@@ -55,7 +55,7 @@ States: active, claiming, claimed, proving, settled, expired`,
 
 	cmd.Flags().StringVar(&supplierAddr, "supplier", "", "Supplier operator address (required)")
 	cmd.Flags().StringVar(&sessionID, "session", "", "Specific session ID to inspect")
-	cmd.Flags().StringVar(&state, "state", "", "Filter by state (active|claiming|claimed|proving|settled|expired)")
+	cmd.Flags().StringVar(&state, "state", "", "Filter by state (see command help for the full list)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
 	_ = cmd.MarkFlagRequired("supplier")
 

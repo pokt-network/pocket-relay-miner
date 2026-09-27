@@ -142,14 +142,6 @@ type SessionQueryClient interface {
 	GetSession(ctx context.Context, appAddr, serviceID string, blockHeight int64) (*sessiontypes.Session, error)
 }
 
-// StreamDeleter deletes session streams after settlement.
-// This stops late relays from being consumed and frees Redis memory.
-type StreamDeleter interface {
-	// DeleteStream deletes the stream for a session.
-	// Safe to call even if the stream doesn't exist.
-	DeleteStream(ctx context.Context, sessionID string) error
-}
-
 // LifecycleCallback implements SessionLifecycleCallback to handle claim and proof submission.
 // It coordinates SMST operations with transaction submission and uses proper timing spread.
 type LifecycleCallback struct {
@@ -169,10 +161,6 @@ type LifecycleCallback struct {
 	// serviceClient queries the current service CUPR for the claim-build
 	// CUPR-mismatch guard. If nil, the guard is skipped.
 	serviceClient pocktclient.ServiceQueryClient
-
-	// streamDeleter deletes session streams after settlement.
-	// If nil, streams are not deleted (will rely on TTL expiration).
-	streamDeleter StreamDeleter
 
 	// submissionTracker tracks claim/proof submissions to Redis for debugging.
 	// If nil, submissions are not tracked.
@@ -248,12 +236,6 @@ func NewLifecycleCallback(
 // CUPR-mismatch guard. Optional — if not set, the guard is skipped.
 func (lc *LifecycleCallback) SetServiceClient(client pocktclient.ServiceQueryClient) {
 	lc.serviceClient = client
-}
-
-// SetStreamDeleter sets the stream deleter for cleanup after session settlement.
-// This is optional - if not set, streams rely on TTL expiration.
-func (lc *LifecycleCallback) SetStreamDeleter(deleter StreamDeleter) {
-	lc.streamDeleter = deleter
 }
 
 // SetSubmissionTracker sets the submission tracker for debugging claim/proof submissions.
@@ -2107,13 +2089,6 @@ func (lc *LifecycleCallback) OnSessionProved(ctx context.Context, snapshot *Sess
 		logger.Warn().Err(err).Msg("failed to delete SMST tree")
 	}
 
-	// Delete the session stream to stop consuming late relays
-	if lc.streamDeleter != nil {
-		if err := lc.streamDeleter.DeleteStream(ctx, snapshot.SessionID); err != nil {
-			logger.Warn().Err(err).Msg("failed to delete session stream")
-		}
-	}
-
 	// Update snapshot manager
 	if lc.sessionCoordinator != nil {
 		if err := lc.sessionCoordinator.OnSessionProved(ctx, snapshot.SessionID); err != nil {
@@ -2152,12 +2127,6 @@ func (lc *LifecycleCallback) OnClaimSkipped(ctx context.Context, snapshot *Sessi
 		logger.Warn().Err(err).Msg("failed to delete SMST tree on claim_skipped")
 	}
 
-	if lc.streamDeleter != nil {
-		if err := lc.streamDeleter.DeleteStream(ctx, snapshot.SessionID); err != nil {
-			logger.Warn().Err(err).Msg("failed to delete session stream on claim_skipped")
-		}
-	}
-
 	if lc.sessionCoordinator != nil {
 		if err := lc.sessionCoordinator.OnClaimSkipped(ctx, snapshot.SessionID); err != nil {
 			logger.Warn().Err(err).Msg("failed to update coordinator on claim_skipped")
@@ -2193,13 +2162,6 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 	// Clean up SMST tree
 	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
 		logger.Warn().Err(err).Msg("failed to delete SMST tree")
-	}
-
-	// Delete the session stream to stop consuming late relays
-	if lc.streamDeleter != nil {
-		if err := lc.streamDeleter.DeleteStream(ctx, snapshot.SessionID); err != nil {
-			logger.Warn().Err(err).Msg("failed to delete session stream")
-		}
 	}
 
 	// Update snapshot manager

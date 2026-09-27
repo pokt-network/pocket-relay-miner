@@ -16,17 +16,6 @@ type KeyManager interface {
 	// ListSuppliers returns all operator addresses that have signing keys.
 	ListSuppliers() []string
 
-	// HasKey returns true if a key exists for the given operator address.
-	HasKey(operatorAddr string) bool
-
-	// AddKey dynamically adds a new supplier key.
-	// If a key already exists for this address, it is replaced.
-	AddKey(operatorAddr string, key cryptotypes.PrivKey) error
-
-	// RemoveKey removes a supplier key.
-	// Returns error if the key doesn't exist.
-	RemoveKey(operatorAddr string) error
-
 	// Reload reloads keys from all configured sources.
 	// This is called automatically on file changes if hot-reload is enabled.
 	Reload(ctx context.Context) error
@@ -68,21 +57,7 @@ type KeyProvider interface {
 
 // KeyManagerConfig contains configuration for the KeyManager.
 type KeyManagerConfig struct {
-	// KeyringBackend is the Cosmos keyring backend type.
-	// Options: "file", "os", "test"
-	KeyringBackend string
-
-	// KeyringDir is the directory containing the keyring.
-	// Default: ~/.pocket
-	KeyringDir string
-
-	// AdditionalKeysDir is an optional directory containing additional key files.
-	// Key files are YAML/JSON with operator address and hex-encoded private key.
-	AdditionalKeysDir string
 
 	// HotReloadEnabled enables automatic key reload on file changes.
 	HotReloadEnabled bool
-
-	// HotReloadInterval is how often to check for file changes (if not using fsnotify).
-	HotReloadInterval int64 // seconds
 }

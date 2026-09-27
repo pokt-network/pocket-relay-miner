@@ -57,12 +57,10 @@ type StreamsConsumer struct {
 
 // NewStreamsConsumer creates a new Redis Streams consumer.
 // TRUE PUSH architecture: BLOCK 0 for zero-latency message delivery.
-// The discoveryInterval parameter is ignored (kept for API compatibility).
 func NewStreamsConsumer(
 	logger logging.Logger,
 	client redis.UniversalClient,
 	config transport.ConsumerConfig,
-	discoveryInterval time.Duration, // Ignored - kept for API compatibility
 ) (*StreamsConsumer, error) {
 	if config.StreamPrefix == "" {
 		return nil, fmt.Errorf("stream prefix is required")
@@ -86,9 +84,6 @@ func NewStreamsConsumer(
 	// ClaimIdleTimeout: How long before we claim messages from crashed consumers
 	if config.ClaimIdleTimeout <= 0 {
 		config.ClaimIdleTimeout = 30000 // 30 seconds for claiming idle messages
-	}
-	if config.MaxRetries <= 0 {
-		config.MaxRetries = 3
 	}
 
 	// Channel buffer: 5000 messages by default to match batch size for smooth
@@ -574,79 +569,6 @@ func (c *StreamsConsumer) AckMessage(ctx context.Context, msg transport.StreamMe
 	}
 
 	ackedTotal.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
-	return nil
-}
-
-// AckMessageBatch acknowledges multiple StreamMessages, automatically grouping by stream.
-func (c *StreamsConsumer) AckMessageBatch(ctx context.Context, msgs []transport.StreamMessage) error {
-	c.mu.RLock()
-	if c.closed {
-		c.mu.RUnlock()
-		return fmt.Errorf("consumer is closed")
-	}
-	c.mu.RUnlock()
-
-	if len(msgs) == 0 {
-		return nil
-	}
-
-	// Group messages by stream for efficient pipelining
-	byStream := make(map[string][]string)
-	for _, msg := range msgs {
-		if msg.StreamName == "" {
-			continue
-		}
-		byStream[msg.StreamName] = append(byStream[msg.StreamName], msg.ID)
-	}
-
-	// Use pipeline to acknowledge AND delete all messages from streams.
-	// XAckDel with DELREF prevents streams from growing unbounded.
-	pipe := c.client.Pipeline()
-	for streamName, ids := range byStream {
-		pipe.XAckDel(ctx, streamName, c.config.ConsumerGroup, "DELREF", ids...)
-	}
-
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to batch ack+delete: %w", err)
-	}
-
-	ackedTotal.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(msgs)))
-	return nil
-}
-
-// Pending returns the number of messages that have been delivered but not yet acknowledged.
-func (c *StreamsConsumer) Pending(ctx context.Context) (int64, error) {
-	c.mu.RLock()
-	if c.closed {
-		c.mu.RUnlock()
-		return 0, fmt.Errorf("consumer is closed")
-	}
-	c.mu.RUnlock()
-
-	// Check pending on the single supplier stream
-	info, err := c.client.XPending(ctx, c.streamName, c.config.ConsumerGroup).Result()
-	if err != nil {
-		// Stream may not exist yet
-		if isStreamNotFoundError(err) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("failed to get pending info: %w", err)
-	}
-
-	pendingMessages.WithLabelValues(c.config.SupplierOperatorAddress).Set(float64(info.Count))
-	return info.Count, nil
-}
-
-// DeleteStream is a no-op with single stream architecture.
-// Messages are automatically deleted via XAckDel when acknowledged.
-// The single stream per supplier persists but stays clean.
-func (c *StreamsConsumer) DeleteStream(ctx context.Context, sessionID string) error {
-	// No-op: single stream per supplier persists across all sessions.
-	// Messages are automatically deleted from stream via XAckDel (DELREF mode).
-	c.logger.Debug().
-		Str("session_id", sessionID).
-		Msg("DeleteStream is no-op with single stream architecture")
 	return nil
 }
 

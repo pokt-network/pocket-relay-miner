@@ -65,16 +65,6 @@ var (
 		[]string{"supplier_addr"},
 	)
 
-	pendingMessages = observability.SharedFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "pending_messages",
-			Help:      "Current number of pending (unacknowledged) messages",
-		},
-		[]string{"supplier_addr"},
-	)
-
 	claimedMessages = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

@@ -1,5 +1,5 @@
 .PHONY: build test clean install help docker-build docker-push build-backend proto-backend \
-	tilt-up-docker tilt-down-docker tilt-up-k8s tilt-down-k8s
+	tilt-up-k8s tilt-down-k8s
 
 # Binary name
 BINARY_NAME=pocket-relay-miner
@@ -126,15 +126,6 @@ build-backend: proto-backend ## Build the backend test server
 # Pass additional tilt args via ARGS, e.g.: make tilt-up-k8s ARGS="--stream"
 
 
-
-tilt-up-docker: ## Start Docker Compose dev environment with Tilt
-	@echo "Starting Docker Compose Tilt environment..."
-	tilt up -f tilt/docker/Tiltfile $(ARGS)
-
-tilt-down-docker: ## Stop Docker Compose dev environment
-	@echo "Stopping Docker Compose Tilt environment..."
-	-tilt down -f tilt/docker/Tiltfile
-	cd tilt/docker && docker-compose down $(ARGS)
 
 tilt-up-k8s: ## Start Kubernetes dev environment with Tilt
 	@echo "Starting Kubernetes Tilt environment..."

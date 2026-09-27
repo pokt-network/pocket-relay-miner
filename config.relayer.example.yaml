@@ -64,10 +64,7 @@ keys:
   # Option 1: Load from YAML file (simple, recommended for testing)
   keys_file: "/keys/supplier-keys.yaml"
 
-  # Option 2: Load from directory (one file per key)
-  # keys_dir: "/keys/supplier-keys"
-
-  # Option 3: Use Cosmos SDK keyring (recommended for production)
+  # Option 2: Use Cosmos SDK keyring (recommended for production)
   # keyring:
   #   backend: "file"  # file, os, test, memory
   #   dir: "/path/to/keyring"

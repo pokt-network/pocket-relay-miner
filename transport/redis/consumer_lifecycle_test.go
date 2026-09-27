@@ -85,7 +85,6 @@ func TestClaimPendingMessages_DrainsWholePEL(t *testing.T) {
 			BatchSize:               10,
 			ClaimIdleTimeout:        1, // ms; everything stranded is already eligible
 		},
-		0,
 	)
 	require.NoError(t, err)
 
@@ -167,7 +166,6 @@ func TestConsume_CloseDoesNotPanicWithReclaimInFlight(t *testing.T) {
 				ClaimIdleTimeout:        20, // ms; ticks fast so a reclaim is in flight
 				ChannelBufferSize:       1,  // parks producers on their sends immediately
 			},
-			0,
 		)
 		require.NoError(t, err)
 

@@ -43,8 +43,13 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Build the relay CLI once (exports CLI_BIN / CLI_BIN_DIR; cleanup() below
+# removes the mktemp dir — see the no-trap contract in lib/cli-build.sh).
+. "$SCRIPT_DIR/lib/cli-build.sh"
+build_relay_cli || exit 1
+
 # ─── Configuration ───────────────────────────────────────────
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:3069/v1}"
+RELAYER_URL="${RELAYER_URL:-http://localhost:8180}"
 HTTP_SERVICE="${HTTP_SERVICE:-develop-http}"
 K8S_CONTEXT="${K8S_CONTEXT:-kind-kind}"
 LOKI_URL="${LOKI_URL:-http://localhost:3100}"
@@ -113,6 +118,7 @@ LOAD_PID=""
 cleanup() {
     [ -n "$LOAD_PID" ] && kill "$LOAD_PID" 2>/dev/null || true
     wait 2>/dev/null || true
+    rm -rf "$CLI_BIN_DIR"
 }
 trap cleanup EXIT
 
@@ -122,22 +128,9 @@ log_phase "PRE-FLIGHT"
 command -v jq >/dev/null || { log_error "jq required"; exit 2; }
 command -v "$REDIS_CMD" >/dev/null || { log_error "redis-cli required"; exit 2; }
 
-# Pre-flight: wait up to 30s for a valid body (PATH may still be syncing sessions).
-RELAY_OK=false
-for i in $(seq 1 15); do
-    BODY=$(curl -s -m 5 -X POST \
-        -H "Content-Type: application/json" -H "Target-Service-Id: $HTTP_SERVICE" \
-        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-        "$GATEWAY_URL" 2>/dev/null || true)
-    if echo "$BODY" | grep -q '"result"'; then
-        RELAY_OK=true
-        log_info "Relay OK (attempt $i)"
-        break
-    fi
-    log_warn "Relay not ready yet (attempt $i/15, body=[${BODY:0:80}])"
-    sleep 2
-done
-$RELAY_OK || { log_error "Relay never returned a valid body in 30s"; exit 1; }
+# Pre-flight: wait up to 30s for a signed relay (sessions may still be syncing)
+wait_relay_ready "$HTTP_SERVICE" "$RELAYER_URL" 15 || { log_error "Relay never served a signed relay in 30s"; exit 1; }
+log_info "Relay OK (signed end to end)"
 
 MINER_PODS=$(kubectl --context "$K8S_CONTEXT" get pods -l app=miner --no-headers 2>/dev/null | grep -c Running || true)
 [ "$MINER_PODS" -lt 2 ] && {
@@ -177,13 +170,10 @@ echo ""
 log_phase "LAUNCHING LOAD (${DURATION}s)"
 
 log_info "HTTP: $HTTP_RPS RPS × $HTTP_WORKERS workers"
-go run "$SCRIPT_DIR/loadtest/http-verify.go" \
-    -url "$GATEWAY_URL" \
-    -service "$HTTP_SERVICE" \
-    -rps "$HTTP_RPS" \
-    -workers "$HTTP_WORKERS" \
-    -duration "${DURATION}s" \
-    -report 30 > /tmp/leader-chaos-load.txt 2>&1 &
+"$CLI_BIN" relay jsonrpc --localnet --service "$HTTP_SERVICE" \
+    --relayer-url "$RELAYER_URL" \
+    --load-test -n "$((HTTP_RPS * DURATION))" --rps "$HTTP_RPS" \
+    --concurrency "$HTTP_WORKERS" --all-suppliers > /tmp/leader-chaos-load.txt 2>&1 &
 LOAD_PID=$!
 log_info "Load PID: $LOAD_PID"
 

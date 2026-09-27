@@ -618,15 +618,4 @@ var (
 		},
 		[]string{"operation"},
 	)
-
-	// Unused - reserved for future relay meter parameter refresh tracking
-	// relayMeterParamsRefreshed = observability.RelayerFactory.NewCounterVec(
-	// 	prometheus.CounterOpts{
-	// 		Namespace: metricsNamespace,
-	// 		Subsystem: metricsSubsystem,
-	// 		Name:      "relay_meter_params_refreshed_total",
-	// 		Help:      "Total relay meter parameter cache refreshes",
-	// 	},
-	// 	[]string{"param_type"}, // param_type: shared, session, app_stake, service
-	// )
 )

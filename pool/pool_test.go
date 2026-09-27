@@ -8,7 +8,6 @@ import (
 	"net"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -98,15 +97,6 @@ func TestBackendEndpointHealth(t *testing.T) {
 		require.Equal(t, int32(0), ep.ConsecutiveFailures())
 	})
 
-	t.Run("SetLastCheck and LastCheck", func(t *testing.T) {
-		ep, err := NewBackendEndpoint("test", "http://node:8545")
-		require.NoError(t, err)
-
-		now := time.Now()
-		ep.SetLastCheck(now)
-		got := ep.LastCheck()
-		require.Equal(t, now.UnixNano(), got.UnixNano())
-	})
 }
 
 func TestBackendEndpointConcurrency(t *testing.T) {
@@ -127,8 +117,6 @@ func TestBackendEndpointConcurrency(t *testing.T) {
 			ep.IncrementFailures()
 			_ = ep.ConsecutiveFailures()
 			ep.ResetFailures()
-			ep.SetLastCheck(time.Now())
-			_ = ep.LastCheck()
 		}(i)
 	}
 	wg.Wait()
@@ -195,18 +183,6 @@ func TestPoolNext_SingleEndpoint(t *testing.T) {
 	got := p.Next()
 	require.NotNil(t, got)
 	require.Equal(t, "single", got.Name)
-}
-
-func TestPoolHealthy(t *testing.T) {
-	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
-	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
-	ep1.SetUnhealthy()
-
-	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{}, "first_healthy(test)")
-
-	healthy := p.Healthy()
-	require.Len(t, healthy, 1)
-	require.Equal(t, "b", healthy[0].Name)
 }
 
 // --- FirstHealthySelector Tests ---

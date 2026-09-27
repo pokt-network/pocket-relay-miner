@@ -151,12 +151,6 @@ type SessionSnapshot struct {
 
 	// CreatedAt is when the session was created.
 	CreatedAt time.Time `json:"created_at"`
-
-	// Optional on-chain settlement confirmation (hours after session completes)
-	// Populated by settlement monitor when EventClaimSettled/EventClaimExpired arrives
-	SettlementOutcome *string `json:"settlement_outcome,omitempty"` // "settled_proven", "expired", "slashed", "discarded"
-	SettlementHeight  *int64  `json:"settlement_height,omitempty"`  // Block height of settlement event
-	SettlementTxHash  *string `json:"settlement_tx_hash,omitempty"` // Settlement transaction hash (if applicable)
 }
 
 // SessionStore provides Redis-based storage for session snapshots.
@@ -190,10 +184,6 @@ type SessionStore interface {
 
 	// UpdateState atomically updates the state of a session.
 	UpdateState(ctx context.Context, sessionID string, newState SessionState) error
-
-	// UpdateSettlementMetadata updates the optional settlement metadata fields.
-	// This is a non-critical update - session may already be cleaned up.
-	UpdateSettlementMetadata(ctx context.Context, sessionID string, outcome string, height int64) error
 
 	// IncrementRelayCount atomically increments the relay count and compute units.
 	IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error
@@ -281,9 +271,6 @@ const (
 	hfProofTxHash        = "proof_tx_hash"
 	hfCreatedAt          = "created_at"
 	hfLastUpdatedAt      = "last_updated_at"
-	hfSettlementOutcome  = "settlement_outcome"
-	hfSettlementHeight   = "settlement_height"
-	hfSettlementTxHash   = "settlement_tx_hash"
 )
 
 // encodeSnapshot flattens a SessionSnapshot into a slice of alternating
@@ -323,15 +310,6 @@ func encodeSnapshotMetadata(snap *SessionSnapshot) []any {
 	}
 	if snap.ProofTxHash != "" {
 		pairs = append(pairs, hfProofTxHash, snap.ProofTxHash)
-	}
-	if snap.SettlementOutcome != nil {
-		pairs = append(pairs, hfSettlementOutcome, *snap.SettlementOutcome)
-	}
-	if snap.SettlementHeight != nil {
-		pairs = append(pairs, hfSettlementHeight, strconv.FormatInt(*snap.SettlementHeight, 10))
-	}
-	if snap.SettlementTxHash != nil {
-		pairs = append(pairs, hfSettlementTxHash, *snap.SettlementTxHash)
 	}
 	return pairs
 }
@@ -406,21 +384,6 @@ func decodeSnapshot(fields map[string]string) (*SessionSnapshot, error) {
 		} else {
 			snap.ClaimedRootHash = candidate
 		}
-	}
-	if v, ok := fields[hfSettlementOutcome]; ok {
-		vv := v
-		snap.SettlementOutcome = &vv
-	}
-	if v, ok := fields[hfSettlementHeight]; ok && v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("decode %s: %w", hfSettlementHeight, err)
-		}
-		snap.SettlementHeight = &n
-	}
-	if v, ok := fields[hfSettlementTxHash]; ok {
-		vv := v
-		snap.SettlementTxHash = &vv
 	}
 
 	return snap, nil
@@ -507,15 +470,6 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 		}
 		if snapshot.ProofTxHash == "" {
 			staleFields = append(staleFields, hfProofTxHash)
-		}
-		if snapshot.SettlementOutcome == nil {
-			staleFields = append(staleFields, hfSettlementOutcome)
-		}
-		if snapshot.SettlementHeight == nil {
-			staleFields = append(staleFields, hfSettlementHeight)
-		}
-		if snapshot.SettlementTxHash == nil {
-			staleFields = append(staleFields, hfSettlementTxHash)
 		}
 		if len(staleFields) > 0 {
 			pipe.HDel(ctx, key, staleFields...)
@@ -832,37 +786,6 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		Str("old_state", string(oldState)).
 		Str("new_state", string(newState)).
 		Msg("updated session state")
-
-	return nil
-}
-
-// UpdateSettlementMetadata updates the optional settlement metadata fields.
-// This is a non-critical update - session may already be cleaned up.
-func (s *RedisSessionStore) UpdateSettlementMetadata(
-	ctx context.Context,
-	sessionID string,
-	outcome string,
-	height int64,
-) error {
-	key := s.sessionKey(sessionID)
-	now := time.Now().Format(time.RFC3339Nano)
-
-	pipe := s.redisClient.TxPipeline()
-	pipe.HSet(ctx, key,
-		hfSettlementOutcome, outcome,
-		hfSettlementHeight, strconv.FormatInt(height, 10),
-		hfLastUpdatedAt, now,
-	)
-	pipe.Expire(ctx, key, s.config.SessionTTL)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("failed to update settlement metadata: %w", err)
-	}
-
-	s.logger.Debug().
-		Str("session_id", sessionID).
-		Str("settlement_outcome", outcome).
-		Int64("settlement_height", height).
-		Msg("updated settlement metadata")
 
 	return nil
 }

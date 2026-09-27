@@ -91,13 +91,8 @@ make tilt-down-k8s
 
 For environments without Kubernetes:
 
-```bash
-# Start Docker Compose dev environment
-make tilt-up-docker
-
-# Stop environment
-make tilt-down-docker
-```
+For a Tilt-free single-replica HA reference (documentation-oriented, not a
+dev loop), see `examples/docker-compose/`.
 
 ### Access Services
 

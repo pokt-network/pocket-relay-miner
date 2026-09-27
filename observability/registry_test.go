@@ -7,6 +7,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
 // TestMinerRegistry tests that MinerRegistry is initialized.
@@ -361,4 +363,21 @@ func TestFactory_WithPrefix(t *testing.T) {
 		}
 	}
 	require.True(t, found, "Metric should have prefix")
+}
+
+// TestPanicRecoveriesTotal_ServedBySharedRegistry pins that the panic
+// counter is actually scrapeable: it used to live in the prometheus DEFAULT
+// registry, which no binary in this repo serves, so every recovered panic
+// incremented a counter nobody could ever see.
+func TestPanicRecoveriesTotal_ServedBySharedRegistry(t *testing.T) {
+	logging.PanicRecoveriesTotal.WithLabelValues("registry_test").Inc()
+
+	families, err := SharedRegistry.Gather()
+	require.NoError(t, err)
+	for _, fam := range families {
+		if fam.GetName() == "ha_panic_recoveries_total" {
+			return
+		}
+	}
+	t.Fatal("ha_panic_recoveries_total is not served by the shared registry")
 }

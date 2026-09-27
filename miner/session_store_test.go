@@ -272,10 +272,6 @@ func TestSave_HashFieldRoundTrip(t *testing.T) {
 	store, mr := setupTestSessionStore(t)
 	ctx := context.Background()
 
-	outcome := "settled_proven"
-	txHash := "0xabc123"
-	height := int64(1234)
-
 	original := &SessionSnapshot{
 		SessionID:               "sess-roundtrip",
 		SupplierOperatorAddress: "pokt1supplier",
@@ -289,12 +285,9 @@ func TestSave_HashFieldRoundTrip(t *testing.T) {
 		// A real SMST root is exactly 48 bytes (32-byte hash || 8-byte count
 		// || 8-byte sum). decodeSnapshot drops anything else as corrupt, so
 		// the round-trip assertion below only holds for a shape-valid root.
-		ClaimedRootHash:   bytes.Repeat([]byte{0x5a}, SMSTRootLen),
-		ClaimTxHash:       "claimtx",
-		ProofTxHash:       "prooftx",
-		SettlementOutcome: &outcome,
-		SettlementHeight:  &height,
-		SettlementTxHash:  &txHash,
+		ClaimedRootHash: bytes.Repeat([]byte{0x5a}, SMSTRootLen),
+		ClaimTxHash:     "claimtx",
+		ProofTxHash:     "prooftx",
 	}
 	require.NoError(t, store.Save(ctx, original))
 
@@ -319,12 +312,6 @@ func TestSave_HashFieldRoundTrip(t *testing.T) {
 	assert.Equal(t, original.ClaimedRootHash, got.ClaimedRootHash)
 	assert.Equal(t, original.ClaimTxHash, got.ClaimTxHash)
 	assert.Equal(t, original.ProofTxHash, got.ProofTxHash)
-	require.NotNil(t, got.SettlementOutcome)
-	assert.Equal(t, outcome, *got.SettlementOutcome)
-	require.NotNil(t, got.SettlementHeight)
-	assert.Equal(t, height, *got.SettlementHeight)
-	require.NotNil(t, got.SettlementTxHash)
-	assert.Equal(t, txHash, *got.SettlementTxHash)
 	assert.False(t, got.CreatedAt.IsZero())
 	assert.False(t, got.LastUpdatedAt.IsZero())
 }
@@ -363,7 +350,6 @@ func TestSave_ClearsStaleOptionalFields(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Empty(t, got.ClaimTxHash, "stale optional string field must not leak")
 	assert.Empty(t, got.ClaimedRootHash, "stale optional bytes field must not leak")
-	assert.Nil(t, got.SettlementOutcome)
 }
 
 // TestGet_LegacyJSONFallback verifies Get transparently decodes a legacy
@@ -577,24 +563,6 @@ func TestGetBySupplier_MixedFormats(t *testing.T) {
 	assert.Len(t, byState, 2, "state index must surface both layouts")
 }
 
-// TestSettlementMetadata_RoundTrip verifies the settlement fields can be
-// set after the session has been written and come back intact.
-func TestSettlementMetadata_RoundTrip(t *testing.T) {
-	store, _ := setupTestSessionStore(t)
-	ctx := context.Background()
-
-	saveTestSession(t, store, "sess-settle", SessionStateProved, 10, 100)
-	require.NoError(t, store.UpdateSettlementMetadata(ctx, "sess-settle", "settled_proven", 9999))
-
-	got, err := store.Get(ctx, "sess-settle")
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	require.NotNil(t, got.SettlementOutcome)
-	assert.Equal(t, "settled_proven", *got.SettlementOutcome)
-	require.NotNil(t, got.SettlementHeight)
-	assert.Equal(t, int64(9999), *got.SettlementHeight)
-}
-
 // --- Race Condition Tests ---
 // These tests verify that counter fields (relay_count, total_compute_units)
 // are never clobbered by concurrent Save/UpdateState operations. This was
@@ -697,36 +665,6 @@ func TestIncrementRelayCount_RaceWithSave(t *testing.T) {
 		"all %d increments must survive concurrent Save calls", incrementors)
 	assert.Equal(t, uint64(incrementors)*computeUnitsPerRelay, snapshot.TotalComputeUnits,
 		"all compute units must survive concurrent Save calls")
-}
-
-// TestUpdateSettlementMetadata_PreservesCounters verifies that settlement
-// metadata updates don't clobber counters.
-func TestUpdateSettlementMetadata_PreservesCounters(t *testing.T) {
-	store, _ := setupTestSessionStore(t)
-	ctx := context.Background()
-
-	// Create session with initial counters (new key, so counters are written)
-	saveTestSession(t, store, "sess-settle-counters", SessionStateActive, 0, 0)
-
-	// Accumulate relays via HINCRBY
-	for i := 0; i < 42; i++ {
-		require.NoError(t, store.IncrementRelayCount(ctx, "sess-settle-counters", 10))
-	}
-
-	// Transition to proved (required for settlement)
-	require.NoError(t, store.UpdateState(ctx, "sess-settle-counters", SessionStateProved))
-
-	// Settlement metadata update must NOT clobber counters
-	require.NoError(t, store.UpdateSettlementMetadata(ctx, "sess-settle-counters", "settled_proven", 9999))
-
-	snapshot, err := store.Get(ctx, "sess-settle-counters")
-	require.NoError(t, err)
-	assert.Equal(t, int64(42), snapshot.RelayCount,
-		"relay count must survive settlement metadata update")
-	assert.Equal(t, uint64(420), snapshot.TotalComputeUnits,
-		"compute units must survive settlement metadata update")
-	require.NotNil(t, snapshot.SettlementOutcome)
-	assert.Equal(t, "settled_proven", *snapshot.SettlementOutcome)
 }
 
 // TestUpdateState_DoesNotClobberCounters verifies UpdateState preserves

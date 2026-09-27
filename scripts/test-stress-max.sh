@@ -26,9 +26,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Build the relay CLI once (exports CLI_BIN / CLI_BIN_DIR; cleanup() below
+# removes the mktemp dir — see the no-trap contract in lib/cli-build.sh).
+. "$SCRIPT_DIR/lib/cli-build.sh"
+build_relay_cli || exit 1
+
 # ─── Configuration ───────────────────────────────────────────
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:3069/v1}"
-WS_GATEWAY_URL="${WS_GATEWAY_URL:-ws://localhost:3069/v1}"
+RELAYER_URL="${RELAYER_URL:-http://localhost:8180}"
 HTTP_SERVICE="develop-http"
 WS_SERVICE="develop-websocket"
 K8S_CONTEXT="kind-kind"
@@ -85,27 +89,16 @@ cleanup() {
     log_info "Shutting down..."
     for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     wait "${PIDS[@]}" 2>/dev/null || true
+    rm -rf "$CLI_BIN_DIR"
 }
 trap cleanup EXIT
 
 # ─── Pre-flight ──────────────────────────────────────────────
 log_phase "PRE-FLIGHT"
 
-command -v hey &>/dev/null || { log_error "hey not found. go install github.com/rakyll/hey@latest"; exit 1; }
-
-# Wait for relayer to be ready
-for i in $(seq 1 30); do
-    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-        -H "Content-Type: application/json" \
-        -H "Target-Service-Id: $HTTP_SERVICE" \
-        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-        "$GATEWAY_URL" 2>/dev/null || echo "000")
-    if [ "$STATUS" = "200" ]; then break; fi
-    echo "  waiting for relayer ($i/30, status=$STATUS)..."
-    sleep 2
-done
-[ "$STATUS" != "200" ] && { log_error "Relayer not ready after 60s"; exit 1; }
-log_info "HTTP relay OK"
+# Wait for the relayer to serve a full signed relay (not just an HTTP status)
+wait_relay_ready "$HTTP_SERVICE" "$RELAYER_URL" 30 || { log_error "Relayer not serving signed relays"; exit 1; }
+log_info "HTTP relay OK (signed end to end)"
 
 RELAYER_PODS=$(kubectl --context "$K8S_CONTEXT" get pods -l app=relayer --no-headers 2>/dev/null | grep -c Running)
 MINER_PODS=$(kubectl --context "$K8S_CONTEXT" get pods -l app=miner --no-headers 2>/dev/null | grep -c Running)
@@ -137,28 +130,27 @@ echo ""
 # ─── Phase 1: Launch Load ───────────────────────────────────
 log_phase "LAUNCHING LOAD (${DURATION}s)"
 
-# HTTP load with body verification (catches PATH's 200+empty masking)
+# HTTP load: signed relays with full response verification
 TOTAL_RPS=$((HTTP_CONCURRENCY * HTTP_RPS_PER_CONN))
-log_info "Starting HTTP: ${TOTAL_RPS} RPS with body verification"
-go run "$SCRIPT_DIR/loadtest/http-verify.go" \
-    -url "$GATEWAY_URL" \
-    -service "$HTTP_SERVICE" \
-    -rps "$TOTAL_RPS" \
-    -workers "$HTTP_CONCURRENCY" \
-    -duration "${DURATION}s" \
-    -report "$REPORT_INTERVAL" > /tmp/stress-hey.txt 2>&1 &
+log_info "Starting HTTP: ${TOTAL_RPS} RPS, signed + verified"
+"$CLI_BIN" relay jsonrpc --localnet --service "$HTTP_SERVICE" \
+    --relayer-url "$RELAYER_URL" \
+    --load-test -n "$((TOTAL_RPS * DURATION))" --rps "$TOTAL_RPS" \
+    --concurrency "$HTTP_CONCURRENCY" --all-suppliers > /tmp/stress-http.txt 2>&1 &
 PIDS+=($!)
 log_info "  PID: ${PIDS[-1]}"
 
-# WebSocket stress
-log_info "Starting WS: ${WS_CONNECTIONS} conns × ${WS_MSG_RATE} msg/s"
-go run "$SCRIPT_DIR/ws-stress/main.go" \
-    -url "$WS_GATEWAY_URL" \
-    -service "$WS_SERVICE" \
-    -connections "$WS_CONNECTIONS" \
-    -rate "$WS_MSG_RATE" \
-    -duration "${DURATION}s" \
-    -report "$REPORT_INTERVAL" > /tmp/stress-ws.txt 2>&1 &
+# WebSocket stress: signed WS relays through the CLI.
+# The CLI rejects -n above 1,000,000 (cmd_relay.go); 200 conns × 20 msg/s ×
+# 300s asks for 1.2M, so clamp to the cap — the run just ends slightly early.
+WS_TOTAL=$((WS_CONNECTIONS * WS_MSG_RATE * DURATION))
+[ "$WS_TOTAL" -gt 1000000 ] && WS_TOTAL=1000000
+log_info "Starting WS: ${WS_CONNECTIONS} concurrent conns"
+"$CLI_BIN" relay websocket --localnet --service "$WS_SERVICE" \
+    --relayer-url "$RELAYER_URL" \
+    --load-test -n "$WS_TOTAL" \
+    --rps "$((WS_CONNECTIONS * WS_MSG_RATE))" \
+    --concurrency "$WS_CONNECTIONS" --all-suppliers > /tmp/stress-ws.txt 2>&1 &
 PIDS+=($!)
 log_info "  PID: ${PIDS[-1]}"
 
@@ -189,25 +181,39 @@ while [ $ELAPSED -lt "$DURATION" ]; do
     fi
 done
 
-# Wait for load to finish
-log_info "Waiting for load processes..."
-for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+# Wait for load to finish — bounded: the monitor loop already covered
+# DURATION, so give the loaders 120s of grace to flush their summaries and
+# kill them past that; an unbounded wait wedges the whole run on one stuck
+# connection.
+log_info "Waiting for load processes (up to 120s grace)..."
+WAIT_DEADLINE=$((SECONDS + 120))
+for pid in "${PIDS[@]}"; do
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$WAIT_DEADLINE" ]; then
+            log_warn "Load process $pid still running past grace — killing"
+            kill "$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 2
+    done
+    wait "$pid" 2>/dev/null || true
+done
 PIDS=()
 
 # ─── Phase 3: Results (all from Loki) ─────────────────────
 log_phase "RESULTS"
 
-# HTTP with body verification
-echo -e "${BOLD}─── HTTP Load (body-verified) ───${NC}"
-if [ -f /tmp/stress-hey.txt ]; then
-    grep -E "FINAL RESULTS|Sent:|HTTP 200:|body_valid:|body_empty:|body_invalid:|body_rpc_error:|HTTP 5xx:|Real success|Fake 200" /tmp/stress-hey.txt | head -20
+# HTTP: signed relays, verified end to end by the CLI
+echo -e "${BOLD}─── HTTP Load (signed + verified) ───${NC}"
+if [ -f /tmp/stress-http.txt ]; then
+    grep -E "Total|Successful|Errors|Success Rate|RPS|Latency|p50|p95|p99" /tmp/stress-http.txt | head -20
 fi
 
 # WebSocket
 echo ""
 echo -e "${BOLD}─── WebSocket Stress ───${NC}"
 if [ -f /tmp/stress-ws.txt ]; then
-    grep -E "Final Summary|Total Sent|Total Received|Total Errors|Connect Errors|Disconnections" /tmp/stress-ws.txt
+    grep -E "Total|Successful|Errors|Success Rate|RPS|Latency|p50|p95|p99" /tmp/stress-ws.txt | head -20
 fi
 
 # Claim/proof from Loki (survives chaos pod kills)

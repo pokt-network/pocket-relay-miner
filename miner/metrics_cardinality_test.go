@@ -108,24 +108,6 @@ func TestRelaysFailedSMST_BoundedCardinality(t *testing.T) {
 		"relays_failed_smst must not carry a session_id label:\n%s", fam)
 }
 
-// TestBlockResultsRetries_NoHeightLabel proves retries at distinct heights
-// collapse to a single series (height is monotonic → unbounded).
-func TestBlockResultsRetries_NoHeightLabel(t *testing.T) {
-	// Two retries at distinct heights — must collapse to one series.
-	RecordBlockResultsRetry()
-	RecordBlockResultsRetry()
-
-	body := scrapeMinerRegistry(t)
-	const metric = "ha_miner_block_results_retries_total"
-	fam := extractMetric(body, metric)
-
-	require.NotContainsf(t, fam, "height=",
-		"block_results_retries must not carry a height label:\n%s", fam)
-	got := countSampleSeries(body, metric, "")
-	require.Equalf(t, 1, got,
-		"block_results_retries must be a single series, got %d:\n%s", got, fam)
-}
-
 // TestClaimsProofsCreated_BoundedLabels proves the pre-submit attempt counters
 // (claims_created_total / proofs_created_total) are bounded by (supplier,
 // service_id) and carry no session_id label.

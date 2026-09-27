@@ -195,7 +195,7 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().IntVar(&relay.RelayConcurrency, "concurrency", 10, "Number of concurrent workers (load test mode)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayRPS, "rps", 0, "Target requests per second (0 = unlimited, only for load test mode)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayPayloadJSON, "payload", "", "Custom JSON-RPC payload (default: eth_blockNumber)")
-	relayCmd.PersistentFlags().BoolVar(&relay.RelayOutputJSON, "output-json", false, "Output results as JSON")
+	relayCmd.PersistentFlags().BoolVar(&relay.RelayOutputJSON, "output-json", false, "Output results as JSON (stream mode only; ignored by other modes)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayTimeout, "timeout", 120, "Request timeout in seconds (also the max time a stream is read before giving up)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayVerbose, "verbose", false, "Verbose logging")
 

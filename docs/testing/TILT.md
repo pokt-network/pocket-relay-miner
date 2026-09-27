@@ -36,9 +36,9 @@ change — never manually build, `kubectl delete pod`, or `kubectl port-forward`
 Tilt owns all of that. Open the Tilt UI at <http://localhost:10350> to watch
 resources come up.
 
-A lighter Docker-Compose variant also exists (`make tilt-up-docker` /
-`make tilt-down-docker`); the K8s environment above is the production-like one
-and the target for the HA/chaos scripts, so prefer it.
+There is no Docker-Compose dev variant: the K8s environment above is the
+production-like one and the target for the HA/chaos scripts. A minimal
+compose file for documentation purposes lives in `examples/docker-compose/`.
 
 ## 2. What you get (pods & replicas)
 
@@ -182,7 +182,7 @@ DURATION=120 HTTP_RPS=300 ./scripts/test-quantitative-failover.sh
 # End-to-end claim payment: sends relays to develop-http for one supplier,
 # watches the miner log for the claim TX hash, then queries block_results for
 # EventClaimSettled to confirm the on-chain mint.
-./scripts/verify-claim-payment.sh
+scripts/gates/live.sh   # settlement asserted per service, on-chain
 ```
 
 Claim/proof timing (when a claim is expected on-chain, and why proofs may lag)

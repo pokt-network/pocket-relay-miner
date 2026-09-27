@@ -28,61 +28,27 @@ const (
 	// Service fields
 	FieldServiceID = "service_id"
 
-	// Block/height fields
-	FieldBlockHeight = "block_height"
-	FieldHeight      = "height"
+	FieldAction = "action"
+	FieldSource = "source"
 
-	// Operation fields
-	FieldOperation = "operation"
-	FieldAction    = "action"
-	FieldMethod    = "method"
-	FieldResult    = "result"
-	FieldReason    = "reason"
-	FieldSource    = "source"
-
-	// Network/connection fields
-	FieldAddr       = "addr"
 	FieldListenAddr = "listen_addr"
-	FieldRemoteAddr = "remote_addr"
 
 	// Redis/stream fields
-	FieldStreamID     = "stream_id"
-	FieldMessageID    = "message_id"
-	FieldConsumerName = "consumer_name"
-
-	// Transaction fields
-	FieldTxHash = "tx_hash"
-
-	// Timing fields
-	FieldDuration  = "duration"
-	FieldLatency   = "latency"
-	FieldTimestamp = "timestamp"
+	FieldStreamID  = "stream_id"
+	FieldMessageID = "message_id"
 
 	// Count/size fields
-	FieldCount     = "count"
-	FieldSize      = "size"
-	FieldBatchSize = "batch_size"
+	FieldCount = "count"
 
 	// State fields
 	FieldOldState = "old_state"
 	FieldNewState = "new_state"
-	FieldStatus   = "status"
 
 	// Cache fields
-	FieldCacheType  = "cache_type"
-	FieldCacheLevel = "cache_level"
+	FieldCacheType = "cache_type"
 
-	// Error fields
-	FieldErrorType = "error_type"
-	FieldAttempt   = "attempt"
-	FieldMaxRetry  = "max_retries"
-
-	// Relay fields
-	FieldRelayHash = "relay_hash"
-
-	// Query fields
-	FieldQueryType   = "query_type"
-	FieldQueryClient = "query_client"
+	FieldAttempt  = "attempt"
+	FieldMaxRetry = "max_retries"
 )
 
 // Component name constants for the "component" field.
@@ -97,7 +63,6 @@ const (
 	ComponentRelayMeter          = "relay_meter"
 	ComponentServiceFactorClient = "service_factor_client"
 	ComponentHealthChecker       = "health_checker"
-	ComponentService             = "ha_relayer"
 	ComponentDifficultyProvider  = "difficulty_provider"
 
 	ComponentSessionLifecycle      = "session_lifecycle"
@@ -108,12 +73,8 @@ const (
 	ComponentSupplierManager       = "supplier_manager"
 	ComponentSupplierRegistry      = "supplier_registry"
 	ComponentServiceFactorRegistry = "service_factor_registry"
-	ComponentSubmissionTiming      = "submission_timing"
-	ComponentSubmissionSched       = "submission_scheduler"
-	ComponentSMSTRecovery          = "smst_recovery"
 	ComponentSMSTSnapshot          = "smst_snapshot_manager"
 	ComponentCacheOrchestrator     = "cache_orchestrator"
-	ComponentWAL                   = "wal"
 	ComponentDeduplicator          = "deduplicator"
 	ComponentSupplierClaimer       = "supplier_claimer"
 
@@ -121,29 +82,22 @@ const (
 
 	ComponentBlockSubscriber    = "block_subscriber"
 	ComponentSessionCache       = "session_cache"
-	ComponentSupplierTxClient   = "supplier_tx_client"
 	ComponentLifecycleCallback  = "lifecycle_callback"
 	ComponentSharedParamCache   = "shared_param_cache"
 	ComponentSupplierParamCache = "supplier_param_cache"
-	ComponentParamsRefresher    = "params_refresher"
 	ComponentBalanceMonitor     = "balance_monitor"
 	ComponentBlockHealth        = "block_health_monitor"
 
 	ComponentRedisPublisher = "redis_streams_publisher"
 	ComponentRedisConsumer  = "redis_streams_consumer"
-	ComponentRedisClient    = "redis_client"
 
 	ComponentKeyManager       = "key_manager"
-	ComponentKeyFileProvider  = "key_file_provider"
 	ComponentKeyRingProvider  = "keyring_provider"
 	ComponentSupplierKeysFile = "supplier_keys_file"
 
 	ComponentQueryClients  = "query_clients"
-	ComponentQueryShared   = "query_shared"
-	ComponentQuerySession  = "query_session"
 	ComponentQueryApp      = "query_application"
 	ComponentQuerySupplier = "query_supplier"
-	ComponentQueryProof    = "query_proof"
 	ComponentQueryService  = "query_service"
 	ComponentQueryAccount  = "query_account"
 
@@ -156,14 +110,6 @@ const (
 	ComponentRelayPipeline           = "relay_pipeline"
 	ComponentRedisBlockClientAdapter = "redis_block_client_adapter"
 	ComponentBlockSubscriberAdapter  = "block_subscriber_adapter"
-	ComponentGracefulRemover         = "graceful_remover"
-)
-
-// Cache level constants for the "cache_level" field.
-const (
-	CacheLevelL1      = "l1"
-	CacheLevelL2      = "l2"
-	CacheLevelL2Retry = "l2_retry"
 )
 
 // Cache type constants for the "cache_type" field.
@@ -190,9 +136,6 @@ const (
 const (
 	// FieldApplication is the application address field
 	FieldApplication = "application"
-
-	// FieldSessionStartHeight is the session start block height
-	FieldSessionStartHeight = "session_start_height"
 )
 
 // Replica role constants for the "replica" field.
