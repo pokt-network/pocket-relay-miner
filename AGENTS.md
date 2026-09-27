@@ -33,6 +33,10 @@ the claim and the proof from the served relays and submits them to the chain.
      (installing `pocketd`, the beta faucet, the export, the stake file), as
      they are written there: a link alone is not enough for a human who will
      not read it, and commands, URLs or flags from memory are wrong.
+     Two facts they will ask about: beta POKT is free from the faucet
+     (mainnet POKT is bought), and the URL in the stake is the relayer's
+     public `https://` address behind a TLS proxy, never an IP and port of
+     this machine or a private address.
      Before the stake file, check that each service they want exists on
      that network (the query below): beta registers its own services, and
      one missing there cannot be staked on beta.
