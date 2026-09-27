@@ -83,11 +83,16 @@ CLI, does. Run these on a machine you trust, and never paste a private key, a
 mnemonic or a passphrase into a chat or an AI agent. Flags below are from
 `pocketd` 0.1.35.
 
-**0. Install `pocketd`.** Download the archive for your platform
-(`pocket_linux_amd64.tar.gz`, `pocket_linux_arm64.tar.gz`, or the `darwin`
-ones) from the [poktroll v0.1.35 release](https://github.com/pokt-network/poktroll/releases/tag/v0.1.35),
-check it against `release_checksum` from the same page, extract it and put
-`pocketd` on your `PATH`.
+**0. Install `pocketd`.** From the [poktroll v0.1.35 release](https://github.com/pokt-network/poktroll/releases/tag/v0.1.35)
+(`pocket_linux_arm64.tar.gz` on ARM, the `darwin` archives on macOS; check
+them against `release_checksum` on the same page):
+
+```bash
+curl -sLO https://github.com/pokt-network/poktroll/releases/download/v0.1.35/pocket_linux_amd64.tar.gz
+tar -xzf pocket_linux_amd64.tar.gz      # extracts a single file: pocketd
+sudo install pocketd /usr/local/bin/
+pocketd version                         # prints 0.1.35
+```
 
 **1. Create the key in a passphrase-protected keyring.**
 

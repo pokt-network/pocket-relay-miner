@@ -28,11 +28,11 @@ the claim and the proof from the served relays and submits them to the chain.
      list), leave the example's service as it is for this test and configure
      theirs when they stake on the network that has it. Never put a backend
      under another service's id, and never invent a URL or a port.
-  3. For the key, the POKT and the stake, give them the steps in
-     [docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it):
-     where `pocketd` comes from, the beta faucet, the export and the stake
-     file. Do not write those steps from memory; commands, URLs and flags
-     that are not in that section are wrong.
+  3. For the key, the POKT and the stake, copy into your reply the commands
+     of [docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it)
+     (installing `pocketd`, the beta faucet, the export, the stake file), as
+     they are written there: a link alone is not enough for a human who will
+     not read it, and commands, URLs or flags from memory are wrong.
      Before the stake file, check that each service they want exists on
      that network (the query below): beta registers its own services, and
      one missing there cannot be staked on beta.
