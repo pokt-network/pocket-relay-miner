@@ -1,5 +1,7 @@
 # Pocket RelayMiner
 
+![Relay Miner: requests in, relayed to any Web3 or Web2 backend, work mined into sparse Merkle trees and paid as rewards](docs/assets/relay-miner.png)
+
 **Every relay you serve, paid on chain.**
 
 Pocket RelayMiner is the supplier side of Pocket Network: it serves relays from
