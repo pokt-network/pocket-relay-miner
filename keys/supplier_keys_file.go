@@ -98,7 +98,7 @@ func validateHexKeyFormat(hexKey string) error {
 	// error they eventually read is "no key for this supplier", which points
 	// nowhere near the file that is actually wrong.
 	//
-	// Measured 2026-09-03 (scripts/localonly/_probe): 1 and N+1 derive the SAME
+	// Measured 2026-09-03: 1 and N+1 derive the SAME
 	// address, and so do 0 and N. Two VALID keys never collide -- that was
 	// measured too -- so this is about material that is not a key, not about
 	// collisions between real ones.

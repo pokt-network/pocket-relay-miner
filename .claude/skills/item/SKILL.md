@@ -273,9 +273,8 @@ tree: **17 violations out of 1077 documented exported declarations** — small
 enough to fix rather than freeze — and two of them are exactly this defect still
 live (`miner/metrics.go:1199` documents `RecordShutdownDrainedRelay` above
 `RecordRelayDroppedNoKey`; `miner/supplier_worker.go:854` documents
-`GetSupplierManager` above `GetSupplierCache`). The probe is kept at
-`scripts/localonly/probes/doccheck.go.txt`. Until it is wired into
-`internal/conventions`, this remains a paragraph, and the paragraph has now
+`GetSupplierManager` above `GetSupplierCache`). Until such a check is wired
+into `internal/conventions`, this remains a paragraph, and the paragraph has now
 failed three times.
 
 **REPLACING A RUNTIME CHECK WITH A TYPE: enumerate what the check was ALSO

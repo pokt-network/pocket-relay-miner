@@ -21,7 +21,8 @@ set -u
 QUEUE="${QUEUE:-scripts/localonly/QUEUE.md}"
 RED=$'\033[31m'; YEL=$'\033[33m'; GRN=$'\033[32m'; BOLD=$'\033[1m'; OFF=$'\033[0m'
 
-[ -f "$QUEUE" ] || { printf 'queue not found: %s\n' "$QUEUE" >&2; exit 2; }
+# The queue is each developer's own; one who has none yet has nothing to audit.
+[ -f "$QUEUE" ] || { printf 'no queue at %s: nothing to audit\n' "$QUEUE"; exit 0; }
 
 if ! command -v gh >/dev/null 2>&1; then
     printf '%sSKIP%s gh is not installed -- issue state NOT verified (this is not a pass)\n' "$YEL" "$OFF"

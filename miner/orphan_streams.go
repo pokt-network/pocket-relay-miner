@@ -36,9 +36,8 @@ type ScanFunc func(ctx context.Context, pattern string) ([]string, error)
 //
 // Taking the union means only a supplier that NOTHING claims is treated as gone.
 //
-// PRECONDITION FOR PRUNING THE INDEX (the "agujero 8" gap — nothing today
-// removes a crashed miner's entries from the registry index — see
-// scripts/localonly/REVIEW-2026-08-20-r1-stream-lifecycle.md): that gap is
+// PRECONDITION FOR PRUNING THE INDEX (nothing today removes a crashed miner's
+// entries from the registry index): that gap is
 // currently load-bearing for THIS function, not just an independent leak. The
 // supplier cache now carries a bounded TTL (cache.SupplierCacheTTLFromParams,
 // ~2 sessions -- tens of minutes on mainnet at its actual, drifting block

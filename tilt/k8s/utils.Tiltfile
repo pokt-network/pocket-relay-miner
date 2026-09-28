@@ -27,8 +27,7 @@ def render_validator_config_toml(base_toml, block_time_seconds):
     base of the miner's config: the clock is layered on top here instead of
     being edited into the file. Editing it is what made every run at a
     non-default block time dirty the tree, and a dirty tree makes a load run
-    unattributable -- scripts/localonly/_state/loadgen/run-base111.sh refuses to
-    start on one.
+    unattributable.
 
     timeout_commit is the knob that sets the clock: it is a fixed sleep AFTER a
     block commits, so the block time is it plus the consensus round, and that

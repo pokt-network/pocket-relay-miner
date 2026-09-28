@@ -461,9 +461,8 @@ the SAME harness against the pre-fix version of the gate (`git show <sha>:<path>
 and watch it go red: a harness that only passes on the fixed gate has not shown
 it would have caught anything.
 
-Working example, written that day:
-`scripts/localonly/_state/teeth-live-gate.sh` -- six cases, and it reports which
-defect each one catches and, in its header, which defect it does NOT cover.
+The harness that day had six cases, and it reported which defect each one
+catches and, in its header, which defect it does NOT cover.
 
 **The baseline ROTS, and it rots the moment you succeed.** A harness that
 compares against `HEAD` is comparing the fix against itself as soon as the fix is

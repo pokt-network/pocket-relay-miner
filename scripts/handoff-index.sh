@@ -18,9 +18,13 @@
 # rewritten, sessions read a stale one, and a chain of branches sat unpushed for
 # days because each session wrote its finding into a hand-over nobody actioned.
 #
+# The queue and the hand-overs are each developer's own, on their own machine:
+# a developer who has none yet is not an error, and this says so and exits 0.
+#
 # Run: scripts/handoff-index.sh
-# Exit: 0 ok · 1 no canonical declared, or it does not exist · 2 the pointer is
-#       stale (a hand-over is newer than the canonical one).
+# Exit: 0 ok, or no hand-overs yet · 1 hand-overs exist and no canonical is
+#       declared, or it does not exist · 2 the pointer is stale (a hand-over is
+#       newer than the canonical one).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -33,9 +37,8 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 
 if [ ! -d "$LOCAL_DIR" ]; then
-    red "ERROR: $LOCAL_DIR does not exist."
-    echo "Working documents live there and it is gitignored; nothing to index."
-    exit 1
+    echo "No $LOCAL_DIR on this machine: no hand-overs yet, nothing to index."
+    exit 0
 fi
 
 # The hand-overs, newest mtime last. mtime is used ONLY to order the listing and
@@ -44,8 +47,8 @@ mapfile -t handoffs < <(find "$LOCAL_DIR" -maxdepth 1 -name 'HANDOFF-*.md' -prin
     | sort -n | awk '{print $2}')
 
 if [ ${#handoffs[@]} -eq 0 ]; then
-    red "ERROR: no HANDOFF-*.md in $LOCAL_DIR."
-    exit 1
+    echo "No HANDOFF-*.md in $LOCAL_DIR yet: nothing to index."
+    exit 0
 fi
 
 if [ ! -f "$QUEUE" ]; then

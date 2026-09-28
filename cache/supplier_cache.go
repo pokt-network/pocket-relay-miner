@@ -54,8 +54,7 @@ const (
 //
 // The miner rewrites an active supplier's entry every reconcile pass, so this
 // TTL only matters once nothing writes it anymore — the decommissioned-
-// supplier case (HIGH-1, review 2026-08-20:
-// scripts/localonly/REVIEW-2026-08-20-r1-stream-lifecycle.md). Before this,
+// supplier case. Before this,
 // SetSupplierState wrote with no TTL at all, so a supplier whose signing key
 // left the miner's keyring mid-teardown froze at its last-written state —
 // often still "staked, serving" — forever, with no cache layer left to

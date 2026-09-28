@@ -62,6 +62,6 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 | Script | What it does |
 |---|---|
 | `check-tracked-files.sh` | Fails when a file that must stay local (a working document, an ignored path) is tracked; `make check-tracked-files` and CI run it. |
-| `handoff-index.sh` | Indexes the session hand-overs in `localonly/` and says which one is canonical. |
-| `queue-audit.sh` | Audits the local work queue against the tree. |
+| `handoff-index.sh` | Indexes your own session hand-overs in `localonly/` and says which one is canonical; exits 0 when you have none. |
+| `queue-audit.sh` | Audits your own local work queue against the tree; exits 0 when you have none. |
 | `session-start-check.sh` | Reports the machine's state at the start of a session. |

@@ -25,9 +25,8 @@ def get_defaults():
             #
             # Loads that measure against mainnet raise it to 60 in
             # tilt_config.yaml, which is gitignored -- that is the point of the
-            # knob: changing the clock for a run leaves the tree clean, and
-            # scripts/localonly/_state/loadgen/run-base111.sh refuses to run on
-            # a dirty tree.
+            # knob: changing the clock for a run leaves the tree clean, and a
+            # load run on a dirty tree cannot be attributed to a commit.
             "block_time_seconds": 30,
         },
         "validator": {
