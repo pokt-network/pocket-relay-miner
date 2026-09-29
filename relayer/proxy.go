@@ -87,6 +87,12 @@ const (
 	// other than the one that owns the connection. Bounded label: it is the
 	// name of one gate, not client-supplied text.
 	rejectReasonSupplierChanged = "supplier_changed"
+	// rejectReasonServiceChanged and rejectReasonApplicationChanged mark a
+	// WebSocket frame whose session header names a service or an application
+	// other than the one the connection established. Bounded labels, like
+	// supplier_changed.
+	rejectReasonServiceChanged     = "service_changed"
+	rejectReasonApplicationChanged = "application_changed"
 	// rejectReasonNoRelayYet marks a raw (non-RelayRequest) WebSocket frame
 	// arriving before any relay has established the connection.
 	rejectReasonNoRelayYet = "no_relay_yet"

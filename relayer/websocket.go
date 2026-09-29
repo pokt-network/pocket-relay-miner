@@ -293,7 +293,7 @@ type WebSocketBridge struct {
 	// It has two sources and one moment of decision. A v2 handshake carries
 	// Pocket-Supplier-Address, so the owner exists before the first frame; a v1
 	// handshake carries nothing, so it is adopted from the first RelayRequest.
-	// From that moment on the bridge HAS an owner: adoptOrVerifyOwner requires
+	// From that moment on the bridge HAS an owner: adoptOrVerifyIdentity requires
 	// every subsequent frame to name the same one, and closes the connection
 	// otherwise.
 	//
@@ -310,6 +310,16 @@ type WebSocketBridge struct {
 	// messageLoop and read from the SessionMonitor callback goroutine
 	// (handleSessionExpiration -> sendSessionExpirationMessage).
 	owner atomic.Pointer[string]
+
+	// application is the application address this bridge belongs to, adopted
+	// from the first RelayRequest (no handshake carries a signed one; App-Address
+	// is only logged). Together with owner and serviceID it is the identity the
+	// connection established, and adoptOrVerifyIdentity closes the connection on
+	// a frame naming another. applicationSet marks the adoption, because ""
+	// is a value a frame can carry. Touched only by the goroutine that handles
+	// gateway frames (awaitFirstFrame, then messageLoop, which it starts).
+	application    string
+	applicationSet bool
 
 	// Simulation (optional). When simulated is true, every gateway message on
 	// this connection goes through simVerifier's Admission zone instead of
@@ -888,16 +898,27 @@ func (b *WebSocketBridge) ownerAddress() string {
 	return ""
 }
 
-// adoptOrVerifyOwner enforces the rule that a bridge has exactly one supplier.
+// adoptOrVerifyIdentity enforces the rule that a bridge has exactly one
+// identity: one supplier, one service and one application.
 //
-// The first frame that names a supplier adopts it as the bridge's owner; every
-// frame after that must name the same one. A frame naming a different supplier,
-// or none at all, closes the connection -- the same convention every other
-// admission failure on this bridge already follows, because a close code is the
-// only thing a WebSocket client can tell apart from backend traffic.
+// The service is fixed by the handshake. The first frame that names a supplier
+// adopts it as the bridge's owner, and the first frame adopts its application;
+// every frame after that must name the same three. A frame naming a different
+// one, or no supplier at all, closes the connection -- the same convention every
+// other admission failure on this bridge already follows, because a close code
+// is the only thing a WebSocket client can tell apart from backend traffic.
+//
+// The service matters because everything downstream reads b.serviceID and not
+// the frame's: the backend the frame is forwarded to, and the difficulty and
+// compute units it is mined with, while the session it is stored under comes
+// from the frame. A frame for another service would put a leaf weighted with
+// this service's compute units into the other service's tree, and the chain
+// rejects that claim. The session id is not pinned: while this connection's
+// session is in its grace window, frames of the next session can arrive on it
+// with the same identity.
 //
 // It returns false when it has closed the connection, and the caller returns.
-func (b *WebSocketBridge) adoptOrVerifyOwner(relayReq *servicetypes.RelayRequest) bool {
+func (b *WebSocketBridge) adoptOrVerifyIdentity(relayReq *servicetypes.RelayRequest) bool {
 	reqSupplier := relayReq.Meta.SupplierOperatorAddress
 
 	if reqSupplier == "" {
@@ -917,6 +938,30 @@ func (b *WebSocketBridge) adoptOrVerifyOwner(relayReq *servicetypes.RelayRequest
 		b.logger.Debug().
 			Msg("relay request carries no session header - closing connection")
 		_ = b.closeWithReason(CloseValidationFailed, "relay request carries no session header", wsCloseInitiatorRelayer)
+		return false
+	}
+
+	if svc := relayReq.Meta.SessionHeader.ServiceId; svc != b.serviceID {
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonServiceChanged).Inc()
+		b.logger.Debug().
+			Str("requested", svc).
+			Msg("relay request names a different service than this connection - closing connection")
+		_ = b.closeWithReason(CloseValidationFailed, "service does not match this connection", wsCloseInitiatorRelayer)
+		return false
+	}
+
+	reqApp := relayReq.Meta.SessionHeader.ApplicationAddress
+	if !b.applicationSet {
+		// Admission still runs below and closes the connection if it fails, so
+		// an application adopted here never outlives a rejected frame.
+		b.application, b.applicationSet = reqApp, true
+	} else if reqApp != b.application {
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonApplicationChanged).Inc()
+		b.logger.Debug().
+			Str("application", b.application).
+			Str("requested", reqApp).
+			Msg("relay request names a different application than this connection - closing connection")
+		_ = b.closeWithReason(CloseValidationFailed, "application does not match this connection", wsCloseInitiatorRelayer)
 		return false
 	}
 
@@ -954,11 +999,11 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		return
 	}
 
-	// The owner gate runs before ANYTHING else this frame could reach: before
+	// The identity gate runs before ANYTHING else this frame could reach: before
 	// the session height is pinned and before the bridge is registered with the
 	// global SessionMonitor, both of which are state a frame that does not own
 	// this connection must not be able to set.
-	if !b.adoptOrVerifyOwner(relayReq) {
+	if !b.adoptOrVerifyIdentity(relayReq) {
 		return
 	}
 
@@ -1405,7 +1450,7 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	// Increment relay count for this connection
 	count := b.relayCount.Add(1)
 
-	// The bridge's owner, never the address inside req: adoptOrVerifyOwner has
+	// The bridge's owner, never the address inside req: adoptOrVerifyIdentity has
 	// already proved they are equal for every frame that gets this far, and
 	// reading the owner is what keeps mining, metering and signing on one
 	// identity if that gate is ever weakened.
@@ -1836,7 +1881,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		// a frame that contradicts an established owner is a verdict about the
 		// CLIENT and closes with CloseValidationFailed instead.
 		//
-		// v1 names no supplier here; their gate is adoptOrVerifyOwner on
+		// v1 names no supplier here; their gate is adoptOrVerifyIdentity on
 		// the first frame, whose ring signature and ownsSupplierKey check are
 		// the real authority for both protocols.
 		if handshakeSupplier := r.Header.Get(HeaderPocketSupplierAddress); handshakeSupplier != "" {
