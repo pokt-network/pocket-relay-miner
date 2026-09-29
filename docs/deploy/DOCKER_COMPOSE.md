@@ -79,24 +79,24 @@ column), and outbound HTTPS to
 **Run**
 
 ```bash
-docker pull ghcr.io/pokt-network/pocket-relay-miner:v0.1.0
+docker pull ghcr.io/pokt-network/pocket-relay-miner:v0.1.1
 ```
 
 **Expect**: exit 0 and `Status: Downloaded newer image` or
 `Status: Image is up to date`, then the image name on the last line
-(checked on 2026-09-27 against the published tag).
+(checked at release against the published tag).
 
 **If not**: `manifest unknown` → check the name is exactly as above. If
 this host cannot reach `ghcr.io`, build the image locally with the same name
 (takes a few minutes), because the compose file names that image:
 
 ```bash
-git checkout v0.1.0 2>/dev/null || echo "tag v0.1.0 not found: building the current checkout"
-docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.0 .
+git checkout v0.1.1 2>/dev/null || echo "tag v0.1.1 not found: building the current checkout"
+docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.1 .
 ```
 
 If the tag is not in your checkout, fetch it first (`git fetch --tags`):
-otherwise the image is whatever commit you have checked out, under the v0.1.0
+otherwise the image is whatever commit you have checked out, under the v0.1.1
 name.
 
 **Stop if**: someone asks you to use another tag. Relayer and miner must run

@@ -120,7 +120,7 @@ are not checked, and breaking them is unsupported.
    on 1 relayer + 1 miner and on 2 relayers + 2 miners, the latter at lower
    load; the load tests and every capacity figure are from 1 relayer + 1 miner.
 2. **Same version for relayer and miner**: image
-   `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0` for both, or the binary of
+   `ghcr.io/pokt-network/pocket-relay-miner:v0.1.1` for both, or the binary of
    the same tag. Mixed versions are not supported. Never use a moving tag.
 3. **Redis 8.10 or newer, with `maxmemory` set and `maxmemory-policy
    noeviction`.** Both binaries refuse to start when `redis_version` is below
