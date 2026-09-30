@@ -1,0 +1,60 @@
+# git-cliff configuration: the commit list that seeds a draft release's notes.
+# .github/workflows/release.yml runs it on every vX.Y.Z and vX.Y.Z-rc.N tag
+# with an explicit range (previous release..tag); the maintainer edits the
+# result before publishing.
+
+[changelog]
+# One release is rendered: the tag being released. No version heading (the
+# release page carries the tag), no header, no footer.
+body = """
+{%- for group, commits in commits | group_by(attribute="group") %}
+## {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.breaking %}**Breaking:** {% endif %}\
+{% if commit.scope %}`{{ commit.scope }}`: {% endif %}\
+{{ commit.message | upper_first }}
+{%- if commit.body %}
+
+  {{ commit.body | trim | replace(from="\n", to="\n  ") }}
+{%- endif %}
+{% endfor %}
+{% endfor -%}
+"""
+# Not trimmed: trimming removes the indentation that keeps a paragraph under
+# its bullet.
+trim = false
+# An empty range renders nothing; the workflow writes its own line for that.
+render_always = false
+
+[git]
+conventional_commits = true
+# A commit that is not conventional is listed under Other, never dropped: the
+# draft must show every commit in the range.
+filter_unconventional = false
+protect_breaking_commits = true
+# Only vX.Y.Z is a release boundary. A pre-release tag (vX.Y.Z-rc.N) is not:
+# its commits belong to the next release, and when it is the tag being
+# released, --tag on the command line names it.
+tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+$'
+commit_preprocessors = [
+  # "(#49)" from a squash-merge becomes a link; an issue number gets the same
+  # link, GitHub redirects /pull/N to /issues/N.
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/pokt-network/pocket-relay-miner/pull/${1}))" },
+  # Trailers that must not reach a release page.
+  { pattern = '(?m)^(Co-Authored-By|Co-authored-by|Claude-Session|Signed-off-by): .*\n?', replace = "" },
+  { pattern = '(?m)^.*Generated with \[Claude Code\].*\n?', replace = "" },
+]
+# Groups appear in the order of their first commit's parser. The <!-- N -->
+# prefix fixes that order; the template strips it. Every type is shown: the
+# maintainer deletes what does not belong, and cannot judge what was hidden.
+commit_parsers = [
+  { message = '^[a-z]+(\([^)]*\))?!:', group = "<!-- 0 -->Breaking changes" },
+  { message = "^feat", group = "<!-- 1 -->Features" },
+  { message = "^fix", group = "<!-- 2 -->Fixes" },
+  { message = "^perf", group = "<!-- 3 -->Performance" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^(refactor|test|build|ci|chore|style|revert)", group = "<!-- 5 -->Internal" },
+  { message = ".*", group = "<!-- 6 -->Other" },
+]
+filter_commits = false
+sort_commits = "oldest"

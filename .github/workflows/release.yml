@@ -245,14 +245,61 @@ jobs:
             exit 1
           fi
 
-      - name: Write the draft release body
+      - name: Find the commits since the previous release
+        id: range
         if: steps.existing.outputs.exists == 'false'
         run: |
-          # The release is created as a DRAFT with only the image references.
-          # Its notes are written by hand and published with the release's
-          # attachments; a list generated from git log would replace them.
+          # The notes list every commit since the previous vX.Y.Z reachable from
+          # this tag. A pre-release tag never bounds the range: a release lists
+          # what its candidates carried, and a candidate lists everything since
+          # the release it follows. No previous release: all history.
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          PREV="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' "${TAG}^" 2>/dev/null || true)"
+          RANGE="${PREV:+${PREV}..}${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "range=${PREV:+${PREV}..${TAG}}" >> "$GITHUB_OUTPUT"
+          echo "expected=$(git rev-list --count "${RANGE}")" >> "$GITHUB_OUTPUT"
+          echo "notes range: ${RANGE}"
+
+      - name: List the commits with git-cliff
+        id: notes
+        if: steps.existing.outputs.exists == 'false'
+        # A failure here costs the commit list, never the release.
+        continue-on-error: true
+        uses: orhun/git-cliff-action@v4
+        with:
+          version: v2.14.2
+          config: cliff.toml
+          args: --offline --tag ${{ steps.range.outputs.tag }} ${{ steps.range.outputs.range }}
+        env:
+          OUTPUT: RELEASE_COMMITS.md
+
+      - name: Write the draft release body
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          NOTES_OUTCOME: ${{ steps.notes.outcome }}
+          EXPECTED: ${{ steps.range.outputs.expected }}
+        run: |
+          # The release is created as a DRAFT. Its body starts with the commits
+          # since the previous release, which the maintainer edits into the notes
+          # before publishing, followed by the image references.
+          #
+          # The commit list is copied with cat and never passes through the
+          # heredoc below: an unquoted heredoc expands $(...) and backticks, and
+          # commit subjects carry backticks.
+          set -euo pipefail
           CURRENT_TAG="${GITHUB_REF#refs/tags/}"
-          cat > RELEASE_NOTES.md << EOF
+          if [ "${NOTES_OUTCOME}" = success ] && [ -s RELEASE_COMMITS.md ]; then
+            cat RELEASE_COMMITS.md > RELEASE_NOTES.md
+            got="$(grep -c '^- ' RELEASE_COMMITS.md || true)"
+            [ "${got}" = "${EXPECTED}" ] || echo "::warning::the commit list has ${got} entries for ${EXPECTED} commits in the range"
+          else
+            echo "::warning::git-cliff did not produce the commit list; the draft carries a pointer instead"
+            echo '_Commit list not generated: write it from `git log` for this tag._' > RELEASE_NOTES.md
+          fi
+          cat >> RELEASE_NOTES.md << EOF
+
           ## Docker images
 
           \`\`\`bash
