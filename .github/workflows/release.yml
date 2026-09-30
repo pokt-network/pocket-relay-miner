@@ -6,7 +6,7 @@ on:
       - dev      # Development builds → dev tag
       - main     # Release candidates → rc tag
     tags:
-      - 'v*'     # Production releases → version + latest tags
+      - 'v*'     # Releases → version + latest; pre-releases (v1.0.0-rc.1) → version only
 
 permissions:
   contents: write
@@ -21,6 +21,7 @@ jobs:
       commit: ${{ steps.meta.outputs.commit }}
       build_date: ${{ steps.meta.outputs.build_date }}
       tags: ${{ steps.meta.outputs.tags }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -39,7 +40,16 @@ jobs:
           echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
 
           # Determine image tags based on ref type and branch
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+          PRERELEASE=false
+          if [[ $GITHUB_REF == refs/tags/v*-* ]]; then
+            # Pre-release tag (semver, e.g. v1.0.0-rc.1) → that tag only.
+            # latest stays on the last release: a candidate is deployed by
+            # its own tag, never picked up by whoever pulls latest.
+            VERSION_TAG="${GITHUB_REF#refs/tags/}"
+            TAGS="ghcr.io/pokt-network/pocket-relay-miner:${VERSION_TAG}"
+            PRERELEASE=true
+            echo "🧪 Pre-release: ${VERSION_TAG}"
+          elif [[ $GITHUB_REF == refs/tags/v* ]]; then
             # Git tag (e.g., v1.0.0) → the same tag, v included, + latest
             # Example: v1.0.0 → tags: v1.0.0, latest
             VERSION_TAG="${GITHUB_REF#refs/tags/}"
@@ -63,6 +73,7 @@ jobs:
           fi
 
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
 
   build-amd64:
     name: Build AMD64
@@ -259,7 +270,7 @@ jobs:
         with:
           body_path: RELEASE_NOTES.md
           draft: true
-          prerelease: false
+          prerelease: ${{ needs.metadata.outputs.prerelease == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

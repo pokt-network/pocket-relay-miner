@@ -87,7 +87,9 @@ version). Run tests with `make` too, except when debugging one package.
    bullets: what changed, how it was tested, what breaks.
 5. PRs are squash-merged.
 6. A `vX.Y.Z` tag on `main` publishes `ghcr.io/pokt-network/pocket-relay-miner:vX.Y.Z`
-   plus `latest`, and opens a draft release.
+   plus `latest`, and opens a draft release. A pre-release tag (`vX.Y.Z-rc.N`,
+   on any commit) publishes only its own image, leaves `latest` alone, and
+   opens a draft marked as a pre-release.
 
 Everything tracked is in English: code, comments, docs, skills, scripts, commit
 messages. The static gate fails on Spanish in any tracked file.
