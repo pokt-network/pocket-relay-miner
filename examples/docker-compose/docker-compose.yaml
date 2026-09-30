@@ -54,7 +54,7 @@ services:
   # Builds the claim and proof for every served relay and submits them.
   # Exits if it cannot read the chain at startup, hence restart: on-failure.
   miner:
-    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.1
+    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.2
     command: ["miner", "--config", "/config/miner.yaml"]
     volumes:
       - ./config/miner.yaml:/config/miner.yaml:ro
@@ -85,7 +85,7 @@ services:
   # Serves relays: verifies each request, forwards it to your backend, signs
   # the response and hands the relay to the miner through Redis.
   relayer:
-    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.1
+    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.2
     command: ["relayer", "--config", "/config/relayer.yaml"]
     volumes:
       - ./config/relayer.yaml:/config/relayer.yaml:ro

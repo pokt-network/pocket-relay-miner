@@ -1,4 +1,4 @@
-# Deploying Pocket RelayMiner v0.1.1
+# Deploying Pocket RelayMiner v0.1.2
 
 Start here, pick 1 path, and follow its runbook from the first step.
 
@@ -88,7 +88,7 @@ produces, where there is one.
 
 | # | Invariant | If broken |
 |---|---|---|
-| 1 | Relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.1`, or binaries built from tag `v0.1.1` | mixed versions are not supported |
+| 1 | Relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.2`, or binaries built from tag `v0.1.2` | mixed versions are not supported |
 | 2 | Redis 8.10 or newer with `maxmemory` set and `maxmemory-policy noeviction` ([config.redis.example.conf](../../config.redis.example.conf)). Checked when the process starts, not by `validate` | Redis older than 8.10, `maxmemory` 0 or another policy: [both refuse to start](TROUBLESHOOTING.md#redis) |
 | 3 | `GOMEMLIMIT` and `GOMAXPROCS` set, or container / systemd memory and CPU limits | [each process sizes itself from the whole host](TROUBLESHOOTING.md#memory-and-cpu) |
 | 4 | Miner config has `block_time_seconds` and the right `pocket_node.chain_id`, and the node is reachable | [the miner exits](TROUBLESHOOTING.md#miner-does-not-start) |

@@ -79,7 +79,7 @@ column), and outbound HTTPS to
 **Run**
 
 ```bash
-docker pull ghcr.io/pokt-network/pocket-relay-miner:v0.1.1
+docker pull ghcr.io/pokt-network/pocket-relay-miner:v0.1.2
 ```
 
 **Expect**: exit 0 and `Status: Downloaded newer image` or
@@ -91,12 +91,12 @@ this host cannot reach `ghcr.io`, build the image locally with the same name
 (takes a few minutes), because the compose file names that image:
 
 ```bash
-git checkout v0.1.1 2>/dev/null || echo "tag v0.1.1 not found: building the current checkout"
-docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.1 .
+git checkout v0.1.2 2>/dev/null || echo "tag v0.1.2 not found: building the current checkout"
+docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.2 .
 ```
 
 If the tag is not in your checkout, fetch it first (`git fetch --tags`):
-otherwise the image is whatever commit you have checked out, under the v0.1.1
+otherwise the image is whatever commit you have checked out, under the v0.1.2
 name.
 
 **Stop if**: someone asks you to use another tag. Relayer and miner must run
