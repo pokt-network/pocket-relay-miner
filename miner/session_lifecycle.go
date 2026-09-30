@@ -395,6 +395,16 @@ func (m *SessionLifecycleManager) resumeUnsentSubmission(ctx context.Context, se
 	}
 	from := session.State
 	if err := m.sessionStore.UpdateState(ctx, session.SessionID, resumeTo); err != nil {
+		// The store refuses the rewind of a transaction another miner sent
+		// after this one loaded the session: that is the guard working.
+		if errors.Is(err, ErrSessionNotDeferred) {
+			m.logger.Debug().
+				Err(err).
+				Str(logging.FieldSessionID, session.SessionID).
+				Str("state", string(from)).
+				Msg("not resuming: the transaction was sent after the session was loaded")
+			return
+		}
 		m.logger.Warn().
 			Err(err).
 			Str(logging.FieldSessionID, session.SessionID).

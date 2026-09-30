@@ -30,7 +30,7 @@ const (
 // received per process (scripts/gates/live.sh, "block events published ==
 // received").
 type BlockEventPublisher interface {
-	// PublishBlockHeight publishes a new block height to all subscribers.
+	// PublishBlockHeight records a new block and publishes it to all subscribers.
 	PublishBlockHeight(ctx context.Context, event BlockEvent) error
 }
 

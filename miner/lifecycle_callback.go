@@ -1138,12 +1138,13 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// computed with new-epoch params would resolve the wrong claim window.
 		sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 		if err != nil {
+			lc.deferClaims(ctx, groupSnapshots)
 			groupErrs = append(groupErrs,
 				fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err))
 			continue
 		}
 
-		// Wait for claim window to open and get the block hash for timing spread
+		// Wait for claim window to open
 		claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
 		claimWindowCloseHeight := sharedtypes.GetClaimWindowCloseHeight(sharedParams, sessionEndHeight)
 		currentHeight := lc.blockClient.LastBlock(ctx).Height()
@@ -1161,7 +1162,11 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			Strs("session_ids", sessionIDs).
 			Msg("waiting for claim window to open")
 
-		if _, blockErr := lc.waitForBlock(ctx, claimWindowOpenHeight); blockErr != nil {
+		waitCtx, cancelWait := lc.windowContext(ctx, claimWindowCloseHeight)
+		blockErr := lc.waitForHeight(waitCtx, claimWindowOpenHeight)
+		cancelWait()
+		if blockErr != nil {
+			lc.deferClaims(ctx, groupSnapshots)
 			groupErrs = append(groupErrs,
 				fmt.Errorf("failed to wait for claim window open: %w", blockErr))
 			continue
@@ -1633,6 +1638,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// its bytes are the only ones that match the messages stored beside them.
 		var claimTxHash string
 		var claimSigned tx.SignedTxPayload
+		// nodeBehind: a window refusal from a node behind our height returned
+		// the group to active; it is neither a closed window nor a tx error.
+		nodeBehind := false
 		// The increment lives in the BODY because an ejection is not a retry: the
 		// batch changed, so the next send asks a different question. What bounds
 		// the ejections instead is that each one strictly shrinks `remaining`,
@@ -1674,8 +1682,19 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// settles the session as claim_tx_error instead of
 				// claim_window_closed. Same fact, opposite diagnosis.
 				errorMsg := submitErr.Error()
-				if errors.Is(submitErr, tx.ErrTxWindowExpired) ||
-					strings.Contains(errorMsg, "claim window") || strings.Contains(errorMsg, "claim_window") {
+				windowRefusal := errors.Is(submitErr, tx.ErrTxWindowExpired) ||
+					strings.Contains(errorMsg, "claim window") || strings.Contains(errorMsg, "claim_window")
+				if windowRefusal && !lc.windowRefusalIsFinal(ctx, submitErr, claimWindowClose) {
+					logger.Warn().
+						Err(submitErr).
+						Int64("current_height", lc.blockClient.LastBlock(ctx).Height()).
+						Int64("claim_window_close", claimWindowClose).
+						Msg("the node refused the claims as outside their window while our height has it open; returning the group to the next block")
+					lc.deferClaims(ctx, groupSnapshots)
+					nodeBehind = true
+					break
+				}
+				if windowRefusal {
 					logger.Error().
 						Err(submitErr).
 						Int64("current_height", lc.blockClient.LastBlock(ctx).Height()).
@@ -1899,6 +1918,13 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			}
 		}
 
+		// Not a failure of the cycle: the group is back in active and the Warn
+		// above records why. An error here would read, to the block engine and
+		// to an operator, as a lost claim.
+		if nodeBehind {
+			continue
+		}
+
 		if lastErr != nil && !windowClosed {
 			// A store means the self-heal persist further down will hand these
 			// sessions to the inclusion reconciler, which is what makes the
@@ -2090,6 +2116,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// computed with new-epoch params would resolve the wrong proof window.
 		sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 		if err != nil {
+			lc.deferProofs(ctx, groupSnapshots)
 			groupErrs = append(groupErrs,
 				fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err))
 			continue
@@ -2114,8 +2141,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			Msg("waiting for proof window to open")
 
 		// Wait for proof window to open (we'll use the seed block, not this one)
-		_, blockErr := lc.waitForBlock(ctx, proofWindowOpenHeight)
+		waitCtx, cancelWait := lc.windowContext(ctx, proofWindowCloseHeight)
+		blockErr := lc.waitForHeight(waitCtx, proofWindowOpenHeight)
+		cancelWait()
 		if blockErr != nil {
+			lc.deferProofs(ctx, groupSnapshots)
 			groupErrs = append(groupErrs,
 				fmt.Errorf("failed to wait for proof window open: %w", blockErr))
 			continue
@@ -2147,8 +2177,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		proofRequirementSeedHeight := earliestProofCommitHeight - 1
 
 		// Wait for the seed block to be available
-		proofRequirementSeedBlock, seedErr := lc.waitForBlock(ctx, proofRequirementSeedHeight)
+		seedCtx, cancelSeed := lc.windowContext(ctx, proofWindowCloseHeight)
+		proofRequirementSeedBlock, seedErr := lc.waitForBlock(seedCtx, proofRequirementSeedHeight)
+		cancelSeed()
 		if seedErr != nil {
+			lc.deferProofs(ctx, groupSnapshots)
 			logger.Warn().
 				Err(seedErr).
 				Int64("seed_height", proofRequirementSeedHeight).
@@ -2334,7 +2367,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// so waiting on it is a no-op today and becomes load-bearing the moment that
 		// spread is re-enabled; TestProofDistributionStillDisabled fails loudly then.
 		earliestProofHeight := earliestProofCommitHeight
-		if _, earliestErr := lc.waitForBlock(ctx, earliestProofHeight); earliestErr != nil {
+		earliestCtx, cancelEarliest := lc.windowContext(ctx, proofWindowCloseHeight)
+		earliestErr := lc.waitForHeight(earliestCtx, earliestProofHeight)
+		cancelEarliest()
+		if earliestErr != nil {
+			lc.deferProofs(ctx, sessionsNeedingProof)
 			groupErrs = append(groupErrs,
 				fmt.Errorf("failed to wait for earliest proof commit height: %w", earliestErr))
 			continue
@@ -2697,6 +2734,8 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// reconciler, so nothing may be read back from it after the call.
 		var proofTxHash string
 		var proofSigned tx.SignedTxPayload
+		// nodeBehind: see the claim twin.
+		nodeBehind := false
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
 			// Re-inject instead of re-signing, for the reason the claim twin
 			// states in full. THE PROOF LOOP HAS NO EJECTION -- the chain never
@@ -2728,8 +2767,19 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				// together deliberately: in this file a fix applied to one cycle
 				// and not the other has been the recurring defect.
 				errorMsg := submitErr.Error()
-				if errors.Is(submitErr, tx.ErrTxWindowExpired) ||
-					strings.Contains(errorMsg, "proof window") || strings.Contains(errorMsg, "proof_window") {
+				windowRefusal := errors.Is(submitErr, tx.ErrTxWindowExpired) ||
+					strings.Contains(errorMsg, "proof window") || strings.Contains(errorMsg, "proof_window")
+				if windowRefusal && !lc.windowRefusalIsFinal(ctx, submitErr, proofWindowClose) {
+					logger.Warn().
+						Err(submitErr).
+						Int64("current_height", lc.blockClient.LastBlock(ctx).Height()).
+						Int64("proof_window_close", proofWindowClose).
+						Msg("the node refused the proofs as outside their window while our height has it open; returning the group to the next block")
+					lc.deferProofs(ctx, validProofSnapshots)
+					nodeBehind = true
+					break
+				}
+				if windowRefusal {
 					logger.Error().
 						Err(submitErr).
 						Int64("current_height", lc.blockClient.LastBlock(ctx).Height()).
@@ -2879,6 +2929,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 				break // Success, exit retry loop
 			}
+		}
+
+		// Not a failure of the cycle: see the claim twin.
+		if nodeBehind {
+			continue
 		}
 
 		if lastErr != nil && !windowClosed && !notRequired {
@@ -3192,6 +3247,42 @@ func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, 
 	)
 }
 
+// deferProofs returns a group's sessions to claimed, so the block engine asks
+// for their proofs again next block.
+func (lc *LifecycleCallback) deferProofs(ctx context.Context, snapshots []*SessionSnapshot) {
+	for _, snapshot := range snapshots {
+		lc.deferProof(ctx, snapshot)
+	}
+}
+
+// deferClaims returns a group's sessions to active after the group stopped for a reason that will not still be true next
+// block -- a node that did not have the height yet, a params read that
+// blinked. It is deferProof one window earlier: a session left in claiming can
+// only leave through the claim window closing, which loses the whole claim,
+// while from active the block engine returns it to claiming on every block
+// inside the claim window. Same context rule as deferProof.
+func (lc *LifecycleCallback) deferClaims(ctx context.Context, snapshots []*SessionSnapshot) {
+	if lc.sessionCoordinator == nil || len(snapshots) == 0 {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deferWriteTimeout)
+	defer cancel()
+	for _, snapshot := range snapshots {
+		if err := lc.sessionCoordinator.OnClaimDeferred(writeCtx, snapshot.SessionID); err != nil {
+			event := lc.logger.Warn()
+			if errors.Is(err, ErrSessionNotDeferred) {
+				event = lc.logger.Debug()
+			}
+			event.Err(err).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+				Msg("claim not deferred; the session keeps its state")
+			continue
+		}
+		snapshot.State = SessionStateActive
+	}
+}
+
 // deferProof returns a session to claimed after a proof attempt was
 // abandoned for a reason that will not still hold next block, so the
 // per-block transition engine tries it again until the proof window closes.
@@ -3208,12 +3299,21 @@ func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, 
 // session then ages out through proof_window_closed, which at least counts
 // the loss. Same rule as resumeUnsentSubmission -- when the write does not
 // land, the session stays as it was.
+//
+// The write gets a context of its own: the step that failed may have failed
+// because ctx ended, and the rewind must land anyway.
 func (lc *LifecycleCallback) deferProof(ctx context.Context, snapshot *SessionSnapshot) {
 	if lc.sessionCoordinator == nil {
 		return
 	}
-	if err := lc.sessionCoordinator.OnProofDeferred(ctx, snapshot.SessionID); err != nil {
-		lc.logger.Warn().
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deferWriteTimeout)
+	defer cancel()
+	if err := lc.sessionCoordinator.OnProofDeferred(writeCtx, snapshot.SessionID); err != nil {
+		event := lc.logger.Warn()
+		if errors.Is(err, ErrSessionNotDeferred) {
+			event = lc.logger.Debug()
+		}
+		event.
 			Err(err).
 			Str(logging.FieldSessionID, snapshot.SessionID).
 			Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
@@ -3325,101 +3425,107 @@ func (lc *LifecycleCallback) OnProofTxError(ctx context.Context, snapshot *Sessi
 	return nil
 }
 
-// waitForBlock waits for a specific block height to be reached using event-driven
-// block notifications. This is more efficient than polling and doesn't block workers.
-func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
+// windowRefusalIsFinal reports whether a submission the node refused as
+// outside its window really missed it. The node's words are not evidence about
+// OUR window: poktroll refuses a claim or proof that is too early with the same
+// text as one that is too late ("current block height (N) is less than the
+// session's earliest claim commit height (N+1): claim attempted outside of the
+// session's claim window"), and the node that simulated it can be a block
+// behind us. The refusal is final only when the transaction's own timeout
+// passed (ErrTxWindowExpired: the node is past the close) or our height
+// reached windowClose.
+func (lc *LifecycleCallback) windowRefusalIsFinal(ctx context.Context, submitErr error, windowClose int64) bool {
+	return errors.Is(submitErr, tx.ErrTxWindowExpired) || lc.blockClient.LastBlock(ctx).Height() >= windowClose
+}
+
+// heightRecheckInterval paces waitForHeight's re-read of LastBlock.
+const heightRecheckInterval = 1 * time.Second
+
+// deferWriteTimeout bounds the Redis writes that return a group's sessions to
+// their pre-submission state.
+const deferWriteTimeout = 5 * time.Second
+
+// waitForHeight waits until the block client's height reaches targetHeight.
+// It wakes on the client's block events AND re-reads LastBlock once per
+// heightRecheckInterval: an event channel can stay open and silent, and a wait
+// that only listens to it never ends. The block client's LastBlock is kept
+// current by its own poll of the leader's latest published height, so the
+// re-read sees the chain move even when no event arrives. ctx bounds the wait.
+func (lc *LifecycleCallback) waitForHeight(ctx context.Context, targetHeight int64) error {
 	startTime := time.Now()
-
-	// Check if we're already at or past the target height
-	currentBlock := lc.blockClient.LastBlock(ctx)
-	currentHeight := currentBlock.Height()
-
+	currentHeight := lc.blockClient.LastBlock(ctx).Height()
 	if currentHeight >= targetHeight {
-		// Already at target height - no wait needed
 		lc.logger.Debug().
 			Int64("target_height", targetHeight).
 			Int64("current_height", currentHeight).
-			Dur("elapsed_ms", time.Since(startTime)).
-			Msg("waitForBlock: already at target height (no wait)")
-		return lc.getBlockAtHeight(ctx, targetHeight)
+			Msg("waitForHeight: already at target height (no wait)")
+		return nil
 	}
 
-	// BLOCKING WAIT DETECTED - this will block until target height
-	blocksToWait := targetHeight - currentHeight
-	lc.logger.Warn().
+	lc.logger.Debug().
 		Int64("target_height", targetHeight).
 		Int64("current_height", currentHeight).
-		Int64("blocks_to_wait", blocksToWait).
-		Msg("BLOCKING: waitForBlock starting - waiting for future block")
+		Int64("blocks_to_wait", targetHeight-currentHeight).
+		Msg("waitForHeight: waiting for a future block")
 
-	// Try to use event-driven approach with Subscribe()
-	subscriber, ok := lc.blockClient.(interface {
+	// A nil channel never delivers, which leaves the re-read as the only wake.
+	var blockCh <-chan *localclient.SimpleBlock
+	if subscriber, ok := lc.blockClient.(interface {
 		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
-	})
-	if !ok {
-		// Fallback to polling if Subscribe() not available (shouldn't happen in production)
-		lc.logger.Warn().
-			Int64("target_height", targetHeight).
-			Msg("block client does not support Subscribe(), falling back to polling")
-		return lc.waitForBlockPolling(ctx, targetHeight)
+	}); ok {
+		subCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		blockCh = subscriber.Subscribe(subCtx, 10)
 	}
-
-	// Subscribe to block events - use small buffer since we only need to detect one block
-	blockCh := subscriber.Subscribe(ctx, 10)
-
-	for {
-		select {
-		case <-ctx.Done():
-			lc.logger.Warn().
-				Int64("target_height", targetHeight).
-				Dur("elapsed_ms", time.Since(startTime)).
-				Msg("waitForBlock: context cancelled while waiting")
-			return nil, ctx.Err()
-
-		case block, ok := <-blockCh:
-			if !ok {
-				// Channel closed, fall back to polling
-				lc.logger.Warn().
-					Int64("target_height", targetHeight).
-					Msg("block subscription channel closed, falling back to polling")
-				return lc.waitForBlockPolling(ctx, targetHeight)
-			}
-
-			if block.Height() >= targetHeight {
-				elapsed := time.Since(startTime)
-				lc.logger.Info().
-					Int64("target_height", targetHeight).
-					Int64("reached_height", block.Height()).
-					Int64("blocks_waited", block.Height()-currentHeight).
-					Dur("elapsed_ms", elapsed).
-					Msg("waitForBlock: target height reached")
-				return lc.getBlockAtHeight(ctx, targetHeight)
-			}
-		}
-	}
-}
-
-// waitForBlockPolling is the fallback polling approach (only used if Subscribe unavailable).
-func (lc *LifecycleCallback) waitForBlockPolling(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(heightRecheckInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			currentBlock := lc.blockClient.LastBlock(ctx)
-			if currentBlock.Height() >= targetHeight {
-				return lc.getBlockAtHeight(ctx, targetHeight)
+			return fmt.Errorf("waiting for height %d (at %d): %w",
+				targetHeight, lc.blockClient.LastBlock(ctx).Height(), ctx.Err())
+		case block, ok := <-blockCh:
+			if !ok {
+				blockCh = nil
+				continue
 			}
-
-			lc.logger.Debug().
-				Int64("current_height", currentBlock.Height()).
-				Int64("target_height", targetHeight).
-				Msg("waiting for block height (polling fallback)")
+			if block.Height() < targetHeight {
+				continue
+			}
+		case <-ticker.C:
+			if lc.blockClient.LastBlock(ctx).Height() < targetHeight {
+				continue
+			}
 		}
+		lc.logger.Debug().
+			Int64("target_height", targetHeight).
+			Int64("reached_height", lc.blockClient.LastBlock(ctx).Height()).
+			Dur("elapsed_ms", time.Since(startTime)).
+			Msg("waitForHeight: target height reached")
+		return nil
 	}
+}
+
+// waitForBlock waits for targetHeight and returns the block at it, whose hash
+// is what the validator seeds with.
+func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
+	if err := lc.waitForHeight(ctx, targetHeight); err != nil {
+		return nil, err
+	}
+	return lc.getBlockAtHeight(ctx, targetHeight)
+}
+
+// windowContext bounds a wait by the window it serves: it ends one block after
+// the block time says closeHeight should have been reached. Past the close the
+// session is settled by the block engine's own window accounting, so waiting
+// longer only holds a worker. With no block time configured it adds no bound.
+func (lc *LifecycleCallback) windowContext(ctx context.Context, closeHeight int64) (context.Context, context.CancelFunc) {
+	if lc.config.BlockTimeSeconds <= 0 {
+		return context.WithCancel(ctx)
+	}
+	blocksLeft := max(closeHeight-lc.blockClient.LastBlock(ctx).Height(), 0) + 1
+	return context.WithTimeout(ctx, time.Duration(blocksLeft*lc.config.BlockTimeSeconds)*time.Second)
 }
 
 // getBlockAtHeight fetches the specific block at targetHeight.

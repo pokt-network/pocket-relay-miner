@@ -17,6 +17,7 @@ import (
 	"github.com/hashicorp/go-version"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/poktroll/pkg/client"
 )
 
@@ -107,18 +108,85 @@ type BlockSubscriberConfig struct {
 	// QueryTimeout is the timeout for RPC queries (Block, ABCIInfo, Status).
 	// Default: 5 seconds
 	QueryTimeout time.Duration
+
+	// PollInterval is how often the node's latest height is polled, racing the
+	// websocket. Default: defaultPollInterval. Not an operator setting: only
+	// tests shorten it.
+	PollInterval time.Duration
 }
 
-// BlockSubscriber is a WebSocket-based BlockClient that subscribes to block events.
-// It implements `client.BlockClient` interface using CometBFT WebSocket subscriptions
-// instead of polling, providing immediate block notifications with automatic reconnection.
-type BlockSubscriber struct {
-	logger      logging.Logger
-	config      BlockSubscriberConfig
-	cometClient *http.HTTP
+const (
+	// defaultPollInterval paces the latest-height poll that races the
+	// websocket. One request per second to the node is the cost of never
+	// depending on the websocket alone.
+	defaultPollInterval = 1 * time.Second
 
-	// Current block state
+	// wsStaleBlocks is how many heights the poll may publish with the
+	// websocket saying nothing before the websocket client is thrown away and
+	// a new one opened.
+	wsStaleBlocks = 2
+
+	// maxReadFailures is how many passes may fail to read a height, for a
+	// reason other than "not yet", before that height is skipped.
+	maxReadFailures = 10
+
+	// maxCatchUpBlocks bounds how many missing heights one pass reads. Past
+	// it the oldest are skipped: a node that far behind is resyncing, and no
+	// window this process is waiting on is still open for them.
+	maxCatchUpBlocks = 64
+)
+
+// BlockSubscriber is the leader's single reader of blocks from the chain. It
+// learns that a height exists from two sources racing each other -- the
+// websocket's NewBlockHeader events and a poll of the node's latest height --
+// and publishes a height only after reading that block's canonical hash, in
+// order, with no height skipped.
+//
+// Why both sources: CometBFT's websocket is best effort. The node drops events
+// for a client it considers slow and can cancel a subscription with an error
+// the client may never receive; the client never closes the channel it hands
+// out, sends no pings, and gives up after its own reconnect attempts. Any of
+// those leaves an open channel with no events. The poll turns that silence into
+// latency; the websocket keeps the latency low while it works.
+//
+// Why publish only after the read: a node announces a height before it can
+// serve the data at it, and behind a load balancer the read can land on a node
+// one block behind. The read retries that answer ("not yet") on the next pass
+// instead of dropping the height.
+type BlockSubscriber struct {
+	logger logging.Logger
+	config BlockSubscriberConfig
+
+	// cometClient serves every HTTP query (Block, Status). It is never started:
+	// HTTP calls do not need it, and the websocket gets its own client, which
+	// is replaced when it goes silent.
+	cometClient *http.HTTP
+	reader      *BlockReader
+
+	// nextHeight is the next height to read; a skipped height moves it as a
+	// published one does. failingHeight and failures count the passes that
+	// could not read nextHeight for a reason other than "not yet". All three
+	// belong to the advance loop alone.
+	nextHeight    int64
+	failingHeight int64
+	failures      int
+
+	// Current block state: the last height read and published.
 	lastBlock atomic.Pointer[SimpleBlock]
+
+	// seenHeight is the highest height either source reported; wake is
+	// signalled when it moves. Only the advance loop reads blocks.
+	seenHeight atomic.Int64
+	wake       chan struct{}
+
+	// wsHeight is the highest height the websocket reported. publishedPastWS
+	// counts the heights published above it since the websocket's last event;
+	// at wsStaleBlocks the websocket client is replaced. Counting only heights
+	// above wsHeight leaves alone a websocket that lags but keeps reporting,
+	// and a catch-up that publishes several heights below the one just
+	// announced.
+	wsHeight        atomic.Int64
+	publishedPastWS atomic.Int64
 
 	// Fan-out pub/sub for multiple consumers
 	// Each subscriber gets an independent channel to avoid race conditions
@@ -143,7 +211,7 @@ type BlockSubscriber struct {
 // Interface: github.com/pokt-network/poktroll/pkg/client.BlockClient
 var _ client.BlockClient = (*BlockSubscriber)(nil)
 
-// NewBlockSubscriber creates a new block subscriber with WebSocket subscriptions.
+// NewBlockSubscriber creates a new block subscriber.
 func NewBlockSubscriber(
 	logger logging.Logger,
 	config BlockSubscriberConfig,
@@ -163,29 +231,11 @@ func NewBlockSubscriber(
 	if config.QueryTimeout == 0 {
 		config.QueryTimeout = defaultQueryTimeout
 	}
-
-	// Create CometBFT HTTP client with WebSocket support
-	var cometClient *http.HTTP
-	var err error
-
-	if config.UseTLS {
-		// Create a custom HTTP client with TLS configuration for secure connections
-		// This is required for connecting to instances behind TLS
-		tlsConfig := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-
-		httpClient := &stdhttp.Client{
-			Transport: &stdhttp.Transport{
-				TLSClientConfig: tlsConfig,
-			},
-		}
-
-		// Use NewWithClient to pass a custom HTTP client with TLS support
-		cometClient, err = http.NewWithClient(config.RPCEndpoint, "/websocket", httpClient)
-	} else {
-		cometClient, err = http.New(config.RPCEndpoint, "/websocket")
+	if config.PollInterval == 0 {
+		config.PollInterval = defaultPollInterval
 	}
+
+	cometClient, err := newCometClient(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CometBFT client: %w", err)
 	}
@@ -194,11 +244,83 @@ func NewBlockSubscriber(
 		logger:      logging.ForComponent(logger, logging.ComponentBlockSubscriber),
 		config:      config,
 		cometClient: cometClient,
+		reader:      &BlockReader{cometClient: cometClient, queryTimeout: config.QueryTimeout},
+		wake:        make(chan struct{}, 1),
 		subscribers: make(map[uint64]*subscriberInfo),
 	}, nil
 }
 
-// Start begins the WebSocket subscription for new blocks.
+// newCometClient builds a CometBFT client for the configured endpoint.
+func newCometClient(config BlockSubscriberConfig) (*http.HTTP, error) {
+	if config.UseTLS {
+		// Create a custom HTTP client with TLS configuration for secure connections
+		// This is required for connecting to instances behind TLS
+		httpClient := &stdhttp.Client{
+			Transport: &stdhttp.Transport{
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+			},
+		}
+		return http.NewWithClient(config.RPCEndpoint, "/websocket", httpClient)
+	}
+	return http.New(config.RPCEndpoint, "/websocket")
+}
+
+// BlockReader reads one block at a height from a node and keeps its canonical
+// hash. The leader's BlockSubscriber reads every block through one; a miner
+// worker holds one only to read a block hash the leader's record lacks. A block
+// hash at a height is immutable once the block exists, so any node that has it
+// gives the same answer: reading it is safe from any process, unlike the
+// current height, which only the leader reads.
+type BlockReader struct {
+	cometClient  *http.HTTP
+	queryTimeout time.Duration
+}
+
+// NewBlockReader builds a reader for the node at rpcEndpoint.
+func NewBlockReader(rpcEndpoint string, useTLS bool) (*BlockReader, error) {
+	config := BlockSubscriberConfig{RPCEndpoint: strings.TrimRight(rpcEndpoint, "/"), UseTLS: useTLS}
+	cometClient, err := newCometClient(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CometBFT client: %w", err)
+	}
+	return &BlockReader{cometClient: cometClient, queryTimeout: defaultQueryTimeout}, nil
+}
+
+// readBlock reads the block at height once.
+func (r *BlockReader) readBlock(ctx context.Context, height int64) (*SimpleBlock, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	result, err := r.cometClient.Block(queryCtx, &height)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query block at height %d: %w", height, err)
+	}
+	// CometBFT answers a missing block or block meta with no error and a nil
+	// block; a proxy can answer another height. Neither is the block asked for.
+	if result == nil || result.Block == nil || result.Block.Height != height || len(result.BlockID.Hash) == 0 {
+		return nil, fmt.Errorf("node returned no usable block for height %d", height)
+	}
+
+	// CRITICAL: Use BlockID.Hash (canonical block ID) instead of Block.Hash() (computed hash)
+	// This must match what the validator stores in ctx.HeaderHash() via StoreBlockHash()
+	// See: poktroll/x/session/keeper/keeper.go:82
+	return &SimpleBlock{
+		height:    result.Block.Height,
+		hash:      result.BlockID.Hash,
+		timestamp: result.Block.Time,
+	}, nil
+}
+
+// BlockAtHeight reads the block at height, retrying while the node answers
+// that it does not have that height yet, until ctx ends.
+func (r *BlockReader) BlockAtHeight(ctx context.Context, height int64) (client.Block, error) {
+	return query.RetryWhileHeightNotYet(ctx, func() (client.Block, error) {
+		return r.readBlock(ctx, height)
+	})
+}
+
+// Start begins reading blocks: the websocket, the poll and the loop that
+// reads and publishes each height.
 func (bs *BlockSubscriber) Start(ctx context.Context) error {
 	bs.mu.Lock()
 	if bs.closed {
@@ -213,25 +335,145 @@ func (bs *BlockSubscriber) Start(ctx context.Context) error {
 		bs.logger.Warn().Err(err).Msg("failed to fetch initial block, will retry")
 	}
 
-	// Start the CometBFT HTTP client to enable WebSocket subscriptions
-	// This is required before calling Subscribe() according to CometBFT documentation
-	if err := bs.cometClient.Start(); err != nil {
-		return fmt.Errorf("failed to start CometBFT client: %w", err)
-	}
-
-	// Start a subscription goroutine with reconnection handling
-	bs.wg.Add(1)
-	go bs.subscriptionLoop(bs.ctx)
+	bs.wg.Add(3)
+	go logging.RecoverGoRoutine(bs.logger, "block_subscriber_advance", bs.advanceLoop)(bs.ctx)
+	go logging.RecoverGoRoutine(bs.logger, "block_subscriber_poll", bs.pollLoop)(bs.ctx)
+	go logging.RecoverGoRoutine(bs.logger, "block_subscriber_websocket", bs.subscriptionLoop)(bs.ctx)
 
 	bs.logger.Info().
 		Str("rpc_endpoint", bs.config.RPCEndpoint).
 		Str("query", newBlockHeaderQuery).
-		Msg("block subscriber started with WebSocket subscription")
+		Dur("poll_interval", bs.config.PollInterval).
+		Msg("block subscriber started (websocket and latest-height poll)")
 
 	return nil
 }
 
-// subscriptionLoop manages the WebSocket subscription with automatic reconnection.
+// observe records that a source reported height and wakes the advance loop.
+// It wakes it even when height is not new: a height the last pass could not
+// read yet is retried on the next wake, and the poll is what guarantees one.
+func (bs *BlockSubscriber) observe(height int64) {
+	for {
+		seen := bs.seenHeight.Load()
+		if height <= seen || bs.seenHeight.CompareAndSwap(seen, height) {
+			break
+		}
+	}
+	select {
+	case bs.wake <- struct{}{}:
+	default:
+	}
+}
+
+// advanceLoop is the only place blocks are read. On every wake it reads each
+// height from the last published one up to the highest reported, in order,
+// and stops at the first height it cannot read yet; the next wake -- the poll
+// guarantees one per interval -- tries that height again.
+func (bs *BlockSubscriber) advanceLoop(ctx context.Context) {
+	defer bs.wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-bs.wake:
+		}
+		bs.catchUp(ctx)
+	}
+}
+
+// catchUp reads and publishes every height between the last published one and
+// the highest reported one.
+func (bs *BlockSubscriber) catchUp(ctx context.Context) {
+	target := bs.seenHeight.Load()
+	next := bs.nextHeight
+	if next == 0 {
+		if last := bs.lastBlock.Load(); last != nil {
+			next = last.height + 1
+		} else {
+			next = target
+		}
+	}
+	if target-next >= maxCatchUpBlocks {
+		bs.logger.Warn().
+			Int64("from_height", next).
+			Int64("to_height", target).
+			Int("max_catch_up_blocks", maxCatchUpBlocks).
+			Msg("node reported a height far ahead of the last published one; skipping the oldest heights")
+		next = target - maxCatchUpBlocks + 1
+	}
+	for height := next; height <= target; height++ {
+		block, err := bs.reader.readBlock(ctx, height)
+		if err != nil {
+			if query.IsHeightNotYetAvailable(err) {
+				bs.logger.Debug().Err(err).Int64("height", height).
+					Msg("node does not have this height yet; retrying on the next wake")
+				return
+			}
+			if height != bs.failingHeight {
+				bs.failingHeight, bs.failures = height, 0
+			}
+			bs.failures++
+			if bs.failures < maxReadFailures {
+				bs.logger.Warn().Err(err).Int64("height", height).Int("failures", bs.failures).
+					Msg("block read failed; retrying on the next wake")
+				return
+			}
+			// A height that keeps failing for another reason must not stop
+			// every height after it. A consumer that needs its hash reads it
+			// from its own node.
+			bs.logger.Warn().Err(err).Int64("height", height).Int("failures", bs.failures).
+				Msg("block read keeps failing; skipping this height")
+			bs.nextHeight = height + 1
+			continue
+		}
+		bs.nextHeight = height + 1
+		bs.lastBlock.Store(block)
+		bs.publishToSubscribers(block)
+		bs.notePublished(height)
+
+		// Log if height changed (sampled: every 10th block to reduce verbosity)
+		if block.height%10 == 0 {
+			bs.logger.Debug().
+				Int64("height", block.height).
+				Time("block_time", block.timestamp).
+				Msg("new block published")
+		}
+	}
+}
+
+// notePublished counts a published height the websocket has not reported.
+func (bs *BlockSubscriber) notePublished(height int64) {
+	if height > bs.wsHeight.Load() {
+		bs.publishedPastWS.Add(1)
+	}
+}
+
+// pollLoop reports the node's latest height once per interval, whatever the
+// websocket is doing.
+func (bs *BlockSubscriber) pollLoop(ctx context.Context) {
+	defer bs.wg.Done()
+	ticker := time.NewTicker(bs.config.PollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		queryCtx, cancel := context.WithTimeout(ctx, bs.config.QueryTimeout)
+		status, err := bs.cometClient.Status(queryCtx)
+		cancel()
+		if err != nil {
+			bs.logger.Debug().Err(err).Msg("latest-height poll failed")
+			continue
+		}
+		bs.observe(status.SyncInfo.LatestBlockHeight)
+	}
+}
+
+// subscriptionLoop keeps a websocket subscription open, replacing the client
+// when it fails, when its channel closes, or when the advance loop reports it
+// silent.
 func (bs *BlockSubscriber) subscriptionLoop(ctx context.Context) {
 	defer bs.wg.Done()
 
@@ -244,58 +486,74 @@ func (bs *BlockSubscriber) subscriptionLoop(ctx context.Context) {
 		default:
 		}
 
-		// Subscribe to NewBlockHeader events
-		eventsCh, err := bs.cometClient.Subscribe(ctx, subscriptionClientID, newBlockHeaderQuery)
+		err := bs.runSubscription(ctx)
+		if ctx.Err() != nil {
+			bs.logger.Debug().Msg("websocket subscription closed (shutting down)")
+			return
+		}
 		if err != nil {
 			bs.logger.Warn().
 				Err(err).
 				Dur("retry_in", reconnectDelay).
-				Msg("failed to subscribe to block events, will retry")
-
-			// Exponential backoff
+				Msg("websocket subscription failed, will retry")
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(reconnectDelay):
 				reconnectDelay = bs.increaseBackoff(reconnectDelay)
-				continue
 			}
+			continue
 		}
-
-		// Reset backoff on a successful subscription
 		reconnectDelay = reconnectBaseDelay
-		bs.logger.Info().Msg("WebSocket subscription established")
-
-		// Process events until channel closes or context cancelled
-		bs.processEvents(ctx, eventsCh)
-
-		// Channel closed - check if we're shutting down or if it's a real disconnection
-		select {
-		case <-ctx.Done():
-			// Context canceled, graceful shutdown - don't log reconnection
-			bs.logger.Debug().Msg("WebSocket subscription closed (shutting down)")
-			return
-		default:
-			// Real disconnection - will reconnect
-			bs.logger.Warn().Msg("WebSocket disconnected, reconnecting...")
-		}
 	}
 }
 
-// processEvents processes incoming block events from the WebSocket subscription.
-func (bs *BlockSubscriber) processEvents(ctx context.Context, eventsCh <-chan coretypes.ResultEvent) {
+// runSubscription opens one websocket client, forwards its events until it
+// must be replaced, and stops it. A nil error means the client was replaced on
+// purpose (silence or a closed channel).
+func (bs *BlockSubscriber) runSubscription(ctx context.Context) error {
+	wsClient, err := newCometClient(bs.config)
+	if err != nil {
+		return fmt.Errorf("failed to create websocket client: %w", err)
+	}
+	if err = wsClient.Start(); err != nil {
+		return fmt.Errorf("failed to start websocket client: %w", err)
+	}
+	defer func() {
+		if stopErr := wsClient.Stop(); stopErr != nil {
+			bs.logger.Debug().Err(stopErr).Msg("failed to stop websocket client")
+		}
+	}()
+
+	eventsCh, err := wsClient.Subscribe(ctx, subscriptionClientID, newBlockHeaderQuery)
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to block events: %w", err)
+	}
+
+	// A fresh client starts with the benefit of the doubt: silence is counted
+	// from now.
+	bs.publishedPastWS.Store(0)
+	bs.logger.Info().Msg("websocket subscription established")
+	staleCheck := time.NewTicker(bs.config.PollInterval)
+	defer staleCheck.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
-			return
-
+			return nil
+		case <-staleCheck.C:
+			if bs.publishedPastWS.Load() < wsStaleBlocks {
+				continue
+			}
+			bs.logger.Warn().
+				Int("stale_blocks", wsStaleBlocks).
+				Msg("websocket silent while the poll kept finding blocks; replacing the websocket client")
+			return nil
 		case resultEvent, ok := <-eventsCh:
 			if !ok {
-				// Channel closed - subscription lost
-				return
+				bs.logger.Warn().Msg("websocket event channel closed; replacing the websocket client")
+				return nil
 			}
-
-			// Parse the event
 			if err := bs.handleBlockEvent(&resultEvent); err != nil {
 				bs.logger.Error().
 					Err(err).
@@ -306,54 +564,23 @@ func (bs *BlockSubscriber) processEvents(ctx context.Context, eventsCh <-chan co
 	}
 }
 
-// handleBlockEvent parses a block header event and updates the last block.
+// handleBlockEvent records the height a NewBlockHeader event announces. It
+// reads nothing: the advance loop reads the block, retrying a node that
+// announced the height before it can serve it.
 func (bs *BlockSubscriber) handleBlockEvent(resultEvent *coretypes.ResultEvent) error {
-	// Type assertion to EventDataNewBlockHeader
 	blockHeader, ok := resultEvent.Data.(types.EventDataNewBlockHeader)
 	if !ok {
 		return fmt.Errorf("expected EventDataNewBlockHeader, got %T", resultEvent.Data)
 	}
-
 	height := blockHeader.Header.Height
-	timestamp := blockHeader.Header.Time
-
-	// CRITICAL: We must query the full block to get BlockID.Hash (canonical block ID)
-	// EventDataNewBlockHeader only has Header.Hash() which is computed, not canonical
-	// The canonical BlockID.Hash must match what validator stores in ctx.HeaderHash()
-	// See: poktroll/x/session/keeper/keeper.go:82
-	ctx, cancel := context.WithTimeout(context.Background(), bs.config.QueryTimeout)
-	defer cancel()
-
-	result, err := bs.cometClient.Block(ctx, &height)
-	if err != nil {
-		return fmt.Errorf("failed to query block %d for canonical hash: %w", height, err)
-	}
-
-	// Create a new block using canonical BlockID.Hash
-	block := &SimpleBlock{
-		height:    height,
-		hash:      result.BlockID.Hash,
-		timestamp: timestamp,
-	}
-
-	// Update the last block atomically
-	oldBlock := bs.lastBlock.Load()
-	bs.lastBlock.Store(block)
-
-	// Publish block event to all subscribers (fan-out)
-	// Only publish if height actually changed to avoid duplicate events
-	if oldBlock == nil || block.height > oldBlock.height {
-		bs.publishToSubscribers(block)
-
-		// Log if height changed (sampled: every 10th block to reduce verbosity)
-		if block.height%10 == 0 {
-			bs.logger.Debug().
-				Int64("height", block.height).
-				Time("block_time", block.timestamp).
-				Msg("new block received via WebSocket")
+	for {
+		seen := bs.wsHeight.Load()
+		if height <= seen || bs.wsHeight.CompareAndSwap(seen, height) {
+			break
 		}
 	}
-
+	bs.publishedPastWS.Store(0)
+	bs.observe(height)
 	return nil
 }
 
@@ -479,6 +706,9 @@ func (bs *BlockSubscriber) fetchLatestBlock(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to query block: %w", err)
 	}
+	if result == nil || result.Block == nil {
+		return fmt.Errorf("failed to query block: the node answered no block")
+	}
 
 	// CRITICAL: Use BlockID.Hash (canonical block ID) instead of Block.Hash() (computed hash)
 	// This must match what the validator stores in ctx.HeaderHash() via StoreBlockHash()
@@ -514,30 +744,6 @@ func (bs *BlockSubscriber) LastBlock(ctx context.Context) client.Block {
 	return block
 }
 
-// GetBlockAtHeight queries the blockchain for a specific block by height.
-// This is CRITICAL for proof generation - the validator uses the exact block at a specific
-// height, so we must query that exact block, not just wait for it and return LastBlock().
-//
-// IMPORTANT: Uses BlockID.Hash (canonical block identifier) instead of Block.Hash() (computed hash).
-// This must match what the validator stores via ctx.HeaderHash() in StoreBlockHash().
-func (bs *BlockSubscriber) GetBlockAtHeight(ctx context.Context, height int64) (client.Block, error) {
-	result, err := bs.cometClient.Block(ctx, &height)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query block at height %d: %w", height, err)
-	}
-
-	// CRITICAL: Use BlockID.Hash (canonical block ID) instead of Block.Hash() (computed hash)
-	// This must match what the validator stores in ctx.HeaderHash() via StoreBlockHash()
-	// See: poktroll/x/session/keeper/keeper.go:82
-	block := &SimpleBlock{
-		height:    result.Block.Height,
-		hash:      result.BlockID.Hash, // ✅ Canonical hash
-		timestamp: result.Block.Time,
-	}
-
-	return block, nil
-}
-
 // CommittedBlocksSequence returns nil - not used in production.
 //
 // This method exists solely for poktroll client.BlockClient interface compliance.
@@ -564,12 +770,6 @@ func (bs *BlockSubscriber) GetChainVersion() *version.Version {
 	return nil
 }
 
-// GetRPCClient returns the underlying CometBFT RPC client.
-// This allows reusing the same RPC connection for additional queries (like BlockResults).
-func (bs *BlockSubscriber) GetRPCClient() *http.HTTP {
-	return bs.cometClient
-}
-
 // GetChainID fetches the chain ID from the node.
 func (bs *BlockSubscriber) GetChainID(ctx context.Context) (string, error) {
 	// Apply configured query timeout
@@ -593,17 +793,7 @@ func (bs *BlockSubscriber) Close() {
 	}
 	bs.closed = true
 
-	// Unsubscribe from events with timeout to prevent hanging on shutdown
-	if bs.cometClient != nil {
-		// Use a fresh context with timeout for shutdown operation
-		unsubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := bs.cometClient.UnsubscribeAll(unsubCtx, subscriptionClientID); err != nil {
-			bs.logger.Warn().Err(err).Msg("failed to unsubscribe from block events")
-		}
-	}
-
+	// Cancelling stops the websocket loop, which stops its own client.
 	if bs.cancelFn != nil {
 		bs.cancelFn()
 	}

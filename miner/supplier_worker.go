@@ -3,20 +3,18 @@ package miner
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	stdhttp "net/http"
 	"runtime"
 	"sync"
 	"time"
 
 	"github.com/alitto/pond/v2"
-	"github.com/cometbft/cometbft/rpc/client/http"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
+	haclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
@@ -220,35 +218,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	}
 	LogSharedParamsAdvisory(w.logger, sharedParams)
 
-	// Create RPC client for querying specific block heights (needed for proof generation)
-	// This is CRITICAL - proof generation needs to query the exact block at a specific height
-	// to get the canonical BlockID.Hash that matches what the validator stores
-	var rpcClient *http.HTTP
-	if w.config.QueryNodeRPCUrl != "" {
-		if w.config.GRPCInsecure {
-			rpcClient, err = http.New(w.config.QueryNodeRPCUrl, "/websocket")
-		} else {
-			tlsConfig := &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			}
-			httpClient := &stdhttp.Client{
-				Transport: &stdhttp.Transport{
-					TLSClientConfig: tlsConfig,
-				},
-			}
-			rpcClient, err = http.NewWithClient(w.config.QueryNodeRPCUrl, "/websocket", httpClient)
-		}
-		if err != nil {
-			w.cleanup()
-			return fmt.Errorf("failed to create CometBFT RPC client: %w", err)
-		}
-		w.logger.Info().
-			Str("rpc_endpoint", w.config.QueryNodeRPCUrl).
-			Msg("created CometBFT RPC client for block queries")
-	} else {
-		w.logger.Warn().Msg("QueryNodeRPCUrl not configured - proof generation may fail")
-	}
-
 	// Create Redis block subscriber (subscribes to block events via Redis pub/sub)
 	// This allows non-leader miners to receive block events published by the leader
 	w.redisBlockSubscriber = cache.NewRedisBlockSubscriber(
@@ -266,12 +235,25 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		trackBlockHeight(c, heightEvents)
 	})(w.ctx)
 
-	// Create Redis block client adapter to implement client.BlockClient interface
-	// Pass the RPC client so it can query specific block heights for proof generation
+	// Create Redis block client adapter to implement client.BlockClient interface.
+	// A block at a height (a proof seed) comes from the leader's record; the
+	// reader below serves one the record lacks. It reads only that immutable
+	// hash, never the current height, which only the leader reads.
+	var blockReader cache.BlockAtHeightReader
+	if w.config.QueryNodeRPCUrl != "" {
+		reader, readerErr := haclient.NewBlockReader(w.config.QueryNodeRPCUrl, !w.config.GRPCInsecure)
+		if readerErr != nil {
+			w.cleanup()
+			return fmt.Errorf("failed to create block reader: %w", readerErr)
+		}
+		blockReader = reader
+	} else {
+		w.logger.Warn().Msg("QueryNodeRPCUrl not configured: a proof seed the leader did not record cannot be read")
+	}
 	w.redisBlockClientAdapter = cache.NewRedisBlockClientAdapter(
 		w.logger,
 		w.redisBlockSubscriber,
-		rpcClient, // For GetBlockAtHeight() - critical for proof generation
+		blockReader,
 	)
 	if err = w.redisBlockClientAdapter.Start(ctx); err != nil {
 		w.cleanup()

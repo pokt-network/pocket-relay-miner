@@ -752,6 +752,38 @@ func (c *sessionQueryClient) GetSession(
 	sessionStartHeight := sharedtypes.GetSessionStartHeight(sharedParams, blockHeight)
 	cacheKey := fmt.Sprintf("%s/%s/%d", appAddress, serviceId, sessionStartHeight)
 
+	// A node can store a block before committing its state, and answers a
+	// session at that height with "ahead of the last committed block height"
+	// until it does. The retries wrap cachedGet rather than living in its
+	// fetch: the fetch holds the one session-cache write lock, and a wait there
+	// would stall every other session lookup. They are few and short: this runs
+	// on the relay path, a height far in the future answers the same text, and
+	// a refused relay is followed by others.
+	for attempt := 0; ; attempt++ {
+		session, err := c.getSessionOnce(ctx, appAddress, serviceId, blockHeight, cacheKey, sessionStartHeight)
+		if err == nil || !IsHeightNotYetAvailable(err) || attempt == len(sessionNotYetRetryDelays) {
+			return session, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w (last answer: %w)", ctx.Err(), err)
+		case <-time.After(sessionNotYetRetryDelays[attempt]):
+		}
+	}
+}
+
+// sessionNotYetRetryDelays are the waits before each retry of a session query
+// the node answered "not yet": two retries, then the error is returned.
+var sessionNotYetRetryDelays = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond}
+
+// getSessionOnce is one cached lookup of a session: the cache, or one query.
+func (c *sessionQueryClient) getSessionOnce(
+	ctx context.Context,
+	appAddress, serviceId string,
+	blockHeight int64,
+	cacheKey string,
+	sessionStartHeight int64,
+) (*sessiontypes.Session, error) {
 	return cachedGet(
 		&c.sessionCacheMu,
 		func() (*sessiontypes.Session, time.Time, bool) {

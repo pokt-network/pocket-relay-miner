@@ -1,6 +1,11 @@
 package query
 
 import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -40,4 +45,62 @@ func IsEntityNotFound(err error) bool {
 	}
 	st, ok := status.FromError(err)
 	return ok && st.Code() == codes.NotFound
+}
+
+// heightNotYetAvailableTexts are the node's words for "I do not have that height
+// yet". Both are bare error strings with no code of their own: CometBFT answers
+// the generic JSON-RPC -32603 around the first (rpc/core/env.go getHeight), and
+// poktroll flattens the second into codes.Internal (x/session keeper,
+// session_hydrator.go). The code alone would also match real internal errors,
+// so the text is the only signal.
+var heightNotYetAvailableTexts = []string{
+	// CometBFT, any at-height RPC (Block, BlockResults, ...):
+	// "height 690363 must be less than or equal to the current blockchain height 690362"
+	"must be less than or equal to the current blockchain height",
+	// poktroll session query, the block is stored but its state not yet committed:
+	// "block height 100 is ahead of the last committed block height 99"
+	"is ahead of the last committed block height",
+}
+
+// IsHeightNotYetAvailable reports whether err is a node saying it does not have
+// the requested height YET: a retry-later, never a failure. A node announces a
+// height (a websocket event, Status) before it can serve the data at it, and
+// behind a load balancer the next call can land on a node one block behind.
+func IsHeightNotYetAvailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, text := range heightNotYetAvailableTexts {
+		if strings.Contains(msg, text) {
+			return true
+		}
+	}
+	return false
+}
+
+// notYetRetryBaseDelay and notYetRetryMaxDelay pace RetryWhileHeightNotYet.
+const (
+	notYetRetryBaseDelay = 250 * time.Millisecond
+	notYetRetryMaxDelay  = 1 * time.Second
+)
+
+// RetryWhileHeightNotYet calls fn until it succeeds, fails with an error that
+// is not IsHeightNotYetAvailable, or ctx ends. It is the one retry loop for a
+// node's "not yet": every at-height read that can meet it goes through here.
+func RetryWhileHeightNotYet[V any](ctx context.Context, fn func() (V, error)) (V, error) {
+	delay := notYetRetryBaseDelay
+	for {
+		v, err := fn()
+		if err == nil || !IsHeightNotYetAvailable(err) {
+			return v, err
+		}
+		select {
+		case <-ctx.Done():
+			var zero V
+			return zero, fmt.Errorf("%w (last answer: %w)", ctx.Err(), err)
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, notYetRetryMaxDelay)
+	}
 }

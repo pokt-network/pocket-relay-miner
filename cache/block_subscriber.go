@@ -3,11 +3,14 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -159,19 +162,27 @@ func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
 	}
 }
 
+// advanceClock moves the current height and block time to event's when it is
+// newer. It is the chain clock the tx client anchors timeouts on, so the
+// adapter's latest-height poll moves it too: a silent pub/sub channel must not
+// leave transactions signed against a stale block time.
+func (s *RedisBlockSubscriber) advanceClock(event BlockEvent) {
+	s.heightMu.Lock()
+	defer s.heightMu.Unlock()
+	if event.Height > s.currentHeight {
+		s.currentHeight = event.Height
+		s.currentTime = event.Timestamp
+		currentBlockHeight.Set(float64(s.currentHeight))
+	}
+}
+
 // handleBlockEvent processes a received block event.
 func (s *RedisBlockSubscriber) handleBlockEvent(event BlockEvent) {
 	// Update the current height and timestamp together. We only advance
 	// on strictly-newer heights so out-of-order events (e.g. duplicate
 	// pub/sub deliveries or a late retry) can't rewind the observed
 	// block time that downstream tx-timeout anchoring depends on.
-	s.heightMu.Lock()
-	if event.Height > s.currentHeight {
-		s.currentHeight = event.Height
-		s.currentTime = event.Timestamp
-		currentBlockHeight.Set(float64(s.currentHeight))
-	}
-	s.heightMu.Unlock()
+	s.advanceClock(event)
 
 	blockEventsReceived.Inc()
 
@@ -285,21 +296,74 @@ func publishBlockEvent(
 		event.Timestamp = time.Now()
 	}
 
-	channel := redisClient.KB().BlockEventChannel()
-
+	kb := redisClient.KB()
 	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal block event: %w", err)
 	}
 
-	if err = redisClient.Publish(ctx, channel, data).Err(); err != nil {
+	// The record and the latest height are written BEFORE the event, on one
+	// connection, so a consumer woken by the event finds the hash whenever its
+	// write landed. Not a MULTI: with Redis at maxmemory under noeviction a
+	// MULTI holding a SET is aborted whole, and the event must go out even
+	// then -- it is what moves claims and proofs, which free the memory. A
+	// consumer that finds no record reads the hash from its own node.
+	var setRecord, setLatest *redis.StatusCmd
+	var publish *redis.IntCmd
+	_, _ = redisClient.Pipelined(ctx, func(pipe redis.Pipeliner) error { //nolint:errcheck // each command's error is read below
+		setRecord = pipe.Set(ctx, kb.BlockHashAtHeightKey(event.Height), data, blockRecordTTL)
+		setLatest = pipe.Set(ctx, kb.BlockLatestHeightKey(), event.Height, blockRecordTTL)
+		publish = pipe.Publish(ctx, kb.BlockEventChannel(), data)
+		return nil
+	})
+	if err = publish.Err(); err != nil {
 		return fmt.Errorf("failed to publish block event: %w", err)
+	}
+	for _, cmd := range []*redis.StatusCmd{setRecord, setLatest} {
+		if cmd.Err() != nil {
+			logger.Warn().Err(cmd.Err()).Int64("height", event.Height).
+				Msg("failed to record the published block; consumers will read its hash from their own node")
+		}
 	}
 
 	blockEventsPublished.Inc()
 
 	logger.Debug().Int64("height", event.Height).Msg("published block event")
 	return nil
+}
+
+// blockRecordTTL is how long a published block's record lives. A day is far
+// longer than any claim or proof window a consumer can still be waiting on, and
+// one small key per block is cheap.
+const blockRecordTTL = 24 * time.Hour
+
+// readBlockRecord reads the leader's record of the block at height. found is
+// false when the leader has not published that height (yet).
+func readBlockRecord(ctx context.Context, redisClient *redisutil.Client, height int64) (event BlockEvent, found bool, err error) {
+	data, err := redisClient.Get(ctx, redisClient.KB().BlockHashAtHeightKey(height)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return BlockEvent{}, false, nil
+	}
+	if err != nil {
+		return BlockEvent{}, false, fmt.Errorf("failed to read block record at height %d: %w", height, err)
+	}
+	if err = json.Unmarshal(data, &event); err != nil {
+		return BlockEvent{}, false, fmt.Errorf("failed to decode block record at height %d: %w", height, err)
+	}
+	return event, true, nil
+}
+
+// readLatestPublishedHeight reads the highest height the leader has published.
+// found is false when nothing has been published.
+func readLatestPublishedHeight(ctx context.Context, redisClient *redisutil.Client) (height int64, found bool, err error) {
+	height, err = redisClient.Get(ctx, redisClient.KB().BlockLatestHeightKey()).Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to read latest published height: %w", err)
+	}
+	return height, true, nil
 }
 
 // redisBlockPublisherComponentName labels this endpoint's logs. It is NOT
