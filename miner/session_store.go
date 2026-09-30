@@ -795,6 +795,9 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		if strings.Contains(errMsg, "claim already on chain") {
 			return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
 		}
+		if strings.Contains(errMsg, "not an unsent claim") || strings.Contains(errMsg, "not an unsent proof") {
+			return fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, sessionID, newState)
+		}
 		if strings.Contains(errMsg, "legacy key") {
 			// Legacy JSON string key — fall back to Get→Save migration path
 			snapshot, getErr := s.Get(ctx, sessionID)
@@ -806,6 +809,14 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 			}
 			if (newState == SessionStateClaimWindowClosed || newState == SessionStateClaimTxError) && snapshot.State.HoldsClaimOnChain() {
 				return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
+			}
+			if newState == SessionStateActive && (snapshot.State != SessionStateClaiming || snapshot.ClaimTxHash != "") {
+				return fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, sessionID, newState)
+			}
+			if newState == SessionStateClaimed && (snapshot.ProofTxHash != "" || snapshot.State == SessionStateProved ||
+				snapshot.State == SessionStateProbabilisticProved || snapshot.State == SessionStateProofWindowClosed ||
+				snapshot.State == SessionStateProofTxError) {
+				return fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, sessionID, newState)
 			}
 			snapshot.State = newState
 			return s.Save(ctx, snapshot)
@@ -922,6 +933,24 @@ end
 local old_state = redis.call('HGET', KEYS[1], 'state')
 if (ARGV[1] == 'claim_window_closed' or ARGV[1] == 'claim_tx_error') and holds_claim_on_chain(old_state) then
 	return redis.error_reply('claim already on chain')
+end
+-- Only a deferred claim writes active, and only over an unsent claim: the read
+-- and the write are one step, so a claim another miner sent in between is not
+-- rewound.
+if ARGV[1] == 'active' then
+	local claim_tx_hash = redis.call('HGET', KEYS[1], 'claim_tx_hash')
+	if old_state ~= 'claiming' or (claim_tx_hash and claim_tx_hash ~= '') then
+		return redis.error_reply('not an unsent claim')
+	end
+end
+-- Its proof twin: claimed is never written over a proof that was sent or a
+-- proof phase that ended, so a proof another miner sent is not submitted twice.
+if ARGV[1] == 'claimed' then
+	local proof_tx_hash = redis.call('HGET', KEYS[1], 'proof_tx_hash')
+	if (proof_tx_hash and proof_tx_hash ~= '') or old_state == 'proved' or old_state == 'probabilistic_proved'
+		or old_state == 'proof_window_closed' or old_state == 'proof_tx_error' then
+		return redis.error_reply('not an unsent proof')
+	end
 end
 redis.call('HSET', KEYS[1], 'state', ARGV[1], 'last_updated_at', ARGV[2])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))

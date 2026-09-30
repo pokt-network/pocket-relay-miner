@@ -290,6 +290,25 @@ func (kb *KeyBuilder) BlockEventChannel() string {
 	return fmt.Sprintf("%s:%s:blocks", kb.ns.BasePrefix, segmentEvents)
 }
 
+// BlockHashAtHeightKey builds the key holding the leader's published block at
+// one height: its canonical hash and time, as the block event carried them.
+// The leader writes it before publishing the event, so a consumer woken by the
+// event, or one that missed it, reads the hash here instead of asking a node.
+// Format: {base}:{cache}:blocks:hash:{height}
+// Example: "ha:cache:blocks:hash:42"
+func (kb *KeyBuilder) BlockHashAtHeightKey(height int64) string {
+	return fmt.Sprintf("%s:%s:blocks:hash:%d", kb.ns.BasePrefix, segmentCache, height)
+}
+
+// BlockLatestHeightKey builds the key holding the highest height the leader has
+// published. Consumers poll it so that a silent pub/sub channel costs them
+// latency, not blocks.
+// Format: {base}:{cache}:blocks:latest
+// Example: "ha:cache:blocks:latest"
+func (kb *KeyBuilder) BlockLatestHeightKey() string {
+	return fmt.Sprintf("%s:%s:blocks:latest", kb.ns.BasePrefix, segmentCache)
+}
+
 // SMSTNodesKey builds the key for SMST tree nodes hash.
 // Format: {base}:smst:{supplierAddress}:{sessionID}:nodes
 // Example: "ha:smst:pokt1abc:session123:nodes"

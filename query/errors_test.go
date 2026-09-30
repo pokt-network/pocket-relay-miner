@@ -73,3 +73,28 @@ func TestIsEntityNotFound_TransientFailuresFailOpen(t *testing.T) {
 func TestIsEntityNotFound_NilIsNotAbsence(t *testing.T) {
 	require.False(t, IsEntityNotFound(nil))
 }
+
+// TestIsHeightNotYetAvailable pins the node texts that mean "not yet" and a
+// control for each code they arrive with, which alone must not match.
+func TestIsHeightNotYetAvailable(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"cometbft block, as beta returned it", fmt.Errorf("failed to query block at height 690363: %w", errors.New(
+			"error in json rpc client, with http response metadata: (Status: 200 OK, Protocol HTTP/1.1). RPC error -32603 - Internal error: height 690363 must be less than or equal to the current blockchain height 690362")), true},
+		{"poktroll session hydration", status.Error(codes.Internal, "block height 101 is ahead of the last committed block height 100: error during session hydration"), true},
+		{"generic -32603", errors.New("RPC error -32603 - Internal error: db closed"), false},
+		{"pruned height is not not-yet", errors.New("RPC error -32603 - Internal error: height 5 is not available, lowest height is 100"), false},
+		{"generic Internal", status.Error(codes.Internal, "store closed"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsHeightNotYetAvailable(tc.err); got != tc.want {
+				t.Fatalf("IsHeightNotYetAvailable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}

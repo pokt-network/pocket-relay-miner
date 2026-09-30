@@ -197,7 +197,8 @@ func TestOnProofDeferred_DoesNotRewindASessionAnotherMinerAlreadyProved(t *testi
 	const sessionID = "sess-defer-proved"
 	saveTestSession(t, store, sessionID, SessionStateProved, 5, 50)
 
-	require.NoError(t, coord.OnProofDeferred(ctx, sessionID))
+	require.ErrorIs(t, coord.OnProofDeferred(ctx, sessionID), ErrSessionNotDeferred,
+		"a refusal must say so: a nil made deferProof rewind the snapshot over a proved session")
 
 	got, err := store.Get(ctx, sessionID)
 	require.NoError(t, err)

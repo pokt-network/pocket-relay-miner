@@ -55,6 +55,23 @@ type mockCometBFTServer struct {
 	failNextStatus    atomic.Bool
 	failNextSubscribe atomic.Bool
 	subscribeErrorMsg string
+
+	// notYetAnswers makes that many block reads answer the node's real
+	// "not yet" error, the one a node behind a load balancer gave on beta.
+	notYetAnswers atomic.Int64
+	// silentWS stops delivering websocket events, as a node dropping them
+	// for a slow client does; the subscription stays open.
+	silentWS atomic.Bool
+	// subscribeCount counts websocket subscriptions, one per client opened.
+	subscribeCount atomic.Int64
+	// requestedHeights records the height of every block read, in order.
+	requestedHeights []int64
+	// brokenFrom..brokenTo, when set, answer every read of those heights with
+	// an error that is not "not yet", as a proxy refusing oversized blocks does.
+	brokenFrom, brokenTo atomic.Int64
+	// wrongHeightFor answers a read of that height with another height's
+	// block, as a caching proxy ignoring the parameter would.
+	wrongHeightFor atomic.Int64
 }
 
 type blockEvent struct {
@@ -176,6 +193,7 @@ func (m *mockCometBFTServer) handleSubscribe(conn *websocket.Conn, req map[strin
 
 	params, _ := req["params"].(map[string]interface{})
 	query, _ := params["query"].(string)
+	m.subscribeCount.Add(1)
 
 	// Send success response
 	response := map[string]interface{}{
@@ -291,7 +309,32 @@ func (m *mockCometBFTServer) handleBlockQuery(w http.ResponseWriter, req map[str
 		return
 	}
 
-	height := m.currentHeight.Load()
+	current := m.currentHeight.Load()
+	height := current
+	if params, ok := req["params"].(map[string]interface{}); ok {
+		if requested, ok := params["height"].(string); ok && requested != "" {
+			_, _ = fmt.Sscan(requested, &height)
+		}
+	}
+	m.mu.Lock()
+	m.requestedHeights = append(m.requestedHeights, height)
+	m.mu.Unlock()
+	if height > current {
+		m.sendHeightNotYet(w, req, height, current)
+		return
+	}
+	if from := m.brokenFrom.Load(); from != 0 && height >= from && height <= m.brokenTo.Load() {
+		m.sendJSONError(w, req, "block too large for the proxy")
+		return
+	}
+	if m.notYetAnswers.Load() > 0 {
+		m.notYetAnswers.Add(-1)
+		m.sendHeightNotYet(w, req, height, height-1)
+		return
+	}
+	if wrong := m.wrongHeightFor.Load(); wrong != 0 && height == wrong {
+		height++
+	}
 	hash := fmt.Sprintf("ABCD%016X", height)
 
 	response := map[string]interface{}{
@@ -403,6 +446,22 @@ func (m *mockCometBFTServer) sendJSONError(w http.ResponseWriter, req map[string
 	_ = json.NewEncoder(w).Encode(response)
 }
 
+// sendHeightNotYet answers a block read the way CometBFT does for a height it
+// does not have yet (rpc/core/env.go getHeight): -32603 with the text in data.
+func (m *mockCometBFTServer) sendHeightNotYet(w http.ResponseWriter, req map[string]interface{}, requested, current int64) {
+	response := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      req["id"],
+		"error": map[string]interface{}{
+			"code":    -32603,
+			"message": "Internal error",
+			"data":    fmt.Sprintf("height %d must be less than or equal to the current blockchain height %d", requested, current),
+		},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
+}
+
 // incrementHeight increments the current block height and notifies subscribers.
 func (m *mockCometBFTServer) incrementHeight() int64 {
 	newHeight := m.currentHeight.Add(1)
@@ -411,6 +470,9 @@ func (m *mockCometBFTServer) incrementHeight() int64 {
 		hash:   fmt.Sprintf("ABCD%016X", newHeight),
 	}
 
+	if m.silentWS.Load() {
+		return newHeight
+	}
 	m.mu.Lock()
 	for _, ch := range m.subscriptions {
 		select {

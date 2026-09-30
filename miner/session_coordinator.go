@@ -783,17 +783,23 @@ func (c *SessionCoordinator) OnProofDeferred(ctx context.Context, sessionID stri
 	// Same guard as OnProofTxError: another miner may already have proved
 	// this session, and rewinding it to claimed would make this miner
 	// submit a duplicate proof.
+	// A session with a proof transaction, or in a terminal state, keeps its
+	// state: another miner may have proved it. Claimed is accepted: under
+	// Redis OOM the write of proving can fail while the proof cycle runs.
 	current, err := c.sessionStore.Get(ctx, sessionID)
 	if err != nil {
-		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
-			Msg("failed to read session state before deferring proof")
-	} else if current != nil && (current.State == SessionStateProved || current.State == SessionStateProbabilisticProved || current.ProofTxHash != "") {
+		return fmt.Errorf("failed to read session state before deferring proof: %w", err)
+	}
+	if current == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	if current.State.IsTerminal() || current.ProofTxHash != "" {
 		c.logger.Warn().
 			Str(logging.FieldSessionID, sessionID).
 			Str("current_state", string(current.State)).
 			Str("proof_tx_hash", current.ProofTxHash).
-			Msg("NOT deferring proof: session already proved by another miner")
-		return nil
+			Msg("NOT deferring proof: session is no longer an unsent proof")
+		return fmt.Errorf("%w: %s is %s", ErrSessionNotDeferred, sessionID, current.State)
 	}
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimed); err != nil {
@@ -805,6 +811,47 @@ func (c *SessionCoordinator) OnProofDeferred(ctx context.Context, sessionID stri
 	c.logger.Info().
 		Str(logging.FieldSessionID, sessionID).
 		Msg("proof deferred: session returned to claimed, will retry next block inside the proof window")
+	return nil
+}
+
+// ErrSessionNotDeferred is OnClaimDeferred's and OnProofDeferred's refusal:
+// the session is no longer an unsent submission (another miner sent it, or it
+// reached another state), so it must keep the state it has.
+var ErrSessionNotDeferred = errors.New("session not deferred")
+
+// OnClaimDeferred returns a session from SessionStateClaiming to
+// SessionStateActive after a claim attempt stopped for a reason that will not
+// still be true next block -- a node that did not have the height yet, a
+// params read that blinked.
+//
+// It is OnProofDeferred one window earlier, for the same reason: a session
+// left in claiming can only leave through the claim window closing
+// (session_lifecycle.go), which loses the whole claim, while from active the
+// block engine returns it to claiming on every block inside the claim window.
+// It rewinds only a session still in claiming with no claim transaction: one
+// another miner claimed must not be claimed twice. The store enforces that
+// atomically.
+func (c *SessionCoordinator) OnClaimDeferred(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	// The guard -- claiming, and no claim transaction -- lives in the store's
+	// update script, in the same step as the write (ErrSessionNotDeferred).
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateActive); err != nil {
+		if !errors.Is(err, ErrSessionNotDeferred) {
+			c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+				Msg("failed to return session to active after deferring claim")
+		}
+		return err
+	}
+
+	c.logger.Info().
+		Str(logging.FieldSessionID, sessionID).
+		Msg("claim deferred: session returned to active, will retry next block inside the claim window")
 	return nil
 }
 

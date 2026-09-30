@@ -6,8 +6,8 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 
-	"github.com/cometbft/cometbft/rpc/client/http"
 	"github.com/hashicorp/go-version"
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -18,20 +18,35 @@ import (
 // This enables relayer components to receive block events from Redis pub/sub
 // (synchronized with the miner's view) while satisfying the client.BlockClient interface.
 //
-// Used in relayers to:
-// 1. Subscribe to Redis pub/sub for block events from miner
-// 2. Maintain local cache of last block (for LastBlock() calls)
-// 3. Provide BlockEvents() channel for components expecting it
-// 4. Query specific block heights via RPC (for proof generation)
+// Used in relayers and miner workers to:
+//  1. Subscribe to Redis pub/sub for block events from the leader
+//  2. Poll the leader's latest published height, so a silent pub/sub channel
+//     costs latency and not blocks
+//  3. Maintain local cache of last block (for LastBlock() calls)
+//  4. Provide BlockEvents() channel for components expecting it
+//  5. Serve a block at a height (for proof generation): the leader's record,
+//     or this process's own node when the record is missing
+//
+// The current height comes from the leader: two processes asking two nodes
+// would hold two versions of the present. The one exception is the startup
+// seed (SeedHeight), read from this process's own node before the first event. A block's hash at a height is
+// different, immutable once the block exists, so reading it from any node
+// that has it gives the same answer.
 type RedisBlockClientAdapter struct {
 	logger          logging.Logger
 	redisSubscriber *RedisBlockSubscriber
-	cometClient     *http.HTTP // For querying specific block heights (proof generation)
-	lastBlock       atomic.Pointer[simpleBlock]
-	blockEventsCh   chan client.Block
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
+	blockReader     BlockAtHeightReader
+	pollInterval    time.Duration
+
+	// deliverMu orders deliveries: the event loop and the latest-height poll
+	// both deliver, and a lower height sent after a higher one would move a
+	// relayer's height backwards.
+	deliverMu     sync.Mutex
+	lastBlock     atomic.Pointer[simpleBlock]
+	blockEventsCh chan client.Block
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
 
 	// blockEventsRequested is set the first time BlockEvents() is called, i.e.
 	// when a component actually wires up the BlockEvents() channel as its block
@@ -51,24 +66,39 @@ type RedisBlockClientAdapter struct {
 	// and replacing it: the window where another writer's higher height is lost
 	// unless the replace is a compare-and-swap. Nil outside tests.
 	afterLoadHook func()
+
+	// afterAdvanceHook, when set, runs in deliver after a height was taken and
+	// before it is sent: the window where a second deliverer's higher height
+	// would overtake it. Nil outside tests.
+	afterAdvanceHook func(height int64)
 }
 
-// NewRedisBlockClientAdapter creates an adapter for relayer block client.
-// The adapter subscribes to Redis events and implements client.BlockClient interface.
+// BlockAtHeightReader reads a block at a height from a node, retrying while
+// the node does not have it yet. client.BlockReader is the production one.
+type BlockAtHeightReader interface {
+	BlockAtHeight(ctx context.Context, height int64) (client.Block, error)
+}
+
+// latestHeightPollInterval paces the adapter's read of the leader's latest
+// published height.
+const latestHeightPollInterval = 1 * time.Second
+
+// NewRedisBlockClientAdapter creates an adapter over the leader's published
+// blocks. The adapter subscribes to Redis events and implements
+// client.BlockClient interface.
 //
-// Parameters:
-// - logger: Logger for the adapter
-// - redisSubscriber: RedisBlockSubscriber that receives events from Redis pub/sub
-// - cometClient: CometBFT RPC client for querying specific block heights (can be nil for relayers)
+// blockReader serves a block hash the leader's record lacks; nil (the relayer)
+// makes such a read an error.
 func NewRedisBlockClientAdapter(
 	logger logging.Logger,
 	redisSubscriber *RedisBlockSubscriber,
-	cometClient *http.HTTP,
+	blockReader BlockAtHeightReader,
 ) *RedisBlockClientAdapter {
 	return &RedisBlockClientAdapter{
 		logger:          logging.ForComponent(logger, logging.ComponentRedisBlockClientAdapter),
 		redisSubscriber: redisSubscriber,
-		cometClient:     cometClient,
+		blockReader:     blockReader,
+		pollInterval:    latestHeightPollInterval,
 		blockEventsCh:   make(chan client.Block, 2000),
 	}
 }
@@ -105,45 +135,100 @@ func (a *RedisBlockClientAdapter) Start(ctx context.Context) error {
 					return
 				}
 
-				// Only a height above the one held moves the adapter; anything
-				// else is neither stored nor forwarded. See advance.
-				block, ignored := a.advance(event.Height, event.Hash)
-				if ignored != "" {
-					blockEventsIgnored.WithLabelValues(ignored).Inc()
-					continue
+				if !a.deliver(event) {
+					return
 				}
-
-				// Forward to blockEventsCh ONLY if a component has wired up
-				// BlockEvents() as a consumer (relayer yes, miner no). With no
-				// consumer the channel would just fill and emit a misleading "full,
-				// dropping event" warning forever, so discard on arrival instead —
-				// no buffer growth, no noise. See blockEventsRequested.
-				if a.blockEventsRequested.Load() {
-					// Non-blocking send to prevent the Redis event loop from blocking.
-					select {
-					case a.blockEventsCh <- block:
-						// Event forwarded successfully
-					case <-a.ctx.Done():
-						return
-					default:
-						// A consumer is attached but not draining fast enough. This is
-						// a real wedged-consumer signal, so make it loud (metric + warn)
-						// rather than a silent drop.
-						blockEventsDropped.WithLabelValues("block_events").Inc()
-						a.logger.Warn().
-							Int64("height", event.Height).
-							Msg("block events channel full, dropping event (consumer not draining)")
-					}
-				}
-
-				// Fan-out to Subscribe() subscribers
-				a.publishToSubscribers(&event)
 			}
 		}
 	}()
 
+	a.wg.Add(1)
+	go logging.RecoverGoRoutine(a.logger, "redis_block_client_adapter_poll", a.pollLatestHeight)(a.ctx)
+
 	a.logger.Info().Msg("redis block client adapter started")
 	return nil
+}
+
+// deliver takes a block the leader published, from the event channel or the
+// latest-height poll, whichever brought it first. It returns false when the
+// adapter is stopping.
+func (a *RedisBlockClientAdapter) deliver(event BlockEvent) bool {
+	a.deliverMu.Lock()
+	defer a.deliverMu.Unlock()
+	// Only a height above the one held moves the adapter; anything
+	// else is neither stored nor forwarded. See advance.
+	block, ignored := a.advance(event.Height, event.Hash)
+	if ignored != "" {
+		blockEventsIgnored.WithLabelValues(ignored).Inc()
+		return true
+	}
+	if a.afterAdvanceHook != nil {
+		a.afterAdvanceHook(event.Height)
+	}
+
+	// Forward to blockEventsCh ONLY if a component has wired up
+	// BlockEvents() as a consumer (relayer yes, miner no). With no
+	// consumer the channel would just fill and emit a misleading "full,
+	// dropping event" warning forever, so discard on arrival instead —
+	// no buffer growth, no noise. See blockEventsRequested.
+	if a.blockEventsRequested.Load() {
+		// Non-blocking send to prevent the Redis event loop from blocking.
+		select {
+		case a.blockEventsCh <- block:
+			// Event forwarded successfully
+		case <-a.ctx.Done():
+			return false
+		default:
+			// A consumer is attached but not draining fast enough. This is
+			// a real wedged-consumer signal, so make it loud (metric + warn)
+			// rather than a silent drop.
+			blockEventsDropped.WithLabelValues("block_events").Inc()
+			a.logger.Warn().
+				Int64("height", event.Height).
+				Msg("block events channel full, dropping event (consumer not draining)")
+		}
+	}
+
+	// Fan-out to Subscribe() subscribers
+	a.publishToSubscribers(&event)
+	return true
+}
+
+// pollLatestHeight reads the leader's latest published height once per
+// interval and delivers it when the event channel has not. Redis pub/sub is
+// fire-and-forget: a subscriber that lost its connection, or was too slow,
+// misses events and is never told.
+func (a *RedisBlockClientAdapter) pollLatestHeight(ctx context.Context) {
+	defer a.wg.Done()
+	redisClient := a.redisSubscriber.redisClient
+	if redisClient == nil {
+		return
+	}
+	ticker := time.NewTicker(a.pollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		latest, found, err := readLatestPublishedHeight(ctx, redisClient)
+		if err != nil {
+			a.logger.Debug().Err(err).Msg("latest published height poll failed")
+			continue
+		}
+		if !found || latest <= a.LastBlock(ctx).Height() {
+			continue
+		}
+		event, found, err := readBlockRecord(ctx, redisClient, latest)
+		if err != nil || !found {
+			continue
+		}
+		a.redisSubscriber.advanceClock(event)
+		if !a.deliver(event) {
+			return
+		}
+	}
 }
 
 // LastBlock returns the last known block from Redis events.
@@ -208,33 +293,31 @@ func (a *RedisBlockClientAdapter) SeedHeight(height int64) bool {
 	return ignored == ""
 }
 
-// GetBlockAtHeight queries the blockchain for a specific block by height.
-// This is CRITICAL for proof generation - the validator uses the exact block at a specific
-// height, so we must query that exact block to get the correct BlockID.Hash.
-//
-// IMPORTANT: Uses BlockID.Hash (canonical block identifier) instead of Block.Hash() (computed hash).
-// This must match what the validator stores via ctx.HeaderHash() in StoreBlockHash().
-//
-// Returns an error if cometClient is nil (relayers don't need this functionality).
+// GetBlockAtHeight returns the block at height with its canonical hash, which
+// must match what the validator stores via ctx.HeaderHash() in
+// StoreBlockHash(): the leader's record when there is one, otherwise this
+// process's own node. It does not wait for the leader. A missing record was
+// lost (a refused write, a deleted key) or never written: a worker's startup
+// seed comes from its own node and can be ahead of what the leader has
+// published. Either way the node has the answer.
 func (a *RedisBlockClientAdapter) GetBlockAtHeight(ctx context.Context, height int64) (client.Block, error) {
-	if a.cometClient == nil {
-		return nil, fmt.Errorf("GetBlockAtHeight not supported: cometClient is nil (this adapter is configured for relayers only)")
+	if held := a.lastBlock.Load(); held != nil && held.height == height && len(held.hash) > 0 {
+		return held, nil
 	}
-
-	result, err := a.cometClient.Block(ctx, &height)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query block at height %d: %w", height, err)
+	if redisClient := a.redisSubscriber.redisClient; redisClient != nil {
+		event, found, err := readBlockRecord(ctx, redisClient, height)
+		if err == nil && found && len(event.Hash) > 0 {
+			return &simpleBlock{height: event.Height, hash: event.Hash}, nil
+		}
+		if err != nil {
+			a.logger.Debug().Err(err).Int64("height", height).Msg("block record read failed; reading the node")
+		}
 	}
-
-	// CRITICAL: Use BlockID.Hash (canonical block ID) instead of Block.Hash() (computed hash)
-	// This must match what the validator stores in ctx.HeaderHash() via StoreBlockHash()
-	// See: poktroll/x/session/keeper/keeper.go:82
-	block := &simpleBlock{
-		height: result.Block.Height,
-		hash:   result.BlockID.Hash, // ✅ Canonical hash
+	if a.blockReader == nil {
+		return nil, fmt.Errorf("no record of the block at height %d and no node to read it from", height)
 	}
-
-	return block, nil
+	a.logger.Debug().Int64("height", height).Msg("no record of this block; reading it from this process's node")
+	return a.blockReader.BlockAtHeight(ctx, height)
 }
 
 // GetChainVersion returns nil - not used in production.

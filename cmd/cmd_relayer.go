@@ -769,11 +769,10 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create RedisBlockClientAdapter to implement client.BlockClient interface
 	// This adapter receives events from Redis pub/sub and provides the BlockClient
 	// interface required by relayer components (proxy, relay meter, etc.)
-	// Relayers don't need to query specific blocks, so pass nil for RPC client
 	blockSubscriber := cache.NewRedisBlockClientAdapter(
 		logger,
 		redisBlockSubscriber,
-		nil, // Relayers only need block events, not specific block queries
+		nil, // the relayer never reads a block at a height
 	)
 	// Register this binary as a BlockEvents() consumer BEFORE Start() begins
 	// forwarding. The adapter discards block events on arrival until a consumer
