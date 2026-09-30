@@ -1918,9 +1918,10 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			}
 		}
 
+		// Not a failure of the cycle: the group is back in active and the Warn
+		// above records why. An error here would read, to the block engine and
+		// to an operator, as a lost claim.
 		if nodeBehind {
-			groupErrs = append(groupErrs,
-				fmt.Errorf("claims returned to the next block, the node was behind: %w", lastErr))
 			continue
 		}
 
@@ -2930,9 +2931,8 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			}
 		}
 
+		// Not a failure of the cycle: see the claim twin.
 		if nodeBehind {
-			groupErrs = append(groupErrs,
-				fmt.Errorf("proofs returned to the next block, the node was behind: %w", lastErr))
 			continue
 		}
 

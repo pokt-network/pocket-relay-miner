@@ -118,9 +118,9 @@ func requireState(t *testing.T, store *RedisSessionStore, snapshot *SessionSnaps
 
 // TestOnSessionsNeedClaim_ANodeBehindUsReturnsTheGroupToActive is beta: the
 // refusal arrives with our height inside the claim window (103 of 102..106).
-// It is neither a closed window nor a failed attempt: the whole group goes back
-// to active at once, with nothing ejected and no attempt spent, so the block
-// engine sends it again on the next block.
+// It is neither a closed window, a failed attempt nor a failed cycle: the whole
+// group goes back to active at once, with nothing ejected and no attempt spent,
+// and the block engine sends it again on the next block.
 func TestOnSessionsNeedClaim_ANodeBehindUsReturnsTheGroupToActive(t *testing.T) {
 	supplier := &nodeBehindSupplier{first: errBetaClaimNodeBehind}
 	lc, store := nodeBehindCallback(t, 103, supplier)
@@ -128,7 +128,7 @@ func TestOnSessionsNeedClaim_ANodeBehindUsReturnsTheGroupToActive(t *testing.T) 
 	b := storedSession(t, store, "claim-b", SessionStateClaiming)
 
 	result, err := lc.OnSessionsNeedClaim(context.Background(), []*SessionSnapshot{a, b})
-	require.ErrorContains(t, err, "node was behind")
+	require.NoError(t, err, "a group returned to the next block is not a failed cycle")
 	assert.False(t, result.IsClaimed("claim-a"))
 	assert.Equal(t, 1, supplier.calls, "the refusal is not retried in place")
 	requireState(t, store, a, SessionStateActive)
@@ -143,7 +143,7 @@ func TestOnSessionsNeedProof_ANodeBehindUsReturnsTheGroupToClaimed(t *testing.T)
 	snapshot := storedSession(t, store, "proof-node-behind", SessionStateProving)
 
 	result, err := lc.OnSessionsNeedProof(context.Background(), []*SessionSnapshot{snapshot})
-	require.ErrorContains(t, err, "node was behind")
+	require.NoError(t, err, "a group returned to the next block is not a failed cycle")
 	_, settled := result.Settled["proof-node-behind"]
 	assert.False(t, settled)
 	assert.Equal(t, 1, supplier.calls)
