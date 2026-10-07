@@ -1,6 +1,10 @@
 # Pocket RelayMiner - Tilt Development Environments
 
-This directory contains Tilt-based development environments for Pocket RelayMiner (HA mode).
+This directory contains the Tilt-based development environment for Pocket RelayMiner,
+in either mode: `relay_miner_mode: ha` (the default; relayer and miner Deployments
+over Redis) or `relay_miner_mode: standalone` (one process, its store on a volume,
+no Redis) in `tilt_config.yaml`. [docs/testing/TILT.md](../docs/testing/TILT.md)
+says what each mode brings up.
 
 ## Directory Structure
 
@@ -16,6 +20,7 @@ tilt/
 │   ├── validator.Tiltfile  # Validator + genesis
 │   ├── miner.Tiltfile      # Miner deployment
 │   ├── relayer.Tiltfile    # Relayer deployment
+│   ├── standalone.Tiltfile # Standalone-mode deployment (relay_miner_mode: standalone)
 │   ├── backend.Tiltfile    # Backend server
 │   ├── nginx-backend.Tiltfile  # Static JSON-RPC backend for load tests
 │   ├── observability.Tiltfile  # Prometheus, Grafana, Loki and Promtail
@@ -117,6 +122,9 @@ curl -X POST http://localhost:3069/v1 \
 ## Debugging
 
 ### Redis Commands
+
+High-availability mode only. In standalone mode the process holds its store's
+lock: read its logs (`kubectl logs -f -l app=standalone`) and its metrics.
 
 ```bash
 # Check Redis keys

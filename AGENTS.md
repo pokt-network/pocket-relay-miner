@@ -127,8 +127,9 @@ standalone mode exists, in 1 line.
   want to do, which document or tool to open.
 
 v0.1.0 ships no Kubernetes example or runbook. The Tilt setup in `tilt/` runs
-the relayer, the miner and Redis (high-availability mode) on a local kind
-cluster for development: it is
+either mode on a local kind cluster for development (`relay_miner_mode` in
+`tilt_config.yaml`: the relayer, the miner and Redis, or the standalone
+process): it is
 a starting point for your own manifests, not a production config. The
 invariants below hold on any platform.
 

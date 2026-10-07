@@ -53,6 +53,23 @@ level 3 exercises the path that does.
 | `live.sh` | the money path on the Tilt localnet, per transport: serial load over every protocol through the relay CLI at `:8180`, then the settlement asserted **on-chain, per service, with exact accounting**. `--preflight-only` checks readiness and stops. |
 | `all.sh` | runs the above up to a level. Fail-fast; `--keep-going` for the full picture. |
 
+**One gate, both modes.** `live.sh` reads the mode from the cluster's
+Deployments (`relayer` + `miner`: high-availability mode; `standalone`:
+standalone mode; both sets at once is refused) and names it in its first lines
+and in the evidence directory (`relay_miner_mode`). A verdict covers only the
+mode it names, so level 3 for both modes is two runs, one per
+`relay_miner_mode`. What differs in standalone mode:
+
+| Read | High-availability mode | Standalone mode |
+|---|---|---|
+| Deployments that must be settled and Running | `relayer`, `miner` | `standalone` |
+| Rendered config (services, `block_time_seconds`) | ConfigMaps `relayer-config`, `miner-config` | ConfigMap `standalone-config`, sections `relayer:` and `miner:` |
+| Staked suppliers | the registry in Redis (`redis supplier --list`, `active`) | `ha_miner_supplier_stake_upokt > 0` in Prometheus: set only for a supplier whose key the process holds and the chain reports staked, first 30s after start |
+| The miner's session states (corroboration) | `redis sessions --json` | not read, reported as a skip: the process holds its store's lock, and no counter covers every failure state |
+
+Everything else, the load, the on-chain settlement and every assertion on it,
+is the same code in both modes.
+
 `live.sh` **never starts or stops anything.** If the localnet is not up it prints
 the `tilt up` command and exits non-zero, because bringing the cluster up claims
 ports and containers another session on the same machine may be using. Run
