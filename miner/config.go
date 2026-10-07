@@ -976,11 +976,16 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read cf file: %w", err)
 	}
+	return ParseConfig(data)
+}
 
+// ParseConfig is LoadConfig on bytes already read: defaults, decode, unknown
+// keys, the unique consumer name and Validate.
+func ParseConfig(data []byte) (*Config, error) {
 	// Start with defaults
 	cf := DefaultConfig()
 
-	if err = yaml.Unmarshal(data, cf); err != nil {
+	if err := yaml.Unmarshal(data, cf); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
@@ -995,7 +1000,7 @@ func LoadConfig(path string) (*Config, error) {
 
 	cf.Redis.ConsumerName = UniqueConsumerName(cf.Redis.ConsumerName)
 
-	if err = cf.Validate(); err != nil {
+	if err := cf.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 

@@ -4,13 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
-	"os/signal"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/alitto/pond/v2"
@@ -493,6 +490,25 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		logger.Info().Msg("runtime metrics collector started")
 	}
 
+	// The flag is applied to the config, so serveRelayer reads one value.
+	if cmd.Flags().Changed(flagRedisURL) {
+		config.Redis.URL, _ = cmd.Flags().GetString(flagRedisURL)
+	}
+
+	return serveRelayer(ctx, logger, config, sideHooks{
+		openKeys: openOwnKeys(config.Keys),
+		started:  waitForSignal,
+	})
+}
+
+// serveRelayer builds the relayer's components on a running process, serves
+// until hooks.started's channel delivers, and shuts them down in the reverse
+// order it built them (its defers). The caller owns config, logger, memory
+// limit and observability.
+func serveRelayer(parent context.Context, logger logging.Logger, config *relayer.Config, hooks sideHooks) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
 	// The relayer's concurrency budget, computed ONCE here and read by both the
 	// Redis pool below and the master worker pool further down. They describe
 	// the same thing -- how much of this process can be inside a Redis call at
@@ -509,11 +525,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		redisPoolSize = sizing.RedisPoolSize()
 	}
 
-	// Use Redis URL from config, allow flag override
 	redisURL := config.Redis.URL
-	if cmd.Flags().Changed(flagRedisURL) {
-		redisURL, _ = cmd.Flags().GetString(flagRedisURL)
-	}
 
 	// Create wrapped Redis client with KeyBuilder for namespace-aware key construction
 	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
@@ -926,16 +938,11 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// names, put a key manager over them, load once, arm the watch and the
 	// reload timer, and refuse to continue with no keys. See keys.OpenManager
 	// for why that lives there and not here.
-	keyManager, err := keys.OpenManager(
-		ctx, logger,
-		config.Keys.KeysFile,
-		keyringSettings(config.Keys.Keyring),
-		config.Keys.HotReloadEnabled,
-	)
+	keyManager, releaseKeys, err := hooks.openKeys(ctx, logger)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = keyManager.Close() }()
+	defer releaseKeys()
 
 	loadedKeys := supplierSigningKeys(keyManager)
 
@@ -1282,9 +1289,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		Msg("HA Relayer started")
 
 	// Wait for shutdown signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	<-hooks.started()
 
 	logger.Info().Msg("shutdown signal received, stopping HA Relayer...")
 

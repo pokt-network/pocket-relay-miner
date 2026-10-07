@@ -7,7 +7,7 @@ import (
 )
 
 // The relayer stops admitting relays while the batch queue holds more bytes than
-// redis.batch_max_queued_mib allows. runHARelayer builds a whole process and has
+// redis.batch_max_queued_mib allows. serveRelayer builds a whole process and has
 // no test, so the wiring is frozen by reading it: without the SetPublishQueueFull
 // call every transport admits forever and the queue grows with the heap.
 //

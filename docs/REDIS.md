@@ -236,12 +236,12 @@ carry, such as active defragmentation or a different `hz`, were not measured.
 
 ---
 
-## Standalone, Sentinel and Cluster
+## Single-node, Sentinel and Cluster
 
 The URL scheme selects the client: `redis://` or `rediss://` for a single
 Redis, `redis-sentinel://` for Sentinel, `redis-cluster://` for Cluster (see the
 `redis.url` comment in the example configs). v0.1.0 was tested and measured
-only against a standalone Redis; Sentinel and Cluster are accepted by the
+only against a single-node Redis; Sentinel and Cluster are accepted by the
 client but not verified. The keys carry no `{...}` hash tags except the
 miner's rebroadcast keys (`ha:miner:rebroadcast:{claim}:...`).
 

@@ -102,6 +102,7 @@ invariants that stop a deployment.
 | choose a path, check prerequisites and ports | [docs/deploy/README.md](docs/deploy/README.md) |
 | run it with Docker Compose, on beta first | [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) |
 | run it on a host, binary and systemd | [docs/deploy/HOST.md](docs/deploy/HOST.md) |
+| run the relayer and the miner in one process | [docs/STANDALONE.md](docs/STANDALONE.md) |
 | use Kubernetes | no example in v0.1.0; `tilt/` runs the stack on a local kind cluster and is a starting point for your own manifests |
 
 **Configure.** The relayer reads its config once, at startup: restart it after

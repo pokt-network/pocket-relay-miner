@@ -7,7 +7,7 @@ import (
 )
 
 // Served relays are charged by the batch dispatcher, and the meter closes
-// admission when that dispatcher stops reaching Redis. runHARelayer builds a whole
+// admission when that dispatcher stops reaching Redis. serveRelayer builds a whole
 // process and has no test, so the wiring is frozen by reading it.
 //
 // What goes red: either call missing, repeated or under a condition (the meter

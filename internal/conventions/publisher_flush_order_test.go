@@ -11,7 +11,7 @@ import (
 // that flush writes THROUGH the Redis client -- p.client.TxPipelined in
 // transport/redis/batching_publisher.go.
 //
-// So the two deferred Close() calls in runHARelayer are ordered, and the order
+// So the two deferred Close() calls in serveRelayer are ordered, and the order
 // is the opposite of the one they are written in: defers run LIFO, so the
 // publisher's Close must be DECLARED AFTER the Redis client's in order to RUN
 // BEFORE it.
@@ -22,7 +22,7 @@ import (
 // TxPipelined fails, dispatchAll puts the chunk back on a queue nobody will
 // drain again, and the process exits. Every relay in it was served, signed and
 // answered to a client, and it is never written: money served and not billed.
-// No test covers it -- runHARelayer builds a whole process and has none -- and
+// No test covers it -- serveRelayer builds a whole process and has none -- and
 // no run shows it either, because the loss only happens on a shutdown that had
 // a backlog.
 //

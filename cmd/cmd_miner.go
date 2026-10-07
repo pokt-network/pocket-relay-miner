@@ -3,17 +3,13 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 
 	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
-	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/miner"
@@ -229,6 +225,28 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		logger.Info().Msg("runtime metrics collector started")
 	}
 
+	var setReadiness func(observability.ReadinessCheck)
+	if obsServer != nil {
+		setReadiness = obsServer.SetReadinessCheck
+	}
+	return serveMiner(ctx, logger, config, sideHooks{
+		openKeys:     openOwnKeys(config.Keys),
+		started:      waitForSignal,
+		setReadiness: setReadiness,
+	})
+}
+
+// serveMiner builds the miner's components on a running process, serves until
+// hooks.started's channel delivers or the leader controller fails, and shuts
+// them down in the reverse order it built them (its defers). The caller owns
+// config, logger, memory limit and observability.
+//
+// err is a NAMED result, which is what the comments below about closeErr refer
+// to: assigning a Close error to it would overwrite what this returns.
+func serveMiner(parent context.Context, logger logging.Logger, config *miner.Config, hooks sideHooks) (err error) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
 	// Create a wrapped Redis client with KeyBuilder for namespace-aware key construction
 	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
 		URL:                    config.Redis.URL,
@@ -242,7 +260,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("failed to create Redis client: %w", err)
 	}
 	defer func() {
-		// closeErr, NOT err: runHAMiner has a NAMED result, so assigning to
+		// closeErr, NOT err: serveMiner has a NAMED result, so assigning to
 		// err here overwrites whatever the function returned — a nil Close
 		// would mask the leader-controller failure below and exit 0.
 		if closeErr := redisClient.Close(); closeErr != nil {
@@ -283,8 +301,8 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	observability.SharedRegistry.MustRegister(redisPools)
 
 	// Set readiness check to verify Redis connectivity via PING
-	if obsServer != nil {
-		obsServer.SetReadinessCheck(func(ctx context.Context) error {
+	if hooks.setReadiness != nil {
+		hooks.setReadiness(func(ctx context.Context) error {
 			return redisClient.Ping(ctx).Err()
 		})
 	}
@@ -300,16 +318,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// names, put a key manager over them, load once, arm the watch and the
 	// reload timer, and refuse to continue with no keys. See keys.OpenManager
 	// for why that lives there and not here.
-	keyManager, err := keys.OpenManager(
-		ctx, logger,
-		config.Keys.KeysFile,
-		keyringSettings(config.Keys.Keyring),
-		config.Keys.HotReloadEnabled,
-	)
+	keyManager, releaseKeys, err := hooks.openKeys(ctx, logger)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = keyManager.Close() }()
+	defer releaseKeys()
 
 	logger.Info().
 		Int("count", len(keyManager.ListSuppliers())).
@@ -478,14 +491,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Bool("hot_reload", config.Keys.HotReloadEnabled).
 		Msg("HA Miner started")
 
-	// Set up signal handling
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	// Wait for a shutdown signal or a leader-controller failure
+	stopCh := hooks.started()
 	var runErr error
 	select {
-	case <-sigCh:
+	case <-stopCh:
 		logger.Info().Msg("shutdown signal received, stopping HA Miner...")
 	case runErr = <-leaderErrCh:
 		logger.Error().Err(runErr).Msg("leader controller failed, stopping HA Miner so a standby can take over...")

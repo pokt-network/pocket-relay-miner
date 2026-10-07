@@ -1,0 +1,59 @@
+# Pocket RelayMiner -- standalone: the relayer and the miner in one process.
+#
+#   pocket-relay-miner standalone validate --config config.standalone.yaml
+#   pocket-relay-miner standalone --config config.standalone.yaml
+#
+# The sections at the top level are written once and given to both sides.
+# relayer: and miner: hold the keys only that side reads: the same keys, with
+# the same meaning and defaults, as in config.relayer.example.yaml and
+# config.miner.example.yaml. Writing a top-level section again inside a side is
+# an error: one value per setting, in one place.
+
+pocket_node:
+  query_node_rpc_url: "http://localhost:26657"
+  query_node_grpc_url: "localhost:9090"
+  chain_id: "pocket"
+  grpc_insecure: true
+  query_timeout_seconds: 5
+
+keys:
+  hot_reload_enabled: true
+  keys_file: "/keys/supplier-keys.yaml"
+
+logging:
+  level: "info"
+  format: "json"
+
+# One observability server for the process: both sides' metrics on one port.
+metrics:
+  enabled: true
+  addr: ":9092"
+
+pprof:
+  enabled: false
+  addr: "127.0.0.1:6060"
+
+# The server and namespace both sides share. Pool sizes and the other redis
+# keys are per side, under relayer.redis and miner.redis.
+redis:
+  url: "redis://localhost:6379"
+
+relayer:
+  listen_addr: "0.0.0.0:8080"
+  health_check:
+    enabled: true
+    addr: "0.0.0.0:8081"
+  services:
+    my-service:
+      validation_mode: eager
+      default_backend: jsonrpc
+      backends:
+        jsonrpc:
+          url: "http://backend:8545"
+  redis:
+    batch_publish_interval_ms: 1000
+
+miner:
+  block_time_seconds: 30
+  redis:
+    claim_idle_timeout_ms: 60000

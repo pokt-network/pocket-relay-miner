@@ -1599,7 +1599,12 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	return ParseConfig(data)
+}
 
+// ParseConfig is LoadConfig on bytes already read: defaults, decode, unknown
+// keys, Validate and BuildPools.
+func ParseConfig(data []byte) (*Config, error) {
 	// Second pass over the same bytes, diagnostic only: the yaml.Unmarshal below
 	// is lenient and drops every key this struct does not declare, so the file
 	// and the process can disagree with no signal at all. What to DO with the
