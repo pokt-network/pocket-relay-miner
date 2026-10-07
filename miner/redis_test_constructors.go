@@ -11,8 +11,8 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-// The constructors below build the Redis SMST pieces directly, as tests do;
-// production builds them through the store backend (smstStore).
+// The constructors below build Redis-backed pieces directly, as tests do;
+// production builds them through the store backend.
 
 // NewRedisSMSTManager creates a new Redis-backed SMST manager.
 // The manager stores SMST nodes in Redis, enabling shared storage across HA instances.
@@ -45,4 +45,16 @@ func NewRedisMapStore(
 	sessionID string,
 ) kvstore.MapStore {
 	return newRedisMapStore(ctx, redisClient, supplierAddress, sessionID)
+}
+
+// NewSupplierClaimer creates a new supplier claimer.
+// Uses the provided config values. Zero values fall back to the package-level
+// constants (ClaimTTL=90s, RenewRate=10s, etc.).
+func NewSupplierClaimer(
+	logger logging.Logger,
+	redisClient *redisutil.Client,
+	instanceID string,
+	cfg SupplierClaimerConfig,
+) *SupplierClaimer {
+	return newSupplierClaimer(logger, &redisLeaseStore{client: redisClient}, instanceID, cfg)
 }

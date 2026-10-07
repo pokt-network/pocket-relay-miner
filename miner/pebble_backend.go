@@ -70,6 +70,13 @@ func (b *PebbleStoreBackend) smstStore(supplier string) smstStore {
 	return &pebbleSMSTStore{b: b, supplier: supplier}
 }
 
+// leaseStore holds the leases in the process: standalone has no peers to
+// share suppliers with, so it takes every one, and a restart holds them at
+// once.
+func (b *PebbleStoreBackend) leaseStore() leaseStore {
+	return newExclusiveLeaseStore()
+}
+
 func (b *PebbleStoreBackend) rebroadcastStore() RebroadcastStorage {
 	return newPebbleRebroadcastStore(b.store, 0) // 0 → default TTL
 }
@@ -87,8 +94,8 @@ func (b *PebbleStoreBackend) forSupplier(supplier string, dedup Deduplicator) (s
 	if err != nil {
 		return supplierStores{}, fmt.Errorf("failed to create consumer for %s: %w", supplier, err)
 	}
-	// The supplier's lease and its claim and proof tracking are still in
-	// Redis, so delivery waits on Redis health as the Redis consumer does.
+	// Delivery waits on the store health gate the process was given, as the
+	// Redis consumer does.
 	consumer.SetStoreHealth(b.config.StoreHealth)
 	sessions := b.sessionStore(supplier).(*pebbleSessionStore)
 	var commit relayCommitter

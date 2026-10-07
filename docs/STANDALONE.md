@@ -28,7 +28,7 @@ around them:
 | logging, metrics, pprof defaults | each subcommand's own | the miner's: metrics on at `:9092`, pprof off, async JSON logging |
 | shared metrics both sides write without a `component` label (the `ha_cache_*` hits, misses, chain queries and block height) | one series per process | both sides on the same series: counters add up, gauges hold the last write |
 | relay queue, sessions, dedup marks, relay meter counters, caches, SMST trees, claim/proof tracking and rebroadcast messages | Redis | the embedded store (`storage.path`) |
-| leader election, supplier leases | Redis | Redis in this version |
+| leader election, supplier leases | Redis, shared by the replicas | in the process: it leads and holds every supplier |
 
 ## Config
 
@@ -73,10 +73,9 @@ dedup marks, the relay meter's counters, the caches and the session trees
 - Within the embedded store a relay is counted once whatever is lost: its dedup
   mark, its session counters and the removal of its queue entry are written
   together, and the database recovers to a prefix of what was written.
-- Run one standalone process per Redis namespace. In this version the supplier
-  leases are in Redis while the relay queue is in each process's store, so a
-  second process on the same namespace would take suppliers whose relays the
-  other process queues.
+- A standalone process is its own leader and holds every supplier its keys
+  name; it shares them with no other process. Run one process per set of
+  supplier keys: two would each serve and claim the same suppliers.
 
 ## Startup and shutdown
 

@@ -635,9 +635,9 @@ func (m *SupplierManager) startWithDistributedClaiming(ctx context.Context, supp
 		Msg("filtered suppliers by staking status")
 
 	// Create the claimer (always, even with empty staked set).
-	m.claimer = NewSupplierClaimer(
+	m.claimer = newSupplierClaimer(
 		m.logger,
-		m.config.RedisClient,
+		m.storeBackend().leaseStore(),
 		m.config.MinerID,
 		m.config.ClaimerConfig,
 	)
@@ -1840,6 +1840,15 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 // storeBackend is the manager's backend; a manager built without
 // NewSupplierManager (tests) gets the Redis one over its config.
+// leaseOwner is who holds the supplier's lease: through the claimer, or the
+// backend's lease store for a manager whose claimer never started.
+func (m *SupplierManager) leaseOwner(ctx context.Context, supplier string) (string, error) {
+	if m.claimer != nil {
+		return m.claimer.LeaseOwner(ctx, supplier)
+	}
+	return m.storeBackend().leaseStore().owner(ctx, supplier)
+}
+
 // kvStore is the manager's kv store: the one the caller passed, or Redis.
 func (m *SupplierManager) kvStore() kv.Store {
 	if m.config.KV != nil {
@@ -2887,8 +2896,7 @@ func (m *SupplierManager) teardownSupplier(state *SupplierState) {
 	// Only remove from registry and cache if no other miner has already claimed
 	// this supplier. During rebalance, miner1 may release a supplier that miner2
 	// has already claimed and registered — deleting here would clobber miner2's entries.
-	claimKey := m.config.RedisClient.KB().MinerClaimKey(operatorAddr)
-	claimOwner, claimErr := m.config.RedisClient.Get(ctx, claimKey).Result()
+	claimOwner, claimErr := m.leaseOwner(ctx, operatorAddr)
 	reclaimedByOther := claimErr == nil && claimOwner != "" && claimOwner != m.config.MinerID
 
 	if reclaimedByOther {

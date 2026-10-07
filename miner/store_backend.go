@@ -27,6 +27,8 @@ type StoreBackend interface {
 	// rebroadcastStore keeps the built claim and proof messages the inclusion
 	// reconciler sends again.
 	rebroadcastStore() RebroadcastStorage
+	// leaseStore holds the supplier leases the claimer shares out.
+	leaseStore() leaseStore
 }
 
 // supplierStores are one supplier's stores.
@@ -117,4 +119,8 @@ func (b *redisStoreBackend) smstStore(supplier string) smstStore {
 
 func (b *redisStoreBackend) rebroadcastStore() RebroadcastStorage {
 	return NewRebroadcastStore(b.config.RedisClient, 0) // 0 → default TTL
+}
+
+func (b *redisStoreBackend) leaseStore() leaseStore {
+	return &redisLeaseStore{client: b.config.RedisClient}
 }

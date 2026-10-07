@@ -2,16 +2,14 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // Supplier Claiming Default Timing Constants
@@ -109,10 +107,10 @@ type SupplierClaimerConfig struct {
 // - Automatic reclaim of orphaned suppliers (failed miners)
 // - Instance registration with heartbeat
 type SupplierClaimer struct {
-	logger      logging.Logger
-	redisClient *redisutil.Client
-	instanceID  string
-	config      SupplierClaimerConfig
+	logger     logging.Logger
+	leases     leaseStore // where the leases are held: Redis, or this process alone
+	instanceID string
+	config     SupplierClaimerConfig
 
 	// Claimed suppliers (this instance owns these)
 	// Maps supplier address to the time it was claimed, enabling newest-first
@@ -181,34 +179,8 @@ type drainLease struct {
 	deadline time.Time
 }
 
-// releaseLeaseScript deletes a lease only if this instance still holds it.
-var releaseLeaseScript = redis.NewScript(`
-	if redis.call("get", KEYS[1]) == ARGV[1] then
-		return redis.call("del", KEYS[1])
-	else
-		return 0
-	end
-`)
-
-// extendDrainLeaseScript sets a lease's TTL, in milliseconds, only if this
-// instance still holds it.
-var extendDrainLeaseScript = redis.NewScript(`
-	if redis.call("get", KEYS[1]) == ARGV[1] then
-		return redis.call("pexpire", KEYS[1], ARGV[2])
-	else
-		return 0
-	end
-`)
-
-// NewSupplierClaimer creates a new supplier claimer.
-// Uses the provided config values. Zero values fall back to the package-level
-// constants (ClaimTTL=90s, RenewRate=10s, etc.).
-func NewSupplierClaimer(
-	logger logging.Logger,
-	redisClient *redisutil.Client,
-	instanceID string,
-	cfg SupplierClaimerConfig,
-) *SupplierClaimer {
+// newSupplierClaimer is the claimer over leases.
+func newSupplierClaimer(logger logging.Logger, leases leaseStore, instanceID string, cfg SupplierClaimerConfig) *SupplierClaimer {
 	// Apply defaults for any zero-value fields
 	if cfg.ClaimTTL <= 0 {
 		cfg.ClaimTTL = ClaimTTL
@@ -235,7 +207,7 @@ func NewSupplierClaimer(
 
 	return &SupplierClaimer{
 		logger:           componentLogger,
-		redisClient:      redisClient,
+		leases:           leases,
 		instanceID:       instanceID,
 		config:           cfg,
 		claimed:          make(map[string]time.Time),
@@ -344,10 +316,10 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 		return false
 	}
 
-	claimKey := c.redisClient.KB().MinerClaimKey(supplier)
+	claimKey := c.leases.leaseKey(supplier)
 
 	// Use SET NX (only set if not exists) with TTL
-	success, err := c.redisClient.SetNX(ctx, claimKey, c.instanceID, c.config.ClaimTTL).Result()
+	success, err := c.leases.setNX(ctx, supplier, c.instanceID, c.config.ClaimTTL)
 	if err != nil {
 		c.logger.Error().
 			Err(err).
@@ -360,7 +332,7 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 	adopted := false
 	if !success {
 		// Already claimed - check if it's by us (renewal case) or another instance
-		owner, err := c.redisClient.Get(ctx, claimKey).Result()
+		owner, err := c.leases.owner(ctx, supplier)
 		if err == nil && owner == c.instanceID {
 			if c.isDraining(supplier) {
 				// Released since the check above: the key is ours only because
@@ -369,7 +341,7 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 				return false
 			}
 			// We already own it, just renew - check result to ensure it worked
-			renewed, expireErr := c.redisClient.Expire(ctx, claimKey, c.config.ClaimTTL).Result()
+			renewed, expireErr := c.leases.expire(ctx, supplier, c.config.ClaimTTL)
 			if expireErr != nil {
 				c.logger.Warn().
 					Err(expireErr).
@@ -535,8 +507,7 @@ func (c *SupplierClaimer) ExtendDrainLease(ctx context.Context, supplier string,
 	}
 	c.drainingMu.Unlock()
 
-	claimKey := c.redisClient.KB().MinerClaimKey(supplier)
-	if err := extendDrainLeaseScript.Run(ctx, c.redisClient, []string{claimKey}, c.instanceID, budget.Milliseconds()).Err(); err != nil {
+	if err := c.leases.extendIfOwner(ctx, supplier, c.instanceID, budget); err != nil {
 		return fmt.Errorf("failed to extend drain lease: %w", err)
 	}
 	return nil
@@ -573,12 +544,11 @@ func (c *SupplierClaimer) FinishRelease(ctx context.Context, supplier string) er
 // deleteLeaseIfOurs deletes the supplier's lease key only if this instance
 // still holds it.
 func (c *SupplierClaimer) deleteLeaseIfOurs(ctx context.Context, supplier string) error {
-	claimKey := c.redisClient.KB().MinerClaimKey(supplier)
-	result, err := releaseLeaseScript.Run(ctx, c.redisClient, []string{claimKey}, c.instanceID).Int64()
+	released, err := c.leases.releaseIfOwner(ctx, supplier, c.instanceID)
 	if err != nil {
 		return err
 	}
-	if result == 0 {
+	if !released {
 		c.logger.Debug().Str("supplier", supplier).Msg("claim was not owned by us")
 	}
 	return nil
@@ -718,6 +688,12 @@ func (c *SupplierClaimer) inRecentReleaseCooldown(supplier string) bool {
 	return true
 }
 
+// LeaseOwner is the instance that holds the supplier's lease; errLeaseAbsent
+// when none does.
+func (c *SupplierClaimer) LeaseOwner(ctx context.Context, supplier string) (string, error) {
+	return c.leases.owner(ctx, supplier)
+}
+
 // IsClaimed returns true if the supplier is claimed by this instance.
 func (c *SupplierClaimer) IsClaimed(supplier string) bool {
 	c.claimedMu.RLock()
@@ -746,16 +722,13 @@ func (c *SupplierClaimer) ClaimedSuppliers() []string {
 
 // registerInstance registers this miner instance in Redis.
 func (c *SupplierClaimer) registerInstance(ctx context.Context) error {
-	instanceKey := c.redisClient.KB().MinerInstanceKey(c.instanceID)
-	activeSetKey := c.redisClient.KB().MinerActiveSetKey()
-
 	// Set instance key with TTL
-	if err := c.redisClient.Set(ctx, instanceKey, time.Now().UnixNano(), c.config.InstanceTTL).Err(); err != nil {
+	if err := c.leases.setInstance(ctx, c.instanceID, c.config.InstanceTTL); err != nil {
 		return fmt.Errorf("failed to set instance key: %w", err)
 	}
 
 	// Add to active set
-	if err := c.redisClient.SAdd(ctx, activeSetKey, c.instanceID).Err(); err != nil {
+	if err := c.leases.addActive(ctx, c.instanceID); err != nil {
 		return fmt.Errorf("failed to add to active set: %w", err)
 	}
 
@@ -767,14 +740,11 @@ func (c *SupplierClaimer) registerInstance(ctx context.Context) error {
 
 // unregisterInstance removes this miner instance from Redis.
 func (c *SupplierClaimer) unregisterInstance(ctx context.Context) error {
-	instanceKey := c.redisClient.KB().MinerInstanceKey(c.instanceID)
-	activeSetKey := c.redisClient.KB().MinerActiveSetKey()
-
 	// Remove from active set
-	c.redisClient.SRem(ctx, activeSetKey, c.instanceID)
+	c.leases.removeActive(ctx, c.instanceID)
 
 	// Delete instance key
-	c.redisClient.Del(ctx, instanceKey)
+	c.leases.deleteInstance(ctx, c.instanceID)
 
 	c.logger.Debug().
 		Msg("unregistered miner instance")
@@ -814,10 +784,8 @@ func (c *SupplierClaimer) initialClaim(ctx context.Context) error {
 
 // calculateFairShare calculates the fair share of suppliers for this instance.
 func (c *SupplierClaimer) calculateFairShare(ctx context.Context) int {
-	activeSetKey := c.redisClient.KB().MinerActiveSetKey()
-
 	// Get active miner count
-	activeMiners, err := c.redisClient.SCard(ctx, activeSetKey).Result()
+	activeMiners, err := c.leases.activeCount(ctx)
 	if err != nil || activeMiners == 0 {
 		activeMiners = 1 // At least this instance
 	}
@@ -860,26 +828,22 @@ func (c *SupplierClaimer) instanceHeartbeatLoop() {
 
 // cleanupStaleInstances removes instances whose keys have expired.
 func (c *SupplierClaimer) cleanupStaleInstances() {
-	activeSetKey := c.redisClient.KB().MinerActiveSetKey()
-
 	// Get all instances in the set
-	instances, err := c.redisClient.SMembers(c.ctx, activeSetKey).Result()
+	instances, err := c.leases.activeMembers(c.ctx)
 	if err != nil {
 		return
 	}
 
 	for _, instanceID := range instances {
-		instanceKey := c.redisClient.KB().MinerInstanceKey(instanceID)
-
 		// Check if instance key exists
-		exists, err := c.redisClient.Exists(c.ctx, instanceKey).Result()
+		alive, err := c.leases.instanceAlive(c.ctx, instanceID)
 		if err != nil {
 			continue
 		}
 
-		if exists == 0 {
+		if !alive {
 			// Instance key expired, remove from set
-			c.redisClient.SRem(c.ctx, activeSetKey, instanceID)
+			c.leases.removeActive(c.ctx, instanceID)
 			c.logger.Debug().
 				Str("stale_instance", instanceID).
 				Msg("removed stale instance from active set")
@@ -926,12 +890,12 @@ func (c *SupplierClaimer) renewAllClaims() {
 	now := c.nowFn()
 
 	for _, supplier := range claimed {
-		claimKey := c.redisClient.KB().MinerClaimKey(supplier)
+		claimKey := c.leases.leaseKey(supplier)
 
 		// Renew only if we still own it (check-and-renew)
-		owner, err := c.redisClient.Get(c.ctx, claimKey).Result()
+		owner, err := c.leases.owner(c.ctx, supplier)
 		if err != nil {
-			if err == redis.Nil {
+			if errors.Is(err, errLeaseAbsent) {
 				// The lease expired. Try to take it back FIRST: the bool
 				// decides. Recovering means the supplier is still ours and
 				// draining it would destroy a live one; failing means a peer
@@ -988,7 +952,7 @@ func (c *SupplierClaimer) renewAllClaims() {
 
 		// Renew the lease - check BOTH error AND result
 		// Expire returns (bool, error) - bool is false if key doesn't exist
-		renewed, err := c.redisClient.Expire(c.ctx, claimKey, c.config.ClaimTTL).Result()
+		renewed, err := c.leases.expire(c.ctx, supplier, c.config.ClaimTTL)
 		switch {
 		case err != nil:
 			c.logger.Warn().Err(err).Str("supplier", supplier).Msg("failed to renew claim")
@@ -1218,15 +1182,14 @@ func (c *SupplierClaimer) claimOrphaned() {
 			continue
 		}
 
-		claimKey := c.redisClient.KB().MinerClaimKey(supplier)
-		exists, err := c.redisClient.Exists(c.ctx, claimKey).Result()
+		exists, err := c.leases.exists(c.ctx, supplier)
 		if err != nil {
 			c.logger.Warn().Err(err).Str("supplier", supplier).
 				Msg("failed to check claim key for orphan detection")
 			continue
 		}
 
-		if exists == 0 {
+		if !exists {
 			orphaned++
 			c.logger.Warn().Str("supplier", supplier).
 				Msg("detected orphaned supplier (no claim key), attempting to claim")

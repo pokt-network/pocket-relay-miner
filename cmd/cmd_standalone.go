@@ -12,6 +12,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
 	"github.com/pokt-network/pocket-relay-miner/keys"
+	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
@@ -228,5 +229,7 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 		kv:            store,
 		openPublisher: openQueue,
 		minerBackend:  minerBackend,
+		// One process, no peers: it holds the leadership and every lease.
+		newElector: leader.NewExclusiveGlobalLeaderElector,
 	}, sigCh)
 }

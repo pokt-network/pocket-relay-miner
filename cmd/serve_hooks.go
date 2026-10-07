@@ -8,6 +8,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/keys"
+	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
@@ -41,6 +42,10 @@ type sideHooks struct {
 	// minerBackend, when not nil, keeps the miner's relay queue, sessions and
 	// dedup marks; nil means Redis.
 	minerBackend func(miner.SupplierManagerConfig) miner.StoreBackend
+
+	// newElector, when not nil, builds the miner's leader elector; nil means
+	// the Redis lock every replica competes for.
+	newElector func(logger logging.Logger, instanceID string, config leader.GlobalLeaderElectorConfig) *leader.GlobalLeaderElector
 }
 
 // openOwnKeys opens a key manager the side owns: closed when the side is done.

@@ -359,12 +359,12 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 			Msg("WARNING: heartbeat_rate is more than half of leader_ttl - risk of lock expiration before renewal! Recommended: heartbeat_rate <= leader_ttl/3")
 	}
 
-	globalLeader := leader.NewGlobalLeaderElectorWithConfig(
-		logger,
-		redisClient,
-		instanceID,
-		leaderConfig,
-	)
+	var globalLeader *leader.GlobalLeaderElector
+	if hooks.newElector != nil {
+		globalLeader = hooks.newElector(logger, instanceID, leaderConfig)
+	} else {
+		globalLeader = leader.NewGlobalLeaderElectorWithConfig(logger, redisClient, instanceID, leaderConfig)
+	}
 	// NOT started yet: the election loop must not be able to fire OnElected
 	// before registerLeaderCallbacks has wired it. See where Start now lives.
 	// Use dynamic logger that evaluates replica status at log time
