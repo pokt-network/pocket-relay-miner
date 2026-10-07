@@ -1337,6 +1337,7 @@ func extractStakedEndpoints(configs []*sharedtypes.SupplierServiceConfig) []cach
 func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier string, warmupData *SupplierWarmupData) error {
 	// First, load existing sessions from Redis to validate handoff
 	sessionStore := m.storeBackend().sessionStore(supplier)
+	smst := m.storeBackend().smstStore(supplier)
 
 	// Get all sessions for this supplier
 	sessions, err := sessionStore.GetBySupplier(ctx)
@@ -1368,10 +1369,9 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 			}
 
 			activeCount++
-			smstKey := m.config.RedisClient.KB().SMSTNodesKey(supplier, session.SessionID)
-			exists, _ := m.config.RedisClient.Exists(ctx, smstKey).Result()
+			exists, _ := smst.exists(ctx, smstNodes, session.SessionID) //nolint:errcheck // a failed read reads as missing, as before: this only logs
 
-			if exists == 0 && session.RelayCount > 0 {
+			if !exists && session.RelayCount > 0 {
 				missingSmstCount++
 				m.logger.Warn().
 					Str("supplier", supplier).
@@ -1572,9 +1572,9 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	)
 
 	// Create SMST manager for building session trees (Redis-backed for HA)
-	smstManager := NewRedisSMSTManager(
+	smstManager := newSMSTManager(
 		m.logger,
-		m.config.RedisClient,
+		m.storeBackend().smstStore(operatorAddr),
 		RedisSMSTManagerConfig{
 			SupplierAddress:    operatorAddr,
 			CacheTTL:           m.config.CacheTTL,

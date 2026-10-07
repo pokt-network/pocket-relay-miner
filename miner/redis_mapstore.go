@@ -47,6 +47,7 @@ import (
 type RedisMapStore struct {
 	redisClient *redisutil.Client
 	hashKey     string // Redis hash key built via KeyBuilder.SMSTNodesKey()
+	liveRootKey string // the session's live_root, written by FlushOrphansWithLiveRoot
 	ctx         context.Context
 
 	// Pipeline buffers — separated because they have different lifetimes.
@@ -66,43 +67,11 @@ type RedisMapStore struct {
 	orphanBuffer   map[string]struct{} // field set (orphan deletes pending checkpoint)
 }
 
-// NewRedisMapStore creates a new Redis-backed MapStore for a (supplier, session) pair.
-// The store uses a Redis hash to persist SMST nodes, enabling shared access across HA instances.
-//
-// Parameters:
-//   - ctx: Context for Redis operations
-//   - redisClient: Redis client (supports standalone, sentinel, and cluster)
-//   - supplierAddress: Supplier operator address — required to namespace the hash per
-//     supplier so distinct suppliers participating in the same session do not
-//     overwrite each other's SMST nodes.
-//   - sessionID: Unique session identifier used to namespace the Redis hash
-//
-// Returns:
-//
-//	A MapStore implementation backed by Redis
-func NewRedisMapStore(
-	ctx context.Context,
-	redisClient *redisutil.Client,
-	supplierAddress string,
-	sessionID string,
-) kvstore.MapStore {
+func newRedisMapStore(ctx context.Context, redisClient *redisutil.Client, supplierAddress, sessionID string) *RedisMapStore {
 	return &RedisMapStore{
 		redisClient:    redisClient,
 		hashKey:        redisClient.KB().SMSTNodesKey(supplierAddress, sessionID),
-		ctx:            ctx,
-		pipelineBuffer: make(map[string][]byte),
-		orphanBuffer:   make(map[string]struct{}),
-	}
-}
-
-// newRedisMapStoreForHash is NewRedisMapStore for a caller that already holds
-// the hash key rather than the (supplier, session) pair that names it. It
-// exists so the cold path reads nodes through this store -- the one place that
-// knows how a node is stored -- instead of talking to Redis itself.
-func newRedisMapStoreForHash(ctx context.Context, redisClient *redisutil.Client, hashKey string) *RedisMapStore {
-	return &RedisMapStore{
-		redisClient:    redisClient,
-		hashKey:        hashKey,
+		liveRootKey:    redisClient.KB().SMSTLiveRootKey(supplierAddress, sessionID),
 		ctx:            ctx,
 		pipelineBuffer: make(map[string][]byte),
 		orphanBuffer:   make(map[string]struct{}),
@@ -531,10 +500,10 @@ func (s *RedisMapStore) writePendingNodesLocked() error {
 // checkpoint can retry, and live_root stays at its previous value.
 func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 	ctx context.Context,
-	liveRootKey string,
 	liveRoot []byte,
 	cacheTTL time.Duration,
 ) error {
+	liveRootKey := s.liveRootKey
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
 

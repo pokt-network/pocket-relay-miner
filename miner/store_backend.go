@@ -22,6 +22,8 @@ type StoreBackend interface {
 	sessionStore(supplier string) SessionStore
 	// deduplicator is the process's one deduplicator; nil fails open.
 	deduplicator() Deduplicator
+	// smstStore keeps a supplier's session trees.
+	smstStore(supplier string) smstStore
 }
 
 // supplierStores are one supplier's stores.
@@ -104,4 +106,8 @@ func (b *redisStoreBackend) forSupplier(supplier string, dedup Deduplicator) (su
 		commit:   newRedisRelayCommitter(b.config.RedisClient, sessions, dedup, consumer),
 		setPause: consumer.SetIngestionPause,
 	}, nil
+}
+
+func (b *redisStoreBackend) smstStore(supplier string) smstStore {
+	return newRedisSMSTStore(b.config.RedisClient, supplier)
 }

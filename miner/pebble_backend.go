@@ -66,6 +66,11 @@ func NewPebbleStoreBackend(logger logging.Logger, store *pebblestore.Store, brok
 
 func (b *PebbleStoreBackend) deduplicator() Deduplicator { return b.dedup }
 
+// smstStore keeps the session trees in Redis in this version.
+func (b *PebbleStoreBackend) smstStore(supplier string) smstStore {
+	return newRedisSMSTStore(b.config.RedisClient, supplier)
+}
+
 func (b *PebbleStoreBackend) sessionStore(supplier string) SessionStore {
 	return &pebbleSessionStore{b: b, supplier: supplier, ttl: sessionTTL(b.config.SessionTTL)}
 }
