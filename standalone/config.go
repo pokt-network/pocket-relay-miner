@@ -228,4 +228,3 @@ func sideDocument(name string, side *yaml.Node, common map[string]*yaml.Node) ([
 func scalar(v string) *yaml.Node {
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v}
 }
-
