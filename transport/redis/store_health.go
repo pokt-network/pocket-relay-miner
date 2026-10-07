@@ -500,14 +500,14 @@ func (h *StoreHealth) transition(gate StoreGate, operable bool, reason string) {
 			Uint64("free_bytes", free).
 			Uint64("reopen_at_bytes", storeReopenAt(gate, maxmemory)).
 			Dur("closed_for", closedFor).
-			Msg("Redis operable again: admitting work")
+			Msg("store operable again: admitting work")
 	} else {
 		h.logger.Warn().Str("process", h.component).Str("gate", string(gate)).Str("reason", reason).
 			Uint64("used_memory", used).
 			Uint64("maxmemory", maxmemory).
 			Uint64("free_bytes", free).
 			Uint64("close_below_bytes", closeBelow).
-			Msg("Redis not operable: no new work admitted until it has room")
+			Msg("store not operable: no new work admitted until it has room")
 	}
 	for _, fn := range callbacks {
 		fn(operable)

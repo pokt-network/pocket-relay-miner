@@ -48,6 +48,9 @@ Example:
   pocket-relay-miner standalone --config /path/to/standalone.yaml
 `,
 		RunE: runStandalone,
+		// A runtime failure (the node, the store) is the error line; the usage
+		// text after it only buries it.
+		SilenceUsage: true,
 	}
 	cmd.Flags().String(flagStandaloneConfig, "", "Path to standalone config YAML file (required)")
 	cmd.Flags().Bool(flagStrictConfig, false, "Refuse to start when the config carries keys this binary does not understand (default: warn and start)")
@@ -63,8 +66,12 @@ func standaloneValidateCmd() *cobra.Command {
 
 Exits 0 if the config would boot, non-zero with the first error otherwise.
 
+With --check-stake it also queries the chain for each configured supplier's
+staked (service, transport) pairs and reports the ones the relayer side has no
+backend for, as relayer validate --check-stake does.
+
 Example:
-  pocket-relay-miner standalone validate --config /path/to/standalone.yaml`,
+  pocket-relay-miner standalone validate --config /path/to/standalone.yaml --check-stake`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadStandaloneConfig(cmd)
@@ -78,10 +85,18 @@ Example:
 			}
 			configPath, _ := cmd.Flags().GetString(flagStandaloneConfig)
 			fmt.Printf("config OK: %s would start\n", configPath)
-			return nil
+
+			checkStake, _ := cmd.Flags().GetBool(flagCheckStake)
+			if !checkStake {
+				return nil
+			}
+			nodeOverride, _ := cmd.Flags().GetString(flagNode)
+			return runCheckStake(cmd.Context(), cfg.Relayer, nodeOverride)
 		},
 	}
 	c.Flags().String(flagStandaloneConfig, "", "Path to standalone config YAML file (required)")
+	c.Flags().Bool(flagCheckStake, false, "Cross-check on-chain stake against the relayer side's backends (queries the chain)")
+	c.Flags().String(flagNode, "", "Override the gRPC query node URL (default: pocket_node.query_node_grpc_url from config)")
 	_ = c.MarkFlagRequired(flagStandaloneConfig)
 	return c
 }

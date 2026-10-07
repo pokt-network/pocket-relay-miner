@@ -68,9 +68,12 @@ COPY --from=builder /build/pocket-relay-miner /usr/local/bin/pocket-relay-miner
 RUN addgroup -g 1000 pocket && \
     adduser -D -u 1000 -G pocket pocket
 
-# Create directories for keys and cache
+# Create directories for keys, cache and the standalone mode's embedded store.
+# A volume mounted on data/ starts owned by the image's user: one mounted on a
+# path the image does not have would be root's, and the store could not write.
 RUN mkdir -p /home/pocket/.pocket-relay-miner/keys \
-             /home/pocket/.pocket-relay-miner/cache && \
+             /home/pocket/.pocket-relay-miner/cache \
+             /home/pocket/.pocket-relay-miner/data && \
     chown -R pocket:pocket /home/pocket/.pocket-relay-miner
 
 USER pocket

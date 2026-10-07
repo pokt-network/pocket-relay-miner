@@ -2,6 +2,10 @@
 
 Redis is the central state store for distributed coordination. **It's NOT just a cache** - it stores critical revenue-generating data.
 
+This page is about the **high-availability mode** (`relayer` and `miner`).
+The **standalone mode** (`standalone`) uses no Redis: its state is in an
+embedded store on local disk, described in [STANDALONE.md](STANDALONE.md).
+
 **Topology**: 1 Redis shared by the relayers and miners of a deployment. v0.1.0
 was tested on 1 relayer + 1 miner and on 2 relayers + 2 miners (the latter at
 lower load), always against a standalone Redis; the load tests and the capacity

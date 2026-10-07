@@ -1105,7 +1105,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (instance)(process_resident_memory_bytes{job=~\"relayers|miners\",instance=~\"$instance\"})",
+          "expr": "max by (instance)(process_resident_memory_bytes{job=~\"relayers|miners|standalone\",instance=~\"$instance\"})",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }

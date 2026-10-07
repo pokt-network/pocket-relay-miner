@@ -38,7 +38,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "store_operable",
-			Help:      "1 while Redis is taken as able to accept writes and work is admitted, 0 while it is not",
+			Help:      "1 while the store (Redis, or the disk of the embedded store in standalone mode) is taken as able to accept writes and work is admitted, 0 while it is not",
 		},
 		[]string{"component", "gate"},
 	)
@@ -75,7 +75,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "store_free_bytes",
-			Help:      "Redis maxmemory minus used_memory at the last sample; -1 when maxmemory is not set",
+			Help:      "Free bytes at the last sample: Redis maxmemory minus used_memory, or the free space on the disk of the embedded store in standalone mode; -1 when Redis has no maxmemory",
 		},
 		[]string{"component"},
 	)

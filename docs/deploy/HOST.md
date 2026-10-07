@@ -1,4 +1,9 @@
-# Deploy on a host (binary + systemd)
+# Deploy on a host (binary + systemd): high-availability mode
+
+This runbook runs the **high-availability mode**. For the **standalone mode**
+(1 service, an embedded store, no Redis), follow
+[HOST_STANDALONE.md](HOST_STANDALONE.md) instead;
+[README.md, "Choose a mode"](README.md#choose-a-mode) compares the two.
 
 This runbook installs the relayer and the miner as 2 systemd services on 1
 Linux host (or VM), next to Redis 8.10 or newer. Example files are in

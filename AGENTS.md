@@ -8,8 +8,9 @@ deployment from starting.
 Each one was broken by an agent in a real first-time run.
 
 1. Run the runbook's commands exactly as written, with its `$C` (project
-   `prm-example`). Do not swap in another tool: `netstat` is missing on many
-   hosts and prints nothing, which reads as "all ports free".
+   `prm-example`, or `prm-standalone` in the standalone-mode runbook). Do not
+   swap in another tool: `netstat` is missing on many hosts and prints
+   nothing, which reads as "all ports free".
 2. Never install software or pipe a downloaded script into a shell on the
    human's machine. `pocketd` is installed by the human, with the commands in
    [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
@@ -27,33 +28,52 @@ Each one was broken by an agent in a real first-time run.
 8. You have a shell on this machine: run the runbook's commands yourself.
    Ask the human only for decisions and for what only they can do (their
    key, their funds, their stake).
-9. After you edit any config, run both `validate` commands (runbook step 3)
-   and get exit 0 before you restart anything. It catches a key in the wrong
-   place and a key that does not exist.
+9. After you edit any config, run the runbook's `validate` commands (step 3:
+   2 in high-availability mode, 1 in standalone mode) and get exit 0 before
+   you restart anything. It catches a key in the wrong place and a key that
+   does not exist.
 10. To switch keys or networks, follow the runbook's section for it (step 9,
     "Switching to mainnet") line by line, not from memory: the keys file
-    also has to be mounted in `docker-compose.yaml`, only once the human has
-    written it (a mount of a missing file breaks the next start), and the
+    also has to be mounted in the compose file (`docker-compose.yaml`, or
+    `docker-compose.standalone.yaml` in standalone mode), only once the human
+    has written it (a mount of a missing file breaks the next start), and the
     mainnet values are listed there.
 
 ## What this is
 
 Pocket RelayMiner serves relays for Pocket Network suppliers and gets them paid.
-It is 2 processes from 1 binary, sharing 1 Redis: the **relayer** verifies each
-relay, forwards it to your backend and signs the response; the **miner** builds
-the claim and the proof from the served relays and submits them to the chain.
+The **relayer** verifies each relay, forwards it to your backend and signs the
+response; the **miner** builds the claim and the proof from the served relays
+and submits them to the chain. It runs in 1 of 2 modes:
+
+- **High-availability mode**: 2 processes from 1 binary (`relayer`, `miner`),
+  sharing 1 Redis; relayers and miners can have replicas. Released (v0.1.2),
+  and its Docker Compose runbook was verified on beta.
+- **Standalone mode**: 1 process (`standalone`) that runs both, its state in an
+  embedded store on local disk, no Redis, no replicas. Built from source until
+  a release ships it; not yet run on beta.
+
+[docs/deploy/README.md, "Choose a mode"](docs/deploy/README.md#choose-a-mode)
+compares them. **Choosing the mode is the human's decision**: when they have
+not said, start with high-availability mode (the verified one) and tell them
+standalone mode exists, in 1 line.
 
 ## Where to go
 
-- **Deploying**: [docs/deploy/README.md](docs/deploy/README.md) to choose a path,
-  then its runbook: [DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) or
-  [HOST.md](docs/deploy/HOST.md). When it does not start or does not serve:
+- **Deploying**: [docs/deploy/README.md](docs/deploy/README.md) to choose a mode
+  and a path, then its runbook. High-availability mode:
+  [DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) or
+  [HOST.md](docs/deploy/HOST.md). Standalone mode:
+  [DOCKER_COMPOSE_STANDALONE.md](docs/deploy/DOCKER_COMPOSE_STANDALONE.md) or
+  [HOST_STANDALONE.md](docs/deploy/HOST_STANDALONE.md); the steps have the
+  same numbers. When it does not start or does not serve:
   [TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md). Words such as
   supplier, stake, session or backend are explained at the top of
   [docs/deploy/README.md](docs/deploy/README.md#words-you-will-meet).
 - **The human has nothing yet** (no key, no POKT, no stake): the usual case,
   and not a blocker. In this order:
-  1. Start now: the Docker Compose runbook on beta with the public example
+  1. Start now: the Docker Compose runbook of the mode they chose (high
+     availability when they have not chosen) on beta with the public example
      key, steps 0 to 8, with the dashboards if they want graphs. It starts
      as shipped, with the example's `my-service`: nothing about their
      services, keys or service ids is needed to start.
@@ -107,14 +127,16 @@ the claim and the proof from the served relays and submits them to the chain.
   want to do, which document or tool to open.
 
 v0.1.0 ships no Kubernetes example or runbook. The Tilt setup in `tilt/` runs
-the relayer, the miner and Redis on a local kind cluster for development: it is
+the relayer, the miner and Redis (high-availability mode) on a local kind
+cluster for development: it is
 a starting point for your own manifests, not a production config. The
 invariants below hold on any platform.
 
 ## Invariants
 
 Some of these are checked at startup and stop a binary when broken; the rest
-are not checked, and breaking them is unsupported.
+are not checked, and breaking them is unsupported. Items 1 to 3 and 6 are
+high-availability mode's; standalone mode's are after the list.
 
 1. **Topology: 1 Redis shared by the relayers and miners.** v0.1.0 was tested
    on 1 relayer + 1 miner and on 2 relayers + 2 miners, the latter at lower
@@ -139,9 +161,17 @@ are not checked, and breaking them is unsupported.
    service factor manifest.** Start the miner first. A relayer that is up with
    `/ready` at 503 is waiting for the miner, not broken.
 7. **Validate before starting**: `pocket-relay-miner relayer validate --config <file>`
-   and `pocket-relay-miner miner validate --config <file>` must exit 0.
-   `validate` does not contact Redis or the chain, so exit 0 is necessary, not
-   sufficient.
+   and `pocket-relay-miner miner validate --config <file>` must exit 0
+   (`pocket-relay-miner standalone validate --config <file>` in standalone
+   mode). `validate` does not contact Redis or the chain, so exit 0 is
+   necessary, not sufficient.
+
+In **standalone mode**: 1 process per store and per set of supplier keys (a
+second one on the same `storage.path` refuses to start; on other keys files
+with the same keys, both would serve and claim the same suppliers); the store
+on local disk with room (new work stops below 1 GiB free); its config has no
+`redis` section; items 4, 5 and 7 hold as written, and the relayer side's
+`/ready` waits for the miner side inside the process.
 
 ## Rules for an agent running a deployment
 
@@ -164,6 +194,10 @@ are not checked, and breaking them is unsupported.
   that run), and [TROUBLESHOOTING.md, Memory and CPU](docs/deploy/TROUBLESHOOTING.md#memory-and-cpu).
   Then tell the human to watch memory as traffic grows: it follows request
   sizes and live sessions, and no example can size it for every mix.
+  Standalone mode's examples size the one process as the sum of the two
+  (compose 6 GiB and 2 CPUs, host unit `MemoryMax=12G`); that sum is not
+  measured for standalone mode, so the same watching applies, plus the free
+  disk of its store.
 - **Follow the runbook with the example's own files.** Edit the files in
   `examples/docker-compose/` (or install `examples/host/`) as the steps say;
   do not write a compose file or configs of your own, or the runbook's checks

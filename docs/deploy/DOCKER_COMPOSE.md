@@ -1,4 +1,9 @@
-# Deploy with Docker Compose
+# Deploy with Docker Compose: high-availability mode
+
+This runbook runs the **high-availability mode**. For the **standalone mode**
+(1 process, an embedded store, no Redis), follow
+[DOCKER_COMPOSE_STANDALONE.md](DOCKER_COMPOSE_STANDALONE.md) instead;
+[README.md, "Choose a mode"](README.md#choose-a-mode) compares the two.
 
 This runbook starts the compose example in
 [examples/docker-compose/](../../examples/docker-compose/): Redis 8.10.1,
