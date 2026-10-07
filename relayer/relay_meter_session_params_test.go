@@ -9,9 +9,11 @@ import (
 	"github.com/pokt-network/poktroll/pkg/client"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // fakeSessionClient implements client.SessionQueryClient by embedding the
@@ -38,7 +40,7 @@ func TestGetSessionParams_ReflectsChangedNumSuppliers(t *testing.T) {
 	sess := &fakeSessionClient{numSuppliers: 2}
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		&fakeAppClient{addr: "pokt1app"},
 		nil, // sharedClient
 		sess,

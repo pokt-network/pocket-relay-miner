@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -24,7 +25,17 @@ const (
 	sectionRelayer = "relayer"
 	sectionMiner   = "miner"
 	sectionRedis   = "redis"
+	sectionStorage = "storage"
 )
+
+// StorageConfig is the embedded store the process keeps its state in.
+type StorageConfig struct {
+	// Path is the directory of the store. Required.
+	Path string `yaml:"path"`
+	// SyncInterval bounds what an OS crash can lose (pebblestore). Zero means
+	// the store's default.
+	SyncInterval time.Duration `yaml:"sync_interval,omitempty"`
+}
 
 // commonSections are given whole to both sides.
 var commonSections = []string{"pocket_node", "keys", "logging", "metrics", "pprof"}
@@ -41,6 +52,9 @@ var commonRedisKeys = []string{"url", "namespace"}
 type Config struct {
 	Relayer *relayer.Config
 	Miner   *miner.Config
+
+	// Storage is the embedded store.
+	Storage StorageConfig
 
 	// Metrics and PProf configure the process's one observability server.
 	Metrics config.MetricsConfig
@@ -70,6 +84,7 @@ type probe struct {
 	Metrics    config.MetricsConfig    `yaml:"metrics"`
 	PProf      config.PprofConfig      `yaml:"pprof"`
 	Redis      commonRedis             `yaml:"redis"`
+	Storage    StorageConfig           `yaml:"storage"`
 	Relayer    relayer.Config          `yaml:"relayer"`
 	Miner      miner.Config            `yaml:"miner"`
 }
@@ -96,6 +111,7 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	top := doc.Content[0]
 
+	var storage StorageConfig
 	sides := map[string]*yaml.Node{}
 	common := map[string]*yaml.Node{}
 	for i := 0; i+1 < len(top.Content); i += 2 {
@@ -119,6 +135,10 @@ func ParseConfig(data []byte) (*Config, error) {
 			common[key.Value] = value
 		case slices.Contains(commonSections, key.Value):
 			common[key.Value] = value
+		case key.Value == sectionStorage:
+			if err := value.Decode(&storage); err != nil {
+				return nil, fmt.Errorf("line %d: storage: %w", key.Line, err)
+			}
 		default:
 			return nil, fmt.Errorf("line %d: %q is not a section of a standalone config: "+
 				"put a key only one side reads under that side's section (relayer or miner)",
@@ -129,6 +149,9 @@ func ParseConfig(data []byte) (*Config, error) {
 		if sides[name] == nil {
 			return nil, fmt.Errorf("the %s: section is required", name)
 		}
+	}
+	if storage.Path == "" {
+		return nil, fmt.Errorf("storage.path is required: the directory the embedded store lives in")
 	}
 
 	relayerDoc, err := sideDocument(sectionRelayer, sides[sectionRelayer], common)
@@ -157,6 +180,7 @@ func ParseConfig(data []byte) (*Config, error) {
 	return &Config{
 		Relayer:     relayerCfg,
 		Miner:       minerCfg,
+		Storage:     storage,
 		Metrics:     minerCfg.Metrics,
 		PProf:       minerCfg.PProf,
 		Logging:     minerCfg.Logging,

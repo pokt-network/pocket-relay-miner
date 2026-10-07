@@ -392,6 +392,8 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 	supplierWorker := miner.NewSupplierWorker(miner.SupplierWorkerConfig{
 		Logger:           logger,
 		RedisClient:      redisClient,
+		KV:               hooks.kv,
+		Backend:          hooks.minerBackend,
 		StoreHealth:      storeHealth,
 		KeyManager:       keyManager,
 		Config:           config,
@@ -441,6 +443,7 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 	leaderController := miner.NewLeaderController(miner.LeaderControllerConfig{
 		Logger:           logger,
 		RedisClient:      redisClient,
+		KV:               hooks.kv,
 		KeyManager:       keyManager,
 		Config:           config,
 		GlobalLeader:     globalLeader,

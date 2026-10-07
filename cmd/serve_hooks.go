@@ -9,7 +9,9 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // sideHooks is what serveRelayer and serveMiner take from the process that runs
@@ -28,6 +30,17 @@ type sideHooks struct {
 	// setReadiness, when not nil, installs the side's readiness check on the
 	// process's observability server.
 	setReadiness func(observability.ReadinessCheck)
+
+	// kv, when not nil, is the store the caches, the meter and the registries
+	// keep their state in; nil means Redis.
+	kv kv.Store
+
+	// openPublisher builds the relayer's mined-relay publisher.
+	openPublisher func(ctx context.Context, logger logging.Logger, d relayPublisherDeps) (relayPublisher, func(), error)
+
+	// minerBackend, when not nil, keeps the miner's relay queue, sessions and
+	// dedup marks; nil means Redis.
+	minerBackend miner.StoreBackend
 }
 
 // openOwnKeys opens a key manager the side owns: closed when the side is done.

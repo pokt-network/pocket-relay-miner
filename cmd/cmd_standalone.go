@@ -13,8 +13,13 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/pokt-network/pocket-relay-miner/standalone"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+	"github.com/pokt-network/pocket-relay-miner/storage/pebblestore"
+	"github.com/pokt-network/pocket-relay-miner/transport/pebblequeue"
+	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 const flagStandaloneConfig = "config"
@@ -183,6 +188,34 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 		return keyManager, func() {}, nil
 	}
 
+	// The embedded store, and what both sides keep in it: the caches, the
+	// meter and the registries (kv), the relay queue (broker), and the miner's
+	// sessions and dedup marks (backend). Closed after both sides stopped.
+	db, err := pebblestore.Open(logger, pebblestore.Config{
+		Path:         cfg.Storage.Path,
+		SyncInterval: cfg.Storage.SyncInterval,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			logger.Error().Err(closeErr).Msg("failed to close the embedded store")
+		}
+	}()
+	keyBuilder := redistransport.NewKeyBuilder(cfg.Miner.Redis.Namespace)
+	store := kv.NewPebble(logger, db, keyBuilder)
+	defer func() { _ = store.Close() }()
+	broker := pebblequeue.NewBroker(logger, db, keyBuilder.StreamPrefix())
+	minerBackend := miner.NewPebbleStoreBackend(logger, db, broker, miner.SupplierManagerConfig{
+		SessionTTL:       cfg.Miner.GetSessionTTL(),
+		BlockTimeSeconds: cfg.Miner.BlockTimeSeconds,
+		BatchSize:        cfg.Miner.BatchSize,
+	})
+	openQueue := func(context.Context, logging.Logger, relayPublisherDeps) (relayPublisher, func(), error) {
+		return broker.Publisher(), func() {}, nil
+	}
+
 	minerSide := side{name: "miner", serve: func(ctx context.Context, hooks sideHooks) error {
 		hooks.setReadiness = setReadiness
 		return serveMiner(ctx, logger, cfg.Miner, hooks)
@@ -192,5 +225,10 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 	}}
 
 	logger.Info().Msg("starting standalone: miner first, then relayer")
-	return runSides(ctx, logger, minerSide, relayerSide, sideHooks{openKeys: sharedKeys}, sigCh)
+	return runSides(ctx, logger, minerSide, relayerSide, sideHooks{
+		openKeys:      sharedKeys,
+		kv:            store,
+		openPublisher: openQueue,
+		minerBackend:  minerBackend,
+	}, sigCh)
 }

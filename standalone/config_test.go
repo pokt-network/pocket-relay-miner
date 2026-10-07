@@ -58,8 +58,10 @@ func indent(s string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+const storageYAML = "storage:\n  path: \"/data/standalone\"\n"
+
 func standaloneYAML() string {
-	return commonYAML +
+	return commonYAML + storageYAML +
 		"redis:\n  url: \"redis://redis:6379\"\n" +
 		"relayer:\n" + indent(relayerOnlyYAML+"redis:\n  batch_publish_interval_ms: 750\n") +
 		"miner:\n" + indent(minerOnlyYAML+"redis:\n  claim_idle_timeout_ms: 90000\n")
@@ -89,6 +91,7 @@ func TestParseConfig_GivesEachSideWhatItsOwnFileGives(t *testing.T) {
 	require.Equal(t, "0.0.0.0:9090", got.Metrics.Addr)
 	require.True(t, got.PProf.Enabled)
 	require.Equal(t, "debug", got.Logging.Level)
+	require.Equal(t, "/data/standalone", got.Storage.Path)
 	require.Empty(t, got.Warnings(), "the file is clean: chain_id at the top level is a miner key, not an unknown one")
 }
 
@@ -117,8 +120,13 @@ func TestParseConfig_RefusesASettingWrittenTwice(t *testing.T) {
 			want: "redis.pool_size goes under relayer.redis or miner.redis",
 		},
 		{
+			name: "missing storage path",
+			yaml: strings.Replace(standaloneYAML(), storageYAML, "", 1),
+			want: "storage.path is required",
+		},
+		{
 			name: "missing side",
-			yaml: commonYAML + "redis:\n  url: \"redis://redis:6379\"\nrelayer:\n" + indent(relayerOnlyYAML),
+			yaml: commonYAML + storageYAML + "redis:\n  url: \"redis://redis:6379\"\nrelayer:\n" + indent(relayerOnlyYAML),
 			want: "the miner: section is required",
 		},
 	} {
@@ -163,7 +171,7 @@ keys:
   keys_file: "/keys/supplier-keys.yaml"
 redis:
   url: "redis://redis:6379"
-relayer:
+` + storageYAML + `relayer:
 ` + indent(relayerOnlyYAML) + "miner:\n" + indent(minerOnlyYAML)
 
 	got, err := ParseConfig([]byte(doc))

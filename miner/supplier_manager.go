@@ -22,6 +22,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/relayer"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/pocket-relay-miner/tx"
@@ -133,7 +134,7 @@ type SupplierState struct {
 	Consumer transport.MinedRelayConsumer
 
 	// Session management
-	SessionStore       *RedisSessionStore
+	SessionStore       SessionStore
 	SessionCoordinator *SessionCoordinator
 
 	// SMST management (for building and managing session trees)
@@ -247,6 +248,14 @@ func (s *SupplierState) StoreStatus(status SupplierStatus) {
 type SupplierManagerConfig struct {
 	// Redis connection
 	RedisClient *redistransport.Client
+
+	// Backend keeps each supplier's relay queue, sessions and dedup marks. Nil
+	// means Redis, through RedisClient.
+	Backend StoreBackend
+
+	// KV carries the meter cleanup signal to the relayers. Nil means Redis,
+	// through RedisClient.
+	KV kv.Store
 
 	// StoreHealth pauses stream consumption and tracking writes while Redis
 	// cannot take writes. nil never pauses.
@@ -463,6 +472,8 @@ type SupplierManager struct {
 	// Deduplicator (shared across suppliers). Prevents counter drift when Redis
 	// Streams redeliver a relay (consumer reclaim, transient ack failure).
 	deduplicator Deduplicator
+	// backend builds every supplier's stores (StoreBackend).
+	backend StoreBackend
 
 	// inclusionReconciler is the process-wide, block-driven verifier +
 	// rebroadcaster for BOTH claims and proofs. It reads the rebroadcastStore
@@ -540,26 +551,15 @@ func NewSupplierManager(
 		mgr.rebuildAdmission = NewRebuildAdmission(componentLogger)
 	}
 
-	// Construct a shared deduplicator if we have a Redis client. Falls back to
-	// nil if Redis is absent (e.g. tests) — handleRelay treats nil as fail-open.
-	if config.RedisClient != nil {
-		// KeyPrefix empty → defaults to "ha:miner:dedup" (matches KeyBuilder.MinerDedupKey).
-		//
-		// BlockTimeSeconds forwarded from config, not left zero: an empty
-		// DeduplicatorConfig here used to mean the operator's configured
-		// block_time_seconds was silently dropped, and NewRedisDeduplicator's
-		// own fallback (30) took over regardless of what was set. On mainnet
-		// (verified live 2026-08-21, ~64s/block) that produced a dedup TTL
-		// (TTLBlocks=10 x 30s = 5min) roughly HALF the wall-clock window it
-		// was meant to cover (~10.7min) -- a relay duplicate arriving after 5
-		// minutes but within the intended 10-block window would no longer be
-		// caught, and would be counted a second time.
-		mgr.deduplicator = NewRedisDeduplicator(
-			componentLogger,
-			config.RedisClient,
-			DeduplicatorConfig{BlockTimeSeconds: config.BlockTimeSeconds},
-		)
+	// Every supplier's stores, and the shared deduplicator, come from the
+	// backend: Redis unless the caller passes another. With no Redis client
+	// (tests) the Redis backend has no deduplicator, which handleRelay treats
+	// as fail-open.
+	mgr.backend = config.Backend
+	if mgr.backend == nil {
+		mgr.backend = newRedisStoreBackend(componentLogger, config)
 	}
+	mgr.deduplicator = mgr.backend.deduplicator()
 
 	return mgr
 }
@@ -931,17 +931,10 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 // claimer: losing revenue to a false-drain is worse than carrying a dead
 // supplier for one extra reconcile interval.
 func (m *SupplierManager) hasPendingSessions(ctx context.Context, supplierAddr string) bool {
-	if m.config.RedisClient == nil {
+	if m.config.RedisClient == nil && m.config.Backend == nil {
 		return false
 	}
-	store := NewRedisSessionStore(
-		m.logger,
-		m.config.RedisClient,
-		SessionStoreConfig{
-			SupplierAddress: supplierAddr,
-			SessionTTL:      m.config.SessionTTL,
-		},
-	)
+	store := m.storeBackend().sessionStore(supplierAddr)
 	defer func() { _ = store.Close() }()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -1341,14 +1334,7 @@ func extractStakedEndpoints(configs []*sharedtypes.SupplierServiceConfig) []cach
 // This logs the inherited sessions and validates SMST state.
 func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier string, warmupData *SupplierWarmupData) error {
 	// First, load existing sessions from Redis to validate handoff
-	sessionStore := NewRedisSessionStore(
-		m.logger,
-		m.config.RedisClient,
-		SessionStoreConfig{
-			SupplierAddress: supplier,
-			SessionTTL:      m.config.SessionTTL,
-		},
-	)
+	sessionStore := m.storeBackend().sessionStore(supplier)
 
 	// Get all sessions for this supplier
 	sessions, err := sessionStore.GetBySupplier(ctx)
@@ -1564,15 +1550,13 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	// Create supplier-specific context
 	supplierCtx, cancelFn := context.WithCancel(ctx)
 
-	// Create session store for this supplier
-	sessionStore := NewRedisSessionStore(
-		m.logger,
-		m.config.RedisClient,
-		SessionStoreConfig{
-			SupplierAddress: operatorAddr,
-			SessionTTL:      m.config.SessionTTL,
-		},
-	)
+	// The supplier's session store, relay queue consumer and batch committer.
+	stores, err := m.storeBackend().forSupplier(operatorAddr, m.deduplicator)
+	if err != nil {
+		cancelFn()
+		return err
+	}
+	sessionStore, consumer := stores.sessions, stores.consumer
 
 	// Create session coordinator (replaces WAL-based SMSTSnapshotManager)
 	// No WAL needed - SMST persists to Redis via Commit(), and relay streams act as WAL
@@ -1584,28 +1568,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			RecoveryTimeout: 5 * time.Minute,
 		},
 	)
-
-	// Create consumer for this supplier (single stream per supplier, fast 100ms polling)
-	consumer, err := redistransport.NewStreamsConsumer(
-		m.logger,
-		m.config.RedisClient,
-		transport.ConsumerConfig{
-			StreamPrefix:            m.config.RedisClient.KB().StreamPrefix(), // Namespace-aware prefix (e.g., "ha:relays")
-			SupplierOperatorAddress: operatorAddr,
-			ConsumerGroup:           m.config.RedisClient.KB().ConsumerGroup(), // Namespace-aware group (e.g., "ha-miners")
-			ConsumerName:            m.config.ConsumerName,
-			BatchSize:               int64(m.config.BatchSize),                // Use config value (default: 1000)
-			ClaimIdleTimeout:        m.config.ClaimIdleTimeout.Milliseconds(), // From config (default: 60000ms)
-			// Note: blocks for one block interval per read - hardcoded in consumer
-		},
-	)
-	if err == nil {
-		consumer.SetStoreHealth(m.config.StoreHealth)
-	}
-	if err != nil {
-		cancelFn()
-		return fmt.Errorf("failed to create consumer for %s: %w", operatorAddr, err)
-	}
 
 	// Create SMST manager for building session trees (Redis-backed for HA)
 	smstManager := NewRedisSMSTManager(
@@ -1621,8 +1583,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 	// Built before the lifecycle manager, whose claim transition flushes it.
 	relayBatch := newRelayBatch(
-		m.logger, operatorAddr, m.deduplicator, smstManager, sessionCoordinator, consumer,
-		newRedisRelayCommitter(m.config.RedisClient, sessionStore, m.deduplicator, consumer),
+		m.logger, operatorAddr, m.deduplicator, smstManager, sessionCoordinator, consumer, stores.commit,
 	)
 
 	// SMST trees are lazy-loaded from Redis on-demand:
@@ -1736,14 +1697,16 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Wire meter cleanup publisher for notifying relayers when sessions leave active state.
 		// This publishes cleanup signals to ha:meter:cleanup so relayers can decrement their
 		// active sessions metric and clear session meter data.
-		meterCleanupChannel := m.config.RedisClient.KB().MeterCleanupChannel()
-		redisClient := m.config.RedisClient
+		store := m.config.KV
+		if store == nil {
+			store = kv.NewRedis(m.logger, m.config.RedisClient)
+		}
 		meterCleanupPublisher := NewRedisMeterCleanupPublisher(
 			m.logger,
 			func(ctx context.Context, channel string, message interface{}) error {
-				return redisClient.Publish(ctx, channel, message).Err()
+				return store.Publish(ctx, channel, []byte(fmt.Sprint(message)))
 			},
-			meterCleanupChannel,
+			store.KB().MeterCleanupChannel(),
 		)
 		lifecycleManager.SetMeterCleanupPublisher(meterCleanupPublisher)
 
@@ -1772,7 +1735,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		cancelFn:           cancelFn,
 	}
 	state.StoreStatus(SupplierStatusActive)
-	m.wireRebuildAdmission(operatorAddr, consumer, lifecycleManager)
+	m.wireRebuildAdmission(operatorAddr, stores.setPause, lifecycleManager)
 
 	if lifecycleManager != nil {
 		// Conditional flush delay -- wired BEFORE Start(), not alongside
@@ -1876,15 +1839,24 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	return nil
 }
 
+// storeBackend is the manager's backend; a manager built without
+// NewSupplierManager (tests) gets the Redis one over its config.
+func (m *SupplierManager) storeBackend() StoreBackend {
+	if m.backend != nil {
+		return m.backend
+	}
+	return newRedisStoreBackend(m.logger, m.config)
+}
+
 // wireRebuildAdmission holds the supplier's consumer while a proof waits for
 // memory, and lets its claim's flush delay release that hold. Called before
 // the consumer and the lifecycle manager start.
-func (m *SupplierManager) wireRebuildAdmission(operatorAddr string, consumer *redistransport.StreamsConsumer, lifecycleManager *SessionLifecycleManager) {
+func (m *SupplierManager) wireRebuildAdmission(operatorAddr string, setPause func(redistransport.IngestionPause), lifecycleManager *SessionLifecycleManager) {
 	if m.rebuildAdmission == nil {
 		return
 	}
 	admission := m.rebuildAdmission
-	consumer.SetIngestionPause(admission.IngestionPause(operatorAddr))
+	setPause(admission.IngestionPause(operatorAddr))
 	if lifecycleManager != nil {
 		lifecycleManager.SetClaimFlushWaiting(func() func() { return admission.claimFlushWaiting(operatorAddr) })
 	}

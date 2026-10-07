@@ -1,0 +1,550 @@
+package miner
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/cockroachdb/pebble"
+
+	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/pebblestore"
+	"github.com/pokt-network/pocket-relay-miner/transport"
+	"github.com/pokt-network/pocket-relay-miner/transport/pebblequeue"
+)
+
+// Key layout of the miner's state in the embedded store. A supplier address
+// and a session ID never contain a NUL byte, so NUL separates the parts.
+const (
+	pebbleSessionPrefix  = "msess\x00"   // msess\x00<supplier>\x00<session> -> JSON snapshot
+	pebbleDedupPrefix    = "mdedup\x00"  // mdedup\x00<session>\x00<hash> -> ""
+	pebbleDedupTTLPrefix = "mdedupx\x00" // mdedupx\x00<session> -> expiry, unix ms BE8
+)
+
+// PebbleStoreBackend keeps every supplier's relay queue, sessions and dedup
+// marks in one embedded store: the standalone subcommand's backend.
+//
+// One mutex serializes every write that reads before it writes -- a session's
+// counters, a dedup mark, a batch commit -- which is what Redis's single
+// thread and Lua scripts gave the same operations: each is atomic against the
+// others.
+type PebbleStoreBackend struct {
+	logger  logging.Logger
+	store   *pebblestore.Store
+	broker  *pebblequeue.Broker
+	config  SupplierManagerConfig
+	dedupCf DeduplicatorConfig
+
+	mu    sync.Mutex
+	dedup *pebbleDeduplicator
+}
+
+// NewPebbleStoreBackend returns the backend over store, with the relay queues
+// of broker. config supplies the session TTL, the block time and the consumer
+// sizing, as it does to the Redis backend.
+func NewPebbleStoreBackend(logger logging.Logger, store *pebblestore.Store, broker *pebblequeue.Broker, config SupplierManagerConfig) *PebbleStoreBackend {
+	b := &PebbleStoreBackend{
+		logger:  logger,
+		store:   store,
+		broker:  broker,
+		config:  config,
+		dedupCf: DeduplicatorConfig{BlockTimeSeconds: config.BlockTimeSeconds}.withDefaults(),
+	}
+	b.dedup = &pebbleDeduplicator{b: b}
+	return b
+}
+
+func (b *PebbleStoreBackend) deduplicator() Deduplicator { return b.dedup }
+
+func (b *PebbleStoreBackend) sessionStore(supplier string) SessionStore {
+	return &pebbleSessionStore{b: b, supplier: supplier, ttl: sessionTTL(b.config.SessionTTL)}
+}
+
+func (b *PebbleStoreBackend) forSupplier(supplier string, dedup Deduplicator) (supplierStores, error) {
+	consumer, err := b.broker.Consumer(transport.ConsumerConfig{
+		SupplierOperatorAddress: supplier,
+		BatchSize:               int64(b.config.BatchSize),
+	})
+	if err != nil {
+		return supplierStores{}, fmt.Errorf("failed to create consumer for %s: %w", supplier, err)
+	}
+	sessions := b.sessionStore(supplier).(*pebbleSessionStore)
+	var commit relayCommitter
+	// The committer marks the backend's own dedup set; a different
+	// deduplicator (a test's) would not see those marks, so there is no batch.
+	if dedup == Deduplicator(b.dedup) {
+		commit = &pebbleRelayCommitter{b: b, sessions: sessions, consumer: consumer}
+	}
+	return supplierStores{
+		sessions: sessions,
+		consumer: consumer,
+		commit:   commit,
+		setPause: consumer.SetIngestionPause,
+	}, nil
+}
+
+// sessionTTL is the session TTL the stores apply: the configured one, or the
+// Redis session store's default.
+func sessionTTL(configured time.Duration) time.Duration {
+	if configured == 0 {
+		return 2 * time.Hour
+	}
+	return configured
+}
+
+func (b *PebbleStoreBackend) get(key []byte) ([]byte, bool, error) {
+	value, closer, err := b.store.DB().Get(key)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	out := append([]byte(nil), value...)
+	_ = closer.Close()
+	return out, true, nil
+}
+
+// --- sessions ---------------------------------------------------------------
+
+type pebbleSessionStore struct {
+	b        *PebbleStoreBackend
+	supplier string
+	ttl      time.Duration
+	closed   bool
+}
+
+func (s *pebbleSessionStore) prefix() []byte {
+	return []byte(pebbleSessionPrefix + s.supplier + "\x00")
+}
+
+func (s *pebbleSessionStore) key(sessionID string) []byte {
+	return append(s.prefix(), sessionID...)
+}
+
+// expired reports a session nothing has written to for its TTL: Redis would
+// have expired its key.
+func (s *pebbleSessionStore) expired(snap *SessionSnapshot, now time.Time) bool {
+	return !snap.LastUpdatedAt.IsZero() && snap.LastUpdatedAt.Add(s.ttl).Before(now)
+}
+
+// getLocked reads a session; nil when it is absent or expired.
+func (s *pebbleSessionStore) getLocked(sessionID string) (*SessionSnapshot, error) {
+	value, ok, err := s.b.get(s.key(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read session %s: %w", sessionID, err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	snap := &SessionSnapshot{}
+	if err := json.Unmarshal(value, snap); err != nil {
+		return nil, fmt.Errorf("failed to decode session %s: %w", sessionID, err)
+	}
+	if s.expired(snap, time.Now()) {
+		return nil, nil
+	}
+	return snap, nil
+}
+
+func (s *pebbleSessionStore) putLocked(batch *pebble.Batch, snap *SessionSnapshot) error {
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return fmt.Errorf("failed to encode session %s: %w", snap.SessionID, err)
+	}
+	return batch.Set(s.key(snap.SessionID), data, nil)
+}
+
+func (s *pebbleSessionStore) writeLocked(snap *SessionSnapshot) error {
+	batch := s.b.store.DB().NewBatch()
+	if err := s.putLocked(batch, snap); err != nil {
+		_ = batch.Close()
+		return err
+	}
+	return s.b.store.Commit(batch)
+}
+
+func (s *pebbleSessionStore) Save(_ context.Context, snapshot *SessionSnapshot) error {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("session store is closed")
+	}
+	snapshot.LastUpdatedAt = time.Now()
+	if snapshot.CreatedAt.IsZero() {
+		snapshot.CreatedAt = snapshot.LastUpdatedAt
+	}
+	return s.writeLocked(snapshot)
+}
+
+func (s *pebbleSessionStore) CreateIfAbsent(_ context.Context, snapshot *SessionSnapshot) (bool, error) {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	if s.closed {
+		return false, fmt.Errorf("session store is closed")
+	}
+	existing, err := s.getLocked(snapshot.SessionID)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil {
+		return false, nil
+	}
+	snapshot.LastUpdatedAt = time.Now()
+	if snapshot.CreatedAt.IsZero() {
+		snapshot.CreatedAt = snapshot.LastUpdatedAt
+	}
+	if err := s.writeLocked(snapshot); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *pebbleSessionStore) Get(_ context.Context, sessionID string) (*SessionSnapshot, error) {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	return s.getLocked(sessionID)
+}
+
+func (s *pebbleSessionStore) GetBySupplier(context.Context) ([]*SessionSnapshot, error) {
+	return s.scan("")
+}
+
+func (s *pebbleSessionStore) GetByState(_ context.Context, state SessionState) ([]*SessionSnapshot, error) {
+	return s.scan(state)
+}
+
+// scan returns the supplier's sessions, in state when it is not empty. An
+// expired session is deleted on the way, with its dedup marks: the sweep Redis
+// TTLs did.
+func (s *pebbleSessionStore) scan(state SessionState) ([]*SessionSnapshot, error) {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	prefix := s.prefix()
+	iter, err := s.b.store.DB().NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: keyUpperBound(prefix)})
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan sessions: %w", err)
+	}
+	now := time.Now()
+	var out []*SessionSnapshot
+	var expired []string
+	for valid := iter.First(); valid; valid = iter.Next() {
+		snap := &SessionSnapshot{}
+		if err := json.Unmarshal(iter.Value(), snap); err != nil {
+			continue
+		}
+		if s.expired(snap, now) {
+			expired = append(expired, snap.SessionID)
+			continue
+		}
+		if state == "" || snap.State == state {
+			out = append(out, snap)
+		}
+	}
+	if err := errors.Join(iter.Error(), iter.Close()); err != nil {
+		return nil, fmt.Errorf("failed to scan sessions: %w", err)
+	}
+	if len(expired) > 0 {
+		batch := s.b.store.DB().NewBatch()
+		for _, id := range expired {
+			_ = batch.Delete(s.key(id), nil)
+			s.b.dedup.deleteSessionLocked(batch, id)
+		}
+		if err := s.b.store.Commit(batch); err != nil {
+			s.b.logger.Warn().Err(err).Int("sessions", len(expired)).Msg("failed to delete expired sessions; retried on the next scan")
+		}
+	}
+	return out, nil
+}
+
+func (s *pebbleSessionStore) Delete(_ context.Context, sessionID string) error {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	batch := s.b.store.DB().NewBatch()
+	_ = batch.Delete(s.key(sessionID), nil)
+	if err := s.b.store.Commit(batch); err != nil {
+		return fmt.Errorf("failed to delete session snapshot: %w", err)
+	}
+	return nil
+}
+
+func (s *pebbleSessionStore) UpdateState(_ context.Context, sessionID string, newState SessionState) error {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	snap, err := s.getLocked(sessionID)
+	if err != nil {
+		return err
+	}
+	if snap == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	if err := checkStateWrite(snap, newState); err != nil {
+		return err
+	}
+	if snap.State == newState {
+		return nil
+	}
+	snap.State = newState
+	snap.LastUpdatedAt = time.Now()
+	return s.writeLocked(snap)
+}
+
+func (s *pebbleSessionStore) ReactivateClaimed(_ context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (bool, error) {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	snap, err := s.getLocked(sessionID)
+	if err != nil {
+		return false, err
+	}
+	if snap == nil {
+		return false, fmt.Errorf("session not found: %s", sessionID)
+	}
+	if !canReactivateClaimed(snap.State) {
+		return false, nil
+	}
+	snap.State = SessionStateClaimed
+	snap.ClaimedRootHash = claimedRootHash
+	if claimTxHash != "" {
+		snap.ClaimTxHash = claimTxHash
+	}
+	snap.LastUpdatedAt = time.Now()
+	if err := s.writeLocked(snap); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *pebbleSessionStore) IncrementRelayCount(_ context.Context, sessionID string, computeUnits uint64) error {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	snap, err := s.getLocked(sessionID)
+	if err != nil {
+		return err
+	}
+	if snap == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	if snap.State.IsTerminal() {
+		return ErrSessionTerminal
+	}
+	snap.RelayCount++
+	snap.TotalComputeUnits += computeUnits
+	snap.LastUpdatedAt = time.Now()
+	return s.writeLocked(snap)
+}
+
+func (s *pebbleSessionStore) Close() error {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	s.closed = true
+	return nil
+}
+
+var _ SessionStore = (*pebbleSessionStore)(nil)
+
+// --- dedup ------------------------------------------------------------------
+
+// pebbleDeduplicator keeps one mark per (session, relay hash). Like the Redis
+// set, a session's marks live for the dedup TTL after its last mark.
+type pebbleDeduplicator struct{ b *PebbleStoreBackend }
+
+func dedupSessionPrefix(sessionID string) []byte {
+	return []byte(pebbleDedupPrefix + sessionID + "\x00")
+}
+
+func dedupKey(sessionID string, relayHash []byte) []byte {
+	return append(dedupSessionPrefix(sessionID), relayHash...)
+}
+
+func dedupTTLKey(sessionID string) []byte { return []byte(pebbleDedupTTLPrefix + sessionID) }
+
+// liveLocked reports whether the session's marks are still within their TTL.
+func (d *pebbleDeduplicator) liveLocked(sessionID string, now time.Time) (bool, error) {
+	value, ok, err := d.b.get(dedupTTLKey(sessionID))
+	if err != nil || !ok || len(value) != 8 {
+		return false, err
+	}
+	return int64(binary.BigEndian.Uint64(value)) > now.UnixMilli(), nil
+}
+
+// markedLocked reports whether the relay is marked for the session.
+func (d *pebbleDeduplicator) markedLocked(sessionID string, relayHash []byte, now time.Time) (bool, error) {
+	live, err := d.liveLocked(sessionID, now)
+	if err != nil || !live {
+		return false, err
+	}
+	_, ok, err := d.b.get(dedupKey(sessionID, relayHash))
+	return ok, err
+}
+
+// markLocked adds the mark and slides the session's TTL, in batch.
+func (d *pebbleDeduplicator) markLocked(batch *pebble.Batch, sessionID string, relayHash []byte, now time.Time) {
+	_ = batch.Set(dedupKey(sessionID, relayHash), nil, nil)
+	expiry := make([]byte, 8)
+	binary.BigEndian.PutUint64(expiry, uint64(now.Add(d.b.dedupCf.ttl()).UnixMilli()))
+	_ = batch.Set(dedupTTLKey(sessionID), expiry, nil)
+}
+
+// deleteSessionLocked removes the session's marks, in batch.
+func (d *pebbleDeduplicator) deleteSessionLocked(batch *pebble.Batch, sessionID string) {
+	prefix := dedupSessionPrefix(sessionID)
+	_ = batch.DeleteRange(prefix, keyUpperBound(prefix), nil)
+	_ = batch.Delete(dedupTTLKey(sessionID), nil)
+}
+
+func (d *pebbleDeduplicator) IsDuplicate(_ context.Context, relayHash []byte, sessionID string) (bool, error) {
+	d.b.mu.Lock()
+	defer d.b.mu.Unlock()
+	marked, err := d.markedLocked(sessionID, relayHash, time.Now())
+	if err != nil {
+		dedupErrors.WithLabelValues("store_check").Inc()
+		return false, fmt.Errorf("failed to check the store: %w", err)
+	}
+	if marked {
+		dedupCacheHits.Inc()
+		return true, nil
+	}
+	dedupMisses.Inc()
+	return false, nil
+}
+
+func (d *pebbleDeduplicator) MarkProcessed(_ context.Context, relayHash []byte, sessionID string) (bool, error) {
+	d.b.mu.Lock()
+	defer d.b.mu.Unlock()
+	now := time.Now()
+	marked, err := d.markedLocked(sessionID, relayHash, now)
+	if err != nil {
+		dedupErrors.WithLabelValues("store_mark").Inc()
+		return false, fmt.Errorf("failed to mark processed: %w", err)
+	}
+	batch := d.b.store.DB().NewBatch()
+	d.markLocked(batch, sessionID, relayHash, now)
+	if err := d.b.store.Commit(batch); err != nil {
+		dedupErrors.WithLabelValues("store_mark").Inc()
+		return false, fmt.Errorf("failed to mark processed: %w", err)
+	}
+	dedupMarked.Inc()
+	return !marked, nil
+}
+
+func (d *pebbleDeduplicator) CleanupSession(_ context.Context, sessionID string) error {
+	d.b.mu.Lock()
+	defer d.b.mu.Unlock()
+	batch := d.b.store.DB().NewBatch()
+	d.deleteSessionLocked(batch, sessionID)
+	if err := d.b.store.Commit(batch); err != nil {
+		return fmt.Errorf("failed to cleanup session: %w", err)
+	}
+	return nil
+}
+
+func (d *pebbleDeduplicator) Start(context.Context) error { return nil }
+func (d *pebbleDeduplicator) Close() error                { return nil }
+
+var _ Deduplicator = (*pebbleDeduplicator)(nil)
+
+// --- batch commit -----------------------------------------------------------
+
+// pebbleRelayCommitter is relayBatchScript as one Pebble batch, under the
+// backend's mutex: the marks, the counters for the new marks and the deletes
+// of the acknowledged entries are written together or not at all.
+type pebbleRelayCommitter struct {
+	b        *PebbleStoreBackend
+	sessions *pebbleSessionStore
+	consumer *pebblequeue.Consumer
+}
+
+func (c *pebbleRelayCommitter) CommitSession(_ context.Context, sessionID string, relays []batchedRelay) (relayBatchResult, error) {
+	c.b.mu.Lock()
+	defer c.b.mu.Unlock()
+	now := time.Now()
+
+	// Everything that can refuse is read before the first write.
+	snap, err := c.sessions.getLocked(sessionID)
+	if err != nil {
+		return relayBatchResult{}, fmt.Errorf("%w: %w", errCommitRefused, err)
+	}
+	var res relayBatchResult
+	switch {
+	case snap == nil:
+		res.status = 1
+	case snap.State.IsTerminal():
+		res.status = 2
+	}
+
+	batch := c.b.store.DB().NewBatch()
+	seen := make(map[string]struct{}, len(relays))
+	ids := make([]string, 0, len(relays))
+	for _, r := range relays {
+		ids = append(ids, r.id)
+		_, inBatch := seen[string(r.hash)]
+		marked := inBatch
+		if !marked {
+			if marked, err = c.b.dedup.markedLocked(sessionID, r.hash, now); err != nil {
+				_ = batch.Close()
+				return relayBatchResult{}, err
+			}
+		}
+		if marked {
+			// A fresh duplicate: marked before, and its entry still here for
+			// this commit to acknowledge.
+			exists, err := c.consumer.Exists(r.id)
+			if err != nil {
+				_ = batch.Close()
+				return relayBatchResult{}, err
+			}
+			if exists {
+				res.freshDups++
+			}
+			continue
+		}
+		seen[string(r.hash)] = struct{}{}
+		c.b.dedup.markLocked(batch, sessionID, r.hash, now)
+		res.newRelays++
+		res.newComputeUnits += int64(r.computeUnits)
+	}
+
+	if res.status == 0 && res.newRelays > 0 {
+		snap.RelayCount += res.newRelays
+		snap.TotalComputeUnits += uint64(res.newComputeUnits)
+		snap.LastUpdatedAt = now
+		if err := c.sessions.putLocked(batch, snap); err != nil {
+			_ = batch.Close()
+			return relayBatchResult{}, err
+		}
+	}
+	c.consumer.AckInBatch(batch, ids)
+	if err := c.b.store.Commit(batch); err != nil {
+		return relayBatchResult{}, err
+	}
+	c.consumer.Acked(ids)
+	return res, nil
+}
+
+func (c *pebbleRelayCommitter) AckRejected(_ context.Context, ids []string) error {
+	batch := c.b.store.DB().NewBatch()
+	c.consumer.AckInBatch(batch, ids)
+	if err := c.b.store.Commit(batch); err != nil {
+		return err
+	}
+	c.consumer.Acked(ids)
+	return nil
+}
+
+var _ relayCommitter = (*pebbleRelayCommitter)(nil)
+
+// keyUpperBound is the first key after every key that starts with prefix.
+func keyUpperBound(prefix []byte) []byte {
+	end := append([]byte(nil), prefix...)
+	for i := len(end) - 1; i >= 0; i-- {
+		end[i]++
+		if end[i] != 0 {
+			return end[:i+1]
+		}
+	}
+	return nil
+}

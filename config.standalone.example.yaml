@@ -33,6 +33,14 @@ pprof:
   enabled: false
   addr: "127.0.0.1:6060"
 
+# The embedded store: the relay queue, the sessions and their dedup marks, the
+# relay meter's counters and the caches live here. Writes are synced to disk
+# every sync_interval, which bounds what a crash of the process or of the OS,
+# or a power loss, can lose.
+storage:
+  path: "/data/pocket-relay-miner"
+  sync_interval: "1s"
+
 # Only the server and namespace both sides share. Every other redis key
 # (pool sizes, batching, consumer settings) goes under relayer.redis or
 # miner.redis; written here it is an error.

@@ -18,6 +18,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -32,8 +33,17 @@ type SupplierWorkerConfig struct {
 	// Core dependencies
 	Logger      logging.Logger
 	RedisClient *redistransport.Client
-	KeyManager  keys.KeyManager
-	Config      *Config
+
+	// KV keeps the caches, the registries and the known sets. Nil means
+	// Redis, through RedisClient.
+	KV kv.Store
+
+	// Backend keeps each supplier's relay queue, sessions and dedup marks. Nil
+	// means Redis, through RedisClient.
+	Backend StoreBackend
+
+	KeyManager keys.KeyManager
+	Config     *Config
 
 	// StoreHealth says whether Redis can take writes; see SupplierManagerConfig.
 	StoreHealth *redistransport.StoreHealth
@@ -77,6 +87,9 @@ type SupplierWorker struct {
 
 // NewSupplierWorker creates a new supplier worker.
 func NewSupplierWorker(config SupplierWorkerConfig) *SupplierWorker {
+	if config.KV == nil && config.RedisClient != nil {
+		config.KV = kv.NewRedis(config.Logger, config.RedisClient)
+	}
 	return &SupplierWorker{
 		logger:     logging.ForComponent(config.Logger, "supplier_worker"),
 		config:     config,
@@ -90,13 +103,13 @@ func NewSupplierWorker(config SupplierWorkerConfig) *SupplierWorker {
 // see its apps, so every replica feeds the sets. A local dedup map keeps this
 // off the hot path after each entity's first sighting. Best-effort.
 func (w *SupplierWorker) recordDiscovered(ctx context.Context, appAddr, serviceID string) {
-	rc := w.config.RedisClient
+	rc := w.config.KV
 	if rc == nil || w.discovered == nil {
 		return
 	}
 	if appAddr != "" {
 		if _, seen := w.discovered.LoadOrStore("app:"+appAddr, struct{}{}); !seen {
-			if err := rc.SAdd(ctx, rc.KB().CacheKnownKey("applications"), appAddr).Err(); err != nil {
+			if err := rc.SAdd(ctx, rc.KB().CacheKnownKey("applications"), appAddr); err != nil {
 				w.discovered.Delete("app:" + appAddr) // allow retry on next sighting
 				w.logger.Debug().Err(err).Str("app", appAddr).Msg("failed to record discovered application")
 			}
@@ -104,7 +117,7 @@ func (w *SupplierWorker) recordDiscovered(ctx context.Context, appAddr, serviceI
 	}
 	if serviceID != "" {
 		if _, seen := w.discovered.LoadOrStore("svc:"+serviceID, struct{}{}); !seen {
-			if err := rc.SAdd(ctx, rc.KB().CacheKnownKey("services"), serviceID).Err(); err != nil {
+			if err := rc.SAdd(ctx, rc.KB().CacheKnownKey("services"), serviceID); err != nil {
 				w.discovered.Delete("svc:" + serviceID) // allow retry on next sighting
 				w.logger.Debug().Err(err).Str(logging.FieldServiceID, serviceID).Msg("failed to record discovered service")
 			}
@@ -222,7 +235,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// This allows non-leader miners to receive block events published by the leader
 	w.redisBlockSubscriber = cache.NewRedisBlockSubscriber(
 		w.logger,
-		w.config.RedisClient,
+		w.config.KV,
 		nil, // No direct blockchain client - events come from leader via Redis
 	)
 	if err = w.redisBlockSubscriber.Start(ctx); err != nil {
@@ -279,7 +292,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// always writes a bounded TTL from the moment this cache exists, never TTL=0.
 	w.supplierCache = cache.NewSupplierCache(
 		w.logger,
-		w.config.RedisClient,
+		w.config.KV,
 		cache.SupplierCacheConfig{},
 	)
 	if err = w.supplierCache.Start(ctx); err != nil {
@@ -416,9 +429,9 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// Create supplier registry
 	w.supplierRegistry = NewSupplierRegistry(
 		w.logger,
-		w.config.RedisClient,
+		w.config.KV,
 		SupplierRegistryConfig{
-			IndexKey: w.config.RedisClient.KB().SuppliersRegistryIndexKey(),
+			IndexKey: w.config.KV.KB().SuppliersRegistryIndexKey(),
 		},
 	)
 
@@ -429,6 +442,8 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.supplierRegistry,
 		SupplierManagerConfig{
 			RedisClient:               w.config.RedisClient,
+			Backend:                   w.config.Backend,
+			KV:                        w.config.KV,
 			StoreHealth:               w.config.StoreHealth,
 			ConsumerName:              w.config.Config.Redis.ConsumerName,
 			SessionTTL:                w.config.Config.GetSessionTTL(), // Uses CacheTTL if not explicitly set

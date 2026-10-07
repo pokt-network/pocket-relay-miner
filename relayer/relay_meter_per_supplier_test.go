@@ -6,9 +6,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -63,7 +65,7 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		app,
 		nil, // sharedClient (unused; fakeSharedParamCache serves)
 		&fakeSessionClient{numSuppliers: 2},
@@ -161,7 +163,7 @@ func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
 
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		app,
 		nil,                                 // sharedClient
 		&fakeSessionClient{numSuppliers: 2}, // sessionClient

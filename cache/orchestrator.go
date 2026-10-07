@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/alitto/pond/v2"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -43,7 +43,7 @@ type CacheOrchestrator struct {
 	blockSubscriber BlockHeightSubscriber
 
 	// Redis client for warmup operations
-	redisClient *redisutil.Client
+	store kv.Store
 
 	// All entity caches
 	sharedParamsCache   SingletonEntityCache[*sharedtypes.Params]
@@ -94,7 +94,7 @@ func NewCacheOrchestrator(
 	config CacheOrchestratorConfig,
 	leaderElector *leader.GlobalLeaderElector,
 	blockSubscriber BlockHeightSubscriber,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	sharedParamsCache SingletonEntityCache[*sharedtypes.Params],
 	proofParamsCache SingletonEntityCache[*prooftypes.Params],
 	supplierParamsCache SupplierParamCache,
@@ -129,7 +129,7 @@ func NewCacheOrchestrator(
 		config:              config,
 		leaderElector:       leaderElector,
 		blockSubscriber:     blockSubscriber,
-		redisClient:         redisClient,
+		store:               store,
 		sharedParamsCache:   sharedParamsCache,
 		proofParamsCache:    proofParamsCache,
 		supplierParamsCache: supplierParamsCache,
@@ -591,7 +591,7 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 			go func() {
 				for _, addr := range o.config.KnownApplications {
 					if addr != "" {
-						_ = o.redisClient.SAdd(ctx, o.redisClient.KB().CacheKnownKey("applications"), addr).Err()
+						_ = o.store.SAdd(ctx, o.store.KB().CacheKnownKey("applications"), addr)
 					}
 				}
 			}()
@@ -677,7 +677,7 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 
 // getKnownAppsFromRedis retrieves the list of known app addresses from Redis.
 func (o *CacheOrchestrator) getKnownAppsFromRedis(ctx context.Context) []string {
-	members, err := o.redisClient.SMembers(ctx, o.redisClient.KB().CacheKnownKey("applications")).Result()
+	members, err := o.store.SMembers(ctx, o.store.KB().CacheKnownKey("applications"))
 	if err != nil {
 		o.logger.Warn().Err(err).Msg("failed to get known apps from Redis")
 		return nil
@@ -687,7 +687,7 @@ func (o *CacheOrchestrator) getKnownAppsFromRedis(ctx context.Context) []string 
 
 // getKnownServicesFromRedis retrieves the list of known service IDs from Redis.
 func (o *CacheOrchestrator) getKnownServicesFromRedis(ctx context.Context) []string {
-	members, err := o.redisClient.SMembers(ctx, o.redisClient.KB().CacheKnownKey("services")).Result()
+	members, err := o.store.SMembers(ctx, o.store.KB().CacheKnownKey("services"))
 	if err != nil {
 		o.logger.Warn().Err(err).Msg("failed to get known services from Redis")
 		return nil
@@ -697,20 +697,24 @@ func (o *CacheOrchestrator) getKnownServicesFromRedis(ctx context.Context) []str
 
 // updateKnownAppsSet updates the Redis set with known apps (for warmup on restart).
 func (o *CacheOrchestrator) updateKnownAppsSet(ctx context.Context, knownApps []string) error {
-	key := o.redisClient.KB().CacheKnownKey("applications")
-	o.redisClient.Del(ctx, key)
+	key := o.store.KB().CacheKnownKey("applications")
+	if err := o.store.Del(ctx, key); err != nil {
+		return err
+	}
 	if len(knownApps) > 0 {
-		return o.redisClient.SAdd(ctx, key, knownApps).Err()
+		return o.store.SAdd(ctx, key, knownApps...)
 	}
 	return nil
 }
 
 // updateKnownServicesSet updates the Redis set with known services (for warmup on restart).
 func (o *CacheOrchestrator) updateKnownServicesSet(ctx context.Context, knownServices []string) error {
-	key := o.redisClient.KB().CacheKnownKey("services")
-	o.redisClient.Del(ctx, key)
+	key := o.store.KB().CacheKnownKey("services")
+	if err := o.store.Del(ctx, key); err != nil {
+		return err
+	}
 	if len(knownServices) > 0 {
-		return o.redisClient.SAdd(ctx, key, knownServices).Err()
+		return o.store.SAdd(ctx, key, knownServices...)
 	}
 	return nil
 }

@@ -6,11 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -36,7 +37,7 @@ type subscriberInfo struct {
 // It allows multiple Relayer instances to stay synchronized on the current block height.
 type RedisBlockSubscriber struct {
 	logger      logging.Logger
-	redisClient *redisutil.Client
+	store       kv.Store
 	blockClient client.BlockClient
 
 	// Subscribers with metadata for debugging
@@ -63,12 +64,12 @@ type RedisBlockSubscriber struct {
 // Uses the Redis client wrapper with KeyBuilder for namespace-aware channel names.
 func NewRedisBlockSubscriber(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	blockClient client.BlockClient,
 ) *RedisBlockSubscriber {
 	return &RedisBlockSubscriber{
 		logger:      logging.ForComponent(logger, logging.ComponentBlockSubscriber),
-		redisClient: redisClient,
+		store:       store,
 		blockClient: blockClient,
 		subscribers: make(map[uint64]*subscriberInfo),
 	}
@@ -112,7 +113,7 @@ func (s *RedisBlockSubscriber) subscribeLoop(ctx context.Context) {
 		blockSubscriberComponentName,
 		// connectFn: Test Redis connection
 		func(ctx context.Context) error {
-			return s.redisClient.Ping(ctx).Err()
+			return s.store.Ping(ctx)
 		},
 		// runFn: Subscribe and process block events until disconnect
 		func(ctx context.Context) error {
@@ -126,18 +127,17 @@ func (s *RedisBlockSubscriber) subscribeLoop(ctx context.Context) {
 // runBlockPubSubLoop runs the pub/sub listener for block events until disconnect.
 // Returns error to trigger reconnection via the reconnection loop.
 func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
-	channel := s.redisClient.KB().BlockEventChannel()
-	pubsub := s.redisClient.Subscribe(ctx, channel)
+	channel := s.store.KB().BlockEventChannel()
+	// Returns once the subscription is active.
+	sub, err := s.store.Subscribe(ctx, channel)
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to block channel: %w", err)
+	}
 	defer func() {
-		if err := pubsub.Close(); err != nil {
+		if err := sub.Close(); err != nil {
 			s.logger.Error().Err(err).Msg("failed to close pubsub channel")
 		}
 	}()
-
-	// Verify subscription
-	if _, err := pubsub.Receive(ctx); err != nil {
-		return fmt.Errorf("failed to subscribe to block channel: %w", err)
-	}
 
 	s.logger.Info().Msg("block pub/sub subscription active")
 
@@ -145,9 +145,9 @@ func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case msg := <-pubsub.Channel():
-			// Check if msg is nil (pubsub channel is closed = Redis disconnected)
-			if msg == nil {
+		case msg, ok := <-sub.Messages():
+			// A closed channel is a lost subscription (Redis disconnected).
+			if !ok {
 				return fmt.Errorf("pub/sub channel closed")
 			}
 
@@ -277,7 +277,7 @@ func (s *RedisBlockSubscriber) PublishBlockHeight(ctx context.Context, event Blo
 	}
 	s.mu.RUnlock()
 
-	return publishBlockEvent(ctx, s.logger, s.redisClient, event)
+	return publishBlockEvent(ctx, s.logger, s.store, event)
 }
 
 // publishBlockEvent writes one block event onto the shared channel. It is the
@@ -288,7 +288,7 @@ func (s *RedisBlockSubscriber) PublishBlockHeight(ctx context.Context, event Blo
 func publishBlockEvent(
 	ctx context.Context,
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	event BlockEvent,
 ) error {
 	// Set the timestamp if not set
@@ -296,32 +296,26 @@ func publishBlockEvent(
 		event.Timestamp = time.Now()
 	}
 
-	kb := redisClient.KB()
+	kb := store.KB()
 	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal block event: %w", err)
 	}
 
-	// The record and the latest height are written BEFORE the event, on one
-	// connection, so a consumer woken by the event finds the hash whenever its
-	// write landed. Not a MULTI: with Redis at maxmemory under noeviction a
-	// MULTI holding a SET is aborted whole, and the event must go out even
-	// then -- it is what moves claims and proofs, which free the memory. A
-	// consumer that finds no record reads the hash from its own node.
-	var setRecord, setLatest *redis.StatusCmd
-	var publish *redis.IntCmd
-	_, _ = redisClient.Pipelined(ctx, func(pipe redis.Pipeliner) error { //nolint:errcheck // each command's error is read below
-		setRecord = pipe.Set(ctx, kb.BlockHashAtHeightKey(event.Height), data, blockRecordTTL)
-		setLatest = pipe.Set(ctx, kb.BlockLatestHeightKey(), event.Height, blockRecordTTL)
-		publish = pipe.Publish(ctx, kb.BlockEventChannel(), data)
-		return nil
-	})
-	if err = publish.Err(); err != nil {
+	// The record and the latest height are written BEFORE the event, so a
+	// consumer woken by the event finds the hash whenever its write landed.
+	// Each write stands alone, not a MULTI: with Redis at maxmemory under
+	// noeviction a MULTI holding a SET is aborted whole, and the event must go
+	// out even then -- it is what moves claims and proofs, which free the
+	// memory. A consumer that finds no record reads the hash from its own node.
+	recordErr := store.Set(ctx, kb.BlockHashAtHeightKey(event.Height), data, blockRecordTTL)
+	latestErr := store.Set(ctx, kb.BlockLatestHeightKey(), []byte(strconv.FormatInt(event.Height, 10)), blockRecordTTL)
+	if err = store.Publish(ctx, kb.BlockEventChannel(), data); err != nil {
 		return fmt.Errorf("failed to publish block event: %w", err)
 	}
-	for _, cmd := range []*redis.StatusCmd{setRecord, setLatest} {
-		if cmd.Err() != nil {
-			logger.Warn().Err(cmd.Err()).Int64("height", event.Height).
+	for _, writeErr := range []error{recordErr, latestErr} {
+		if writeErr != nil {
+			logger.Warn().Err(writeErr).Int64("height", event.Height).
 				Msg("failed to record the published block; consumers will read its hash from their own node")
 		}
 	}
@@ -339,9 +333,9 @@ const blockRecordTTL = 24 * time.Hour
 
 // readBlockRecord reads the leader's record of the block at height. found is
 // false when the leader has not published that height (yet).
-func readBlockRecord(ctx context.Context, redisClient *redisutil.Client, height int64) (event BlockEvent, found bool, err error) {
-	data, err := redisClient.Get(ctx, redisClient.KB().BlockHashAtHeightKey(height)).Bytes()
-	if errors.Is(err, redis.Nil) {
+func readBlockRecord(ctx context.Context, store kv.Store, height int64) (event BlockEvent, found bool, err error) {
+	data, err := store.Get(ctx, store.KB().BlockHashAtHeightKey(height))
+	if errors.Is(err, kv.ErrNotFound) {
 		return BlockEvent{}, false, nil
 	}
 	if err != nil {
@@ -355,12 +349,15 @@ func readBlockRecord(ctx context.Context, redisClient *redisutil.Client, height 
 
 // readLatestPublishedHeight reads the highest height the leader has published.
 // found is false when nothing has been published.
-func readLatestPublishedHeight(ctx context.Context, redisClient *redisutil.Client) (height int64, found bool, err error) {
-	height, err = redisClient.Get(ctx, redisClient.KB().BlockLatestHeightKey()).Int64()
-	if errors.Is(err, redis.Nil) {
+func readLatestPublishedHeight(ctx context.Context, store kv.Store) (height int64, found bool, err error) {
+	data, err := store.Get(ctx, store.KB().BlockLatestHeightKey())
+	if errors.Is(err, kv.ErrNotFound) {
 		return 0, false, nil
 	}
 	if err != nil {
+		return 0, false, fmt.Errorf("failed to read latest published height: %w", err)
+	}
+	if height, err = strconv.ParseInt(string(data), 10, 64); err != nil {
 		return 0, false, fmt.Errorf("failed to read latest published height: %w", err)
 	}
 	return height, true, nil
@@ -386,18 +383,18 @@ const redisBlockPublisherComponentName = "redis_block_publisher"
 // There is no Start: a publisher has no background work. Close is present so
 // callers can treat it like every other component they own.
 type RedisBlockPublisher struct {
-	logger      logging.Logger
-	redisClient *redisutil.Client
+	logger logging.Logger
+	store  kv.Store
 
 	mu     sync.RWMutex
 	closed bool
 }
 
 // NewRedisBlockPublisher creates a publish-only block event endpoint.
-func NewRedisBlockPublisher(logger logging.Logger, redisClient *redisutil.Client) *RedisBlockPublisher {
+func NewRedisBlockPublisher(logger logging.Logger, store kv.Store) *RedisBlockPublisher {
 	return &RedisBlockPublisher{
-		logger:      logging.ForComponent(logger, redisBlockPublisherComponentName),
-		redisClient: redisClient,
+		logger: logging.ForComponent(logger, redisBlockPublisherComponentName),
+		store:  store,
 	}
 }
 
@@ -410,7 +407,7 @@ func (p *RedisBlockPublisher) PublishBlockHeight(ctx context.Context, event Bloc
 	}
 	p.mu.RUnlock()
 
-	return publishBlockEvent(ctx, p.logger, p.redisClient, event)
+	return publishBlockEvent(ctx, p.logger, p.store, event)
 }
 
 // Close marks the publisher closed. Idempotent.

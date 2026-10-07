@@ -3,11 +3,12 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/cosmos/gogoproto/proto"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -54,7 +55,7 @@ type applicationCacheL1Entry struct {
 // across all instances.
 type applicationCache struct {
 	logger      logging.Logger
-	redisClient *redisutil.Client
+	store       kv.Store
 	queryClient ApplicationQueryClient
 
 	// L1: In-memory cache (xsync for lock-free performance), TTL-bounded by
@@ -86,12 +87,12 @@ type ApplicationQueryClient interface {
 // with Close() when no longer needed.
 func NewApplicationCache(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	queryClient ApplicationQueryClient,
 ) KeyedEntityCache[string, *apptypes.Application] {
 	return &applicationCache{
 		logger:      logging.ForComponent(logger, logging.ComponentQueryApp),
-		redisClient: redisClient,
+		store:       store,
 		queryClient: queryClient,
 		localCache:  xsync.NewMap[string, applicationCacheL1Entry](),
 	}
@@ -104,7 +105,7 @@ func (c *applicationCache) Start(ctx context.Context) error {
 	// Subscribe to invalidation events
 	if err := SubscribeToInvalidations(
 		c.ctx,
-		c.redisClient,
+		c.store,
 		c.logger,
 		applicationCacheType,
 		c.handleInvalidation,
@@ -154,8 +155,8 @@ func (c *applicationCache) Get(ctx context.Context, appAddress string, force ...
 		}
 
 		// L2: Check Redis cache
-		redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
-		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+		redisKey := c.store.KB().CacheKey(applicationCacheType, appAddress)
+		data, err := c.store.Get(ctx, redisKey)
 		if err == nil {
 			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, app); err == nil {
@@ -230,7 +231,7 @@ func (c *applicationCache) Get(ctx context.Context, appAddress string, force ...
 	// Publish invalidation event if force refresh (leader only)
 	if forceRefresh {
 		payload := fmt.Sprintf(`{"address": "%s"}`, appAddress)
-		if err := PublishInvalidation(ctx, c.redisClient, c.logger, applicationCacheType, payload); err != nil {
+		if err := PublishInvalidation(ctx, c.store, c.logger, applicationCacheType, payload); err != nil {
 			c.logger.Warn().
 				Err(err).
 				Str(logging.FieldAppAddress, appAddress).
@@ -255,8 +256,8 @@ func (c *applicationCache) Set(ctx context.Context, appAddress string, app *appt
 		return fmt.Errorf("failed to marshal application: %w", err)
 	}
 
-	redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
-	if err := c.redisClient.Set(ctx, redisKey, data, ttl).Err(); err != nil {
+	redisKey := c.store.KB().CacheKey(applicationCacheType, appAddress)
+	if err := c.store.Set(ctx, redisKey, data, ttl); err != nil {
 		return fmt.Errorf("failed to set Redis cache: %w", err)
 	}
 
@@ -275,8 +276,8 @@ func (c *applicationCache) Invalidate(ctx context.Context, appAddress string) er
 	c.localCache.Delete(appAddress)
 
 	// Remove from L2 (Redis)
-	redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
-	if err := c.redisClient.Del(ctx, redisKey).Err(); err != nil {
+	redisKey := c.store.KB().CacheKey(applicationCacheType, appAddress)
+	if err := c.store.Del(ctx, redisKey); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Str(logging.FieldAppAddress, appAddress).
@@ -285,7 +286,7 @@ func (c *applicationCache) Invalidate(ctx context.Context, appAddress string) er
 
 	// Publish invalidation event to other instances
 	payload := fmt.Sprintf(`{"address": "%s"}`, appAddress)
-	if err := PublishInvalidation(ctx, c.redisClient, c.logger, applicationCacheType, payload); err != nil {
+	if err := PublishInvalidation(ctx, c.store, c.logger, applicationCacheType, payload); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Str(logging.FieldAppAddress, appAddress).
@@ -329,24 +330,11 @@ func (c *applicationCache) InvalidateAll(ctx context.Context) error {
 	// Clear L2 (Redis) - delete all keys with the prefix
 	// Note: This is an expensive operation, consider using a more efficient approach
 	// if there are many applications cached.
-	iter := c.redisClient.Scan(ctx, 0, c.redisClient.KB().CacheKey(applicationCacheType, "*"), 0).Iterator()
-	for iter.Next(ctx) {
-		if err := c.redisClient.Del(ctx, iter.Val()).Err(); err != nil {
-			c.logger.Warn().
-				Err(err).
-				Str("key", iter.Val()).
-				Msg("failed to delete application from Redis")
-		}
-	}
-	if err := iter.Err(); err != nil {
-		c.logger.Warn().
-			Err(err).
-			Msg("failed to scan Redis keys for application cache")
-	}
+	deleteByPrefix(ctx, c.store, c.logger, c.store.KB().CacheKey(applicationCacheType, ""))
 
 	// Publish invalidation event (empty payload means invalidate all)
 	payload := "{}"
-	if err := PublishInvalidation(ctx, c.redisClient, c.logger, applicationCacheType, payload); err != nil {
+	if err := PublishInvalidation(ctx, c.store, c.logger, applicationCacheType, payload); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to publish invalidation event")
@@ -363,7 +351,7 @@ func (c *applicationCache) InvalidateAll(ctx context.Context) error {
 // This is called by the orchestrator's pond worker pool for parallel warmup.
 func (c *applicationCache) warmupSingleApp(ctx context.Context, addr string) error {
 	return warmupKeyedFromRedis(
-		ctx, c.redisClient, c.logger,
+		ctx, c.store, c.logger,
 		applicationCacheType,
 		logging.FieldAppAddress,
 		"failed to unmarshal application during warmup",
@@ -386,14 +374,14 @@ func (c *applicationCache) warmupSingleApp(ctx context.Context, addr string) err
 // lives in queryKeyedChainWithLock; only the application-specific decode, L1
 // warm and chain call are supplied here.
 func (c *applicationCache) queryChainWithLock(ctx context.Context, appAddress string) (*apptypes.Application, error) {
-	return queryKeyedChainWithLock(ctx, c.redisClient, c.logger, appAddress, keyedQueryLockSpec[*apptypes.Application]{
+	return queryKeyedChainWithLock(ctx, c.store, c.logger, appAddress, keyedQueryLockSpec[*apptypes.Application]{
 		cacheType:   applicationCacheType,
 		chainLabel:  "application",
 		logKeyField: logging.FieldAppAddress,
 		waitingMsg:  "another instance is querying application, waiting",
 		loadFromRedis: func(ctx context.Context, appAddress string) (*apptypes.Application, bool) {
-			redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
-			data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+			redisKey := c.store.KB().CacheKey(applicationCacheType, appAddress)
+			data, err := c.store.Get(ctx, redisKey)
 			if err != nil {
 				return nil, false
 			}
@@ -449,8 +437,8 @@ func (c *applicationCache) handleInvalidation(ctx context.Context, payload strin
 	// Applications are needed for relay validation (ring signatures, metering)
 	// so first relay after invalidation should not experience L2/L3 latency
 	if event.Address != "" {
-		redisKey := c.redisClient.KB().CacheKey(applicationCacheType, event.Address)
-		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+		redisKey := c.store.KB().CacheKey(applicationCacheType, event.Address)
+		data, err := c.store.Get(ctx, redisKey)
 		if err == nil {
 			app := &apptypes.Application{}
 			if err := proto.Unmarshal(data, app); err == nil {
@@ -465,7 +453,7 @@ func (c *applicationCache) handleInvalidation(ctx context.Context, payload strin
 					Str(logging.FieldAppAddress, event.Address).
 					Msg("failed to unmarshal application during eager reload")
 			}
-		} else if err != redis.Nil {
+		} else if !errors.Is(err, kv.ErrNotFound) {
 			c.logger.Warn().
 				Err(err).
 				Str(logging.FieldAppAddress, event.Address).

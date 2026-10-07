@@ -407,7 +407,7 @@ def specs(g):
             row("Caches",
                 ts("Hit ratio by cache and level", [("%s / (%s + %s)" % (R("ha_cache_hits_total", "cache_type,level"), R("ha_cache_hits_total", "cache_type,level"), R("ha_cache_misses_total", "cache_type,level")), "{{cache_type}} {{level}}")], "percentunit", w=8),
                 ts("Get latency p95 by level", [(P("ha_cache_get_latency_seconds", 0.95, "level"), "{{level}}")], "s", "Targets: L1 under 100 ns, L2 under 2 ms.", w=8),
-                ts("Invalidations / locks", [(R("ha_cache_invalidations_total", "cache_type,source"), "invalidated {{cache_type}} {{source}}"), (R("ha_cache_lock_acquisitions_total", "result"), "lock {{result}}")], "short", w=8),
+                ts("Invalidations / locks", [(R("ha_cache_invalidations_total", "cache_type,source"), "invalidated {{cache_type}} {{source}}"), (R("ha_cache_lock_acquisitions_total", "result"), "lock {{result}}"), (R("ha_kv_bus_dropped_total", "channel"), "standalone bus dropped {{channel}}")], "short", w=8),
                 ts("Orchestrator refreshes", [(R("ha_cache_orchestrator_refreshes_total", "result"), "{{result}}"), (P("ha_cache_orchestrator_refresh_duration_seconds", 0.95), "p95 s")], "short", w=8),
                 ts("Chain queries", [(R("ha_cache_chain_queries_total", "query_type"), "{{query_type}}"), (R("ha_cache_chain_query_errors_total", "query_type"), "error {{query_type}}"),
                     (P("ha_cache_chain_query_latency_seconds", 0.95, "query_type"), "p95 s {{query_type}}")], "short", w=8),

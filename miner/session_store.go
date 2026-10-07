@@ -807,16 +807,8 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 			if snapshot == nil {
 				return fmt.Errorf("session not found: %s", sessionID)
 			}
-			if (newState == SessionStateClaimWindowClosed || newState == SessionStateClaimTxError) && snapshot.State.HoldsClaimOnChain() {
-				return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
-			}
-			if newState == SessionStateActive && (snapshot.State != SessionStateClaiming || snapshot.ClaimTxHash != "") {
-				return fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, sessionID, newState)
-			}
-			if newState == SessionStateClaimed && (snapshot.ProofTxHash != "" || snapshot.State == SessionStateProved ||
-				snapshot.State == SessionStateProbabilisticProved || snapshot.State == SessionStateProofWindowClosed ||
-				snapshot.State == SessionStateProofTxError) {
-				return fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, sessionID, newState)
+			if err := checkStateWrite(snapshot, newState); err != nil {
+				return err
 			}
 			snapshot.State = newState
 			return s.Save(ctx, snapshot)
@@ -843,6 +835,38 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 // reindexState moves a session between the per-state index sets after its
 // state changed. Best-effort: the hash is the source of truth and the index
 // is a lookup accelerator, so a failure here is logged, not returned.
+// checkStateWrite returns why newState may not be written over snap, or nil.
+// The rules are updateStateScript's, which applies them atomically in Redis;
+// this is the same rules for a store that holds the session as one value.
+func checkStateWrite(snap *SessionSnapshot, newState SessionState) error {
+	if (newState == SessionStateClaimWindowClosed || newState == SessionStateClaimTxError) && snap.State.HoldsClaimOnChain() {
+		return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, snap.SessionID, newState)
+	}
+	// Only a deferred claim writes active, and only over an unsent claim.
+	if newState == SessionStateActive && (snap.State != SessionStateClaiming || snap.ClaimTxHash != "") {
+		return fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, snap.SessionID, newState)
+	}
+	// claimed is never written over a proof that was sent or a proof phase
+	// that ended.
+	if newState == SessionStateClaimed && (snap.ProofTxHash != "" || snap.State == SessionStateProved ||
+		snap.State == SessionStateProbabilisticProved || snap.State == SessionStateProofWindowClosed ||
+		snap.State == SessionStateProofTxError) {
+		return fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, snap.SessionID, newState)
+	}
+	return nil
+}
+
+// canReactivateClaimed reports whether ReactivateClaimed flips a session in
+// this state, as reactivateClaimedScript decides.
+func canReactivateClaimed(state SessionState) bool {
+	switch state {
+	case SessionStateActive, SessionStateClaiming, SessionStateClaimWindowClosed,
+		SessionStateClaimTxError, SessionStateClaimMissing:
+		return true
+	}
+	return false
+}
+
 func (s *RedisSessionStore) reindexState(ctx context.Context, sessionID string, oldState, newState SessionState) {
 	pipe := s.redisClient.TxPipeline()
 	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)

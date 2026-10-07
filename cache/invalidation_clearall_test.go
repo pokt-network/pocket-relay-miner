@@ -6,10 +6,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // These tests prove the `{}` clear-all fix in handleInvalidation for the four
@@ -42,7 +44,7 @@ func TestApplicationCache_HandleInvalidation_ClearAll(t *testing.T) {
 	newWarmCache := func(t *testing.T) *applicationCache {
 		t.Helper()
 		client := newTestRedis(t)
-		ac := NewApplicationCache(testLogger(), client,
+		ac := NewApplicationCache(testLogger(), kv.NewRedis(zerolog.Nop(), client),
 			&frozenApplicationQueryClient{chainDelegatees: []string{"gw-a"}}).(*applicationCache)
 		// Public warm path: Get lazy-loads via the query stub and stores into L1.
 		_, err := ac.Get(ctx, addrA)
@@ -69,7 +71,7 @@ func TestApplicationCache_HandleInvalidation_ClearAll(t *testing.T) {
 		ac := newWarmCache(t)
 		// Drop addrA's L2 key so the handler's eager L2->L1 reload cannot
 		// immediately re-populate the entry we are asserting was deleted.
-		require.NoError(t, ac.redisClient.Del(ctx, ac.redisClient.KB().CacheKey(applicationCacheType, addrA)).Err())
+		require.NoError(t, ac.store.(*kv.Redis).Client().Del(ctx, ac.store.(*kv.Redis).Client().KB().CacheKey(applicationCacheType, addrA)).Err())
 
 		require.NoError(t, ac.handleInvalidation(ctx, `{"address":"pokt1appA"}`))
 
@@ -101,7 +103,7 @@ func TestServiceCache_HandleInvalidation_ClearAll(t *testing.T) {
 	newWarmCache := func(t *testing.T) *serviceCache {
 		t.Helper()
 		client := newTestRedis(t)
-		sc := NewServiceCache(testLogger(), client,
+		sc := NewServiceCache(testLogger(), kv.NewRedis(zerolog.Nop(), client),
 			&frozenServiceQueryClient{chainCUPR: 1000}).(*serviceCache)
 		_, err := sc.Get(ctx, svcA)
 		require.NoError(t, err)
@@ -126,7 +128,7 @@ func TestServiceCache_HandleInvalidation_ClearAll(t *testing.T) {
 	t.Run("targeted deletes only that entry", func(t *testing.T) {
 		sc := newWarmCache(t)
 		// Drop svcA's L2 key so the eager L2->L1 reload cannot re-populate it.
-		require.NoError(t, sc.redisClient.Del(ctx, sc.redisClient.KB().CacheKey(serviceCacheType, svcA)).Err())
+		require.NoError(t, sc.store.(*kv.Redis).Client().Del(ctx, sc.store.(*kv.Redis).Client().KB().CacheKey(serviceCacheType, svcA)).Err())
 
 		require.NoError(t, sc.handleInvalidation(ctx, `{"service_id":"svcA"}`))
 
@@ -158,7 +160,7 @@ func TestAccountCache_HandleInvalidation_ClearAll(t *testing.T) {
 	newWarmCache := func(t *testing.T) *accountCache {
 		t.Helper()
 		client := newTestRedis(t)
-		ac := NewAccountCache(testLogger(), client,
+		ac := NewAccountCache(testLogger(), kv.NewRedis(zerolog.Nop(), client),
 			&frozenAccountQueryClient{pubKey: pubKeyFromByte(0x11)}).(*accountCache)
 		_, err := ac.Get(ctx, addrA)
 		require.NoError(t, err)
@@ -223,7 +225,7 @@ func TestSupplierCache_HandleInvalidation_ClearAll(t *testing.T) {
 	newWarmCache := func(t *testing.T) *SupplierCache {
 		t.Helper()
 		client := newTestRedis(t)
-		sc := NewSupplierCache(testLogger(), client, SupplierCacheConfig{})
+		sc := NewSupplierCache(testLogger(), kv.NewRedis(zerolog.Nop(), client), SupplierCacheConfig{})
 		// Public warm path: SetSupplierState stores into L1 (and L2). No live
 		// subscriber exists (Start not called), so its published invalidation
 		// event is a no-op and cannot race the L1 we just warmed.
@@ -298,7 +300,7 @@ func TestHandleInvalidation_ClearAllNegativeControls(t *testing.T) {
 	for _, tc := range payloads {
 		t.Run("application/"+tc.name, func(t *testing.T) {
 			client := newTestRedis(t)
-			ac := NewApplicationCache(testLogger(), client,
+			ac := NewApplicationCache(testLogger(), kv.NewRedis(zerolog.Nop(), client),
 				&frozenApplicationQueryClient{chainDelegatees: []string{"gw-a"}}).(*applicationCache)
 			_, err := ac.Get(ctx, "pokt1appA")
 			require.NoError(t, err)
@@ -311,7 +313,7 @@ func TestHandleInvalidation_ClearAllNegativeControls(t *testing.T) {
 
 		t.Run("service/"+tc.name, func(t *testing.T) {
 			client := newTestRedis(t)
-			sc := NewServiceCache(testLogger(), client,
+			sc := NewServiceCache(testLogger(), kv.NewRedis(zerolog.Nop(), client),
 				&frozenServiceQueryClient{chainCUPR: 1000}).(*serviceCache)
 			_, err := sc.Get(ctx, "svcA")
 			require.NoError(t, err)
@@ -324,7 +326,7 @@ func TestHandleInvalidation_ClearAllNegativeControls(t *testing.T) {
 
 		t.Run("account/"+tc.name, func(t *testing.T) {
 			client := newTestRedis(t)
-			ac := NewAccountCache(testLogger(), client,
+			ac := NewAccountCache(testLogger(), kv.NewRedis(zerolog.Nop(), client),
 				&frozenAccountQueryClient{pubKey: pubKeyFromByte(0x11)}).(*accountCache)
 			_, err := ac.Get(ctx, "pokt1acctA")
 			require.NoError(t, err)
@@ -337,7 +339,7 @@ func TestHandleInvalidation_ClearAllNegativeControls(t *testing.T) {
 
 		t.Run("supplier/"+tc.name, func(t *testing.T) {
 			client := newTestRedis(t)
-			sc := NewSupplierCache(testLogger(), client, SupplierCacheConfig{})
+			sc := NewSupplierCache(testLogger(), kv.NewRedis(zerolog.Nop(), client), SupplierCacheConfig{})
 			require.NoError(t, sc.SetSupplierState(ctx, &SupplierState{
 				Status: SupplierStatusActive, Staked: true,
 				OperatorAddress: "pokt1opA", Services: []string{"svc1"},

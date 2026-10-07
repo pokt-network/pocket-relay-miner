@@ -10,12 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 )
@@ -66,7 +65,7 @@ func (c *RedisSessionCache) storeSession(key string, height int64, session *sess
 // RedisSessionCache implements SessionCache using Redis as L2 cache.
 type RedisSessionCache struct {
 	logger        logging.Logger
-	redisClient   *redisutil.Client
+	store         kv.Store
 	sessionClient client.SessionQueryClient
 	sharedClient  client.SharedQueryClient
 	blockClient   client.BlockClient
@@ -91,7 +90,7 @@ type RedisSessionCache struct {
 // NewRedisSessionCache creates a new SessionCache backed by Redis.
 func NewRedisSessionCache(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	sessionClient client.SessionQueryClient,
 	sharedClient client.SharedQueryClient,
 	blockClient client.BlockClient,
@@ -107,7 +106,7 @@ func NewRedisSessionCache(
 	return &RedisSessionCache{
 		sessionCache:  xsync.NewMap[string, sessionCacheL1Entry](),
 		logger:        logging.ForComponent(logger, logging.ComponentSessionCache),
-		redisClient:   redisClient,
+		store:         store,
 		sessionClient: sessionClient,
 		sharedClient:  sharedClient,
 		blockClient:   blockClient,
@@ -140,7 +139,7 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 	}
 	c.mu.RUnlock()
 
-	key := c.redisClient.KB().SessionCacheKey(appAddress, serviceId, height)
+	key := c.store.KB().SessionCacheKey(appAddress, serviceId, height)
 
 	// L1: Check local cache. Only a fresh entry (within sessionCacheL1TTL) is a
 	// hit; a stale one falls through to L2/L3 so the entry can never be frozen
@@ -160,7 +159,7 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 	cacheMisses.WithLabelValues("session", "l1").Inc()
 
 	// L2: Check Redis cache
-	data, err := c.redisClient.Get(ctx, key).Bytes()
+	data, err := c.store.Get(ctx, key)
 	if err == nil {
 		session := &sessiontypes.Session{}
 		if unmarshalErr := json.Unmarshal(data, session); unmarshalErr != nil {
@@ -177,7 +176,7 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 			return session, nil
 		}
 	}
-	if err != nil && !errors.Is(err, redis.Nil) {
+	if err != nil && !errors.Is(err, kv.ErrNotFound) {
 		c.logger.Warn().Err(err).Msg("error fetching session from Redis")
 	}
 	cacheMisses.WithLabelValues("session", "l2").Inc()
@@ -214,7 +213,7 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 			Int64("height", height).
 			Str("sha256", hex.EncodeToString(hash[:])).
 			Msg("session fetched from chain")
-		if err = c.redisClient.Set(ctx, key, data, ttl).Err(); err != nil {
+		if err = c.store.Set(ctx, key, data, ttl); err != nil {
 			c.logger.Debug().Err(err).Msg("failed to cache session in Redis")
 		}
 	} else {

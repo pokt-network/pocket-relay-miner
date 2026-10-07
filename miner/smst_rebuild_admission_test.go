@@ -952,7 +952,7 @@ func TestAddSupplierWithData_WiresTheProcessAdmissionIntoTheConsumerAndTheSMSTMa
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = idle.Close() })
 	lm := &SessionLifecycleManager{}
-	mgr.wireRebuildAdmission(supplier, idle, lm)
+	mgr.wireRebuildAdmission(supplier, idle.SetIngestionPause, lm)
 	require.NotNil(t, lm.claimFlushWaiting, "LINK wiring-flush: the claim's flush delay can release its supplier")
 	done := lm.claimFlushWaiting()
 	mgr.rebuildAdmission.mu.Lock()

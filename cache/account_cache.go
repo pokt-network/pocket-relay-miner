@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
@@ -62,7 +62,7 @@ type AccountQueryClient interface {
 // Even if an app/gateway unstakes, their public key remains valid and static.
 type accountCache struct {
 	logger      logging.Logger
-	redisClient *redisutil.Client
+	store       kv.Store
 	queryClient AccountQueryClient
 
 	// L1: In-memory cache (xsync for lock-free performance), TTL-bounded by
@@ -80,12 +80,12 @@ type accountCache struct {
 // with Close() when no longer needed.
 func NewAccountCache(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	queryClient AccountQueryClient,
 ) KeyedEntityCache[string, cryptotypes.PubKey] {
 	return &accountCache{
 		logger:      logging.ForComponent(logger, logging.ComponentQueryAccount),
-		redisClient: redisClient,
+		store:       store,
 		queryClient: queryClient,
 		localCache:  xsync.NewMap[string, accountCacheL1Entry](),
 	}
@@ -98,7 +98,7 @@ func (c *accountCache) Start(ctx context.Context) error {
 	// Subscribe to invalidation events
 	if err := SubscribeToInvalidations(
 		c.ctx,
-		c.redisClient,
+		c.store,
 		c.logger,
 		accountCacheType,
 		c.handleInvalidation,
@@ -141,8 +141,8 @@ func (c *accountCache) Get(ctx context.Context, address string, force ...bool) (
 	}
 
 	// L2: Check Redis cache
-	redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
-	data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+	redisKey := c.store.KB().CacheKey(accountCacheType, address)
+	data, err := c.store.Get(ctx, redisKey)
 	if err == nil {
 		// Unmarshal proto-encoded public key
 		pubKey, err := c.unmarshalPubKey(data)
@@ -202,8 +202,8 @@ func (c *accountCache) Set(ctx context.Context, address string, pubKey cryptotyp
 		return fmt.Errorf("failed to marshal public key: %w", err)
 	}
 
-	redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
-	if err := c.redisClient.Set(ctx, redisKey, data, ttl).Err(); err != nil {
+	redisKey := c.store.KB().CacheKey(accountCacheType, address)
+	if err := c.store.Set(ctx, redisKey, data, ttl); err != nil {
 		return fmt.Errorf("failed to set Redis cache: %w", err)
 	}
 
@@ -222,8 +222,8 @@ func (c *accountCache) Invalidate(ctx context.Context, address string) error {
 	c.localCache.Delete(address)
 
 	// Remove from L2 (Redis)
-	redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
-	if err := c.redisClient.Del(ctx, redisKey).Err(); err != nil {
+	redisKey := c.store.KB().CacheKey(accountCacheType, address)
+	if err := c.store.Del(ctx, redisKey); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Str("address", address).
@@ -232,7 +232,7 @@ func (c *accountCache) Invalidate(ctx context.Context, address string) error {
 
 	// Publish invalidation event to other instances
 	payload := fmt.Sprintf(`{"address": "%s"}`, address)
-	if err := PublishInvalidation(ctx, c.redisClient, c.logger, accountCacheType, payload); err != nil {
+	if err := PublishInvalidation(ctx, c.store, c.logger, accountCacheType, payload); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Str("address", address).
@@ -261,25 +261,11 @@ func (c *accountCache) InvalidateAll(ctx context.Context) error {
 	c.localCache.Clear()
 
 	// Clear L2 (Redis) - delete all keys matching prefix
-	pattern := c.redisClient.KB().CacheKey(accountCacheType, "*")
-	iter := c.redisClient.Scan(ctx, 0, pattern, 100).Iterator()
-	for iter.Next(ctx) {
-		if err := c.redisClient.Del(ctx, iter.Val()).Err(); err != nil {
-			c.logger.Warn().
-				Err(err).
-				Str("key", iter.Val()).
-				Msg("failed to delete account key from Redis")
-		}
-	}
-	if err := iter.Err(); err != nil {
-		c.logger.Warn().
-			Err(err).
-			Msg("error scanning Redis keys during InvalidateAll")
-	}
+	deleteByPrefix(ctx, c.store, c.logger, c.store.KB().CacheKey(accountCacheType, ""))
 
 	// Publish invalidation event to other instances
 	payload := "{}"
-	if err := PublishInvalidation(ctx, c.redisClient, c.logger, accountCacheType, payload); err != nil {
+	if err := PublishInvalidation(ctx, c.store, c.logger, accountCacheType, payload); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to publish invalidation event")
@@ -298,14 +284,14 @@ func (c *accountCache) InvalidateAll(ctx context.Context) error {
 // caches only in that it does NOT warm L1 on a retry hit (hence the no-op
 // onRetryHit) and decodes via unmarshalPubKey rather than proto.Unmarshal.
 func (c *accountCache) queryChainWithLock(ctx context.Context, address string) (cryptotypes.PubKey, error) {
-	return queryKeyedChainWithLock(ctx, c.redisClient, c.logger, address, keyedQueryLockSpec[cryptotypes.PubKey]{
+	return queryKeyedChainWithLock(ctx, c.store, c.logger, address, keyedQueryLockSpec[cryptotypes.PubKey]{
 		cacheType:   accountCacheType,
 		chainLabel:  "account",
 		logKeyField: "address",
 		waitingMsg:  "another instance is querying account, waiting",
 		loadFromRedis: func(ctx context.Context, address string) (cryptotypes.PubKey, bool) {
-			redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
-			data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+			redisKey := c.store.KB().CacheKey(accountCacheType, address)
+			data, err := c.store.Get(ctx, redisKey)
 			if err != nil {
 				return nil, false
 			}

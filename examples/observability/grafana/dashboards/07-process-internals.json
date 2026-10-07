@@ -1111,6 +1111,15 @@
           "expr": "sum by (result)(rate(ha_cache_lock_acquisitions_total[$__rate_interval]))",
           "legendFormat": "lock {{result}}",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (channel)(rate(ha_kv_bus_dropped_total[$__rate_interval]))",
+          "legendFormat": "standalone bus dropped {{channel}}",
+          "refId": "C"
         }
       ],
       "title": "Invalidations / locks",
