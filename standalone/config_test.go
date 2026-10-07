@@ -112,6 +112,11 @@ func TestParseConfig_RefusesASettingWrittenTwice(t *testing.T) {
 			want: `"listen_addr" is not a section of a standalone config`,
 		},
 		{
+			name: "per-side redis key at the top level",
+			yaml: strings.Replace(standaloneYAML(), "redis:\n  url: \"redis://redis:6379\"\n", "redis:\n  url: \"redis://redis:6379\"\n  pool_size: 77\n", 1),
+			want: "redis.pool_size goes under relayer.redis or miner.redis",
+		},
+		{
 			name: "missing side",
 			yaml: commonYAML + "redis:\n  url: \"redis://redis:6379\"\nrelayer:\n" + indent(relayerOnlyYAML),
 			want: "the miner: section is required",
@@ -145,3 +150,38 @@ func TestParseConfig_ReportsUnknownKeysAtTheirLineInTheFile(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// Where the file leaves a common section out, the process gets the defaults
+// the miner subcommand would give it, not zero values: metrics on at :9092 and
+// async logging.
+func TestParseConfig_AnOmittedCommonSectionKeepsItsDefault(t *testing.T) {
+	doc := `pocket_node:
+  query_node_rpc_url: "https://rpc.example.com"
+  query_node_grpc_url: "grpc.example.com:443"
+  chain_id: "pocket-lego-testnet"
+keys:
+  keys_file: "/keys/supplier-keys.yaml"
+redis:
+  url: "redis://redis:6379"
+relayer:
+` + indent(relayerOnlyYAML) + "miner:\n" + indent(minerOnlyYAML)
+
+	got, err := ParseConfig([]byte(doc))
+	require.NoError(t, err)
+
+	defaults := miner.DefaultConfig()
+	require.Equal(t, defaults.Metrics, got.Metrics)
+	require.Equal(t, defaults.PProf, got.PProf)
+	require.Equal(t, defaults.Logging, got.Logging)
+	require.True(t, got.Metrics.Enabled, "premise: the miner default serves metrics")
+	require.True(t, got.Logging.Async, "premise: the miner default logs asynchronously")
+}
+
+// The example the repository ships parses clean, with no unknown key.
+func TestParseConfig_TheShippedExampleIsClean(t *testing.T) {
+	got, err := LoadConfig("../config.standalone.example.yaml")
+	require.NoError(t, err)
+	require.Empty(t, got.Warnings())
+	require.Equal(t, ":9092", got.Metrics.Addr)
+	require.True(t, got.Logging.Async, "a logging section without async keeps the default")
+}

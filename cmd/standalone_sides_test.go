@@ -20,6 +20,8 @@ type fakeSide struct {
 	panicking bool          // panics before serving
 	failWhile chan error    // a value makes it stop on its own while serving
 	served    chan struct{} // closed once serving
+	slowStart chan struct{} // when set, startup waits here or for its context
+	building  chan struct{} // closed once startup has begun
 }
 
 type eventLog struct {
@@ -40,12 +42,21 @@ func (l *eventLog) all() []string {
 }
 
 func newFake(name string, log *eventLog) *fakeSide {
-	return &fakeSide{name: name, log: log, failWhile: make(chan error, 1), served: make(chan struct{})}
+	return &fakeSide{name: name, log: log, failWhile: make(chan error, 1), served: make(chan struct{}), building: make(chan struct{})}
 }
 
 func (f *fakeSide) side() side {
-	return side{name: f.name, serve: func(_ context.Context, hooks sideHooks) error {
+	return side{name: f.name, serve: func(ctx context.Context, hooks sideHooks) error {
 		f.log.add(f.name + ":build")
+		close(f.building)
+		if f.slowStart != nil {
+			select {
+			case <-f.slowStart:
+			case <-ctx.Done():
+				f.log.add(f.name + ":startup-cancelled")
+				return ctx.Err()
+			}
+		}
 		if f.panicking {
 			panic("boom")
 		}
@@ -167,4 +178,30 @@ func TestStandaloneGatherer_GathersEachFamilyOnce(t *testing.T) {
 	}
 	require.Equal(t, 1, seen["go_goroutines"], "the Go collector is served once")
 	require.Equal(t, 1, seen["process_cpu_seconds_total"], "the process collector is served once")
+	require.Equal(t, 1, seen["ha_relayer_signing_keys_loaded"], "the relayer's own families are still served")
+	require.Equal(t, 1, seen["ha_relayer_publish_queue_bytes"])
+}
+
+// A signal while the relayer is still starting cancels its startup and stops
+// the miner in order; nothing waits for a startup that may never finish.
+func TestRunSides_ASignalDuringStartupCancelsItAndStopsTheOtherSide(t *testing.T) {
+	r := startSidesRun(t, func(_, relayer *fakeSide) { relayer.slowStart = make(chan struct{}) })
+	<-r.relayer.building
+	r.sigCh <- syscall.SIGTERM
+
+	require.NoError(t, <-r.result, "a requested shutdown is a clean exit")
+	require.Equal(t, []string{
+		"miner:build", "miner:serving",
+		"relayer:build", "relayer:startup-cancelled",
+		"miner:stopped",
+	}, r.log.all())
+}
+
+func TestRunSides_ASignalDuringTheFirstStartupNeverStartsTheSecond(t *testing.T) {
+	r := startSidesRun(t, func(miner, _ *fakeSide) { miner.slowStart = make(chan struct{}) })
+	<-r.miner.building
+	r.sigCh <- syscall.SIGTERM
+
+	require.NoError(t, <-r.result)
+	require.Equal(t, []string{"miner:build", "miner:startup-cancelled"}, r.log.all())
 }

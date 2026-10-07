@@ -33,8 +33,9 @@ pprof:
   enabled: false
   addr: "127.0.0.1:6060"
 
-# The server and namespace both sides share. Pool sizes and the other redis
-# keys are per side, under relayer.redis and miner.redis.
+# Only the server and namespace both sides share. Every other redis key
+# (pool sizes, batching, consumer settings) goes under relayer.redis or
+# miner.redis; written here it is an error.
 redis:
   url: "redis://localhost:6379"
 

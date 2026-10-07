@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -29,6 +30,12 @@ type runningSide struct {
 	stop     chan os.Signal
 	stopOnce sync.Once
 	done     chan error // receives once, when serve returns
+
+	// abort cancels the side's context. Used only for a signal that arrives
+	// while the side is still starting, the one moment requestStop cannot reach
+	// it; a serving side is stopped through requestStop, so its components
+	// close before their context ends, as in the subcommands.
+	abort context.CancelFunc
 }
 
 func (r *runningSide) requestStop() {
@@ -39,12 +46,14 @@ func (r *runningSide) requestStop() {
 // it reports the side as serving and hands it the channel requestStop closes.
 // A panic in serve is turned into the error done reports, so a side that dies
 // takes the process down with it rather than leaving the other side running.
-func startSide(ctx context.Context, logger logging.Logger, s side, hooks sideHooks) *runningSide {
+func startSide(parent context.Context, logger logging.Logger, s side, hooks sideHooks) *runningSide {
+	ctx, abort := context.WithCancel(parent)
 	r := &runningSide{
 		name:    s.name,
 		started: make(chan struct{}),
 		stop:    make(chan os.Signal),
 		done:    make(chan error, 1),
+		abort:   abort,
 	}
 	var startedOnce sync.Once
 	hooks.started = func() <-chan os.Signal {
@@ -54,9 +63,18 @@ func startSide(ctx context.Context, logger logging.Logger, s side, hooks sideHoo
 	go logging.RecoverGoRoutine(logger, "standalone_"+s.name, func(c context.Context) {
 		var err error
 		defer func() {
+			// Recovered here, not by RecoverGoRoutine, so the panic becomes the
+			// error that stops the other side; logged the way it logs one.
 			if p := recover(); p != nil {
+				logging.PanicRecoveriesTotal.WithLabelValues("standalone_" + s.name).Inc()
+				logger.Error().
+					Str(logging.FieldComponent, "standalone_"+s.name).
+					Str("panic_value", fmt.Sprintf("%v", p)).
+					Str("stack_trace", string(debug.Stack())).
+					Msg("PANIC RECOVERED in a standalone side: stopping the process")
 				err = fmt.Errorf("%s panic: %v", s.name, p)
 			}
+			abort()
 			r.done <- err
 		}()
 		err = s.serve(c, hooks)
@@ -79,13 +97,23 @@ func (r *runningSide) finish(err error, stoppedOnItsOwn bool) error {
 // delivers or either side stops. It then stops second and waits for it, and
 // only then stops first: the relayer drains what it serves before the miner it
 // hands relays to goes away. A side that fails to start stops the one already
-// running; a side that fails while serving stops the other.
+// running; a side that fails while serving stops the other. A signal while a
+// side is still starting cancels that side's startup and stops the other in
+// order; the process then exits cleanly.
 func runSides(ctx context.Context, logger logging.Logger, first, second side, hooks sideHooks, sigCh <-chan os.Signal) error {
 	a := startSide(ctx, logger, first, hooks)
 	select {
 	case <-a.started:
 	case err := <-a.done:
 		return a.finish(err, true)
+	case <-sigCh:
+		logger.Info().Str("side", a.name).Msg("shutdown signal received during startup, cancelling it")
+		// Both: a side still starting sees its context end; one that started
+		// in the meantime is stopped like any serving side.
+		a.abort()
+		a.requestStop()
+		<-a.done
+		return nil
 	}
 
 	b := startSide(ctx, logger, second, hooks)
@@ -94,6 +122,15 @@ func runSides(ctx context.Context, logger logging.Logger, first, second side, ho
 	case err := <-b.done:
 		a.requestStop()
 		return errors.Join(b.finish(err, true), a.finish(<-a.done, false))
+	case <-sigCh:
+		logger.Info().Str("side", b.name).Msg("shutdown signal received during startup, cancelling it")
+		// Both: a side still starting sees its context end; one that started
+		// in the meantime is stopped like any serving side.
+		b.abort()
+		b.requestStop()
+		<-b.done
+		a.requestStop()
+		return a.finish(<-a.done, false)
 	}
 
 	var runErr error

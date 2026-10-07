@@ -106,7 +106,18 @@ func ParseConfig(data []byte) (*Config, error) {
 				return nil, fmt.Errorf("line %d: %s must be a mapping", key.Line, key.Value)
 			}
 			sides[key.Value] = value
-		case key.Value == sectionRedis || slices.Contains(commonSections, key.Value):
+		case key.Value == sectionRedis:
+			if value.Kind != yaml.MappingNode {
+				return nil, fmt.Errorf("line %d: redis must be a mapping", key.Line)
+			}
+			for j := 0; j+1 < len(value.Content); j += 2 {
+				if leaf := value.Content[j]; !slices.Contains(commonRedisKeys, leaf.Value) {
+					return nil, fmt.Errorf("line %d: redis.%s goes under relayer.redis or miner.redis: "+
+						"only url and namespace are shared by both sides", leaf.Line, leaf.Value)
+				}
+			}
+			common[key.Value] = value
+		case slices.Contains(commonSections, key.Value):
 			common[key.Value] = value
 		default:
 			return nil, fmt.Errorf("line %d: %q is not a section of a standalone config: "+
@@ -138,22 +149,17 @@ func ParseConfig(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("miner: %w", err)
 	}
 
-	// The common sections, decoded once more for the process's own use.
-	var shared struct {
-		Metrics config.MetricsConfig `yaml:"metrics"`
-		PProf   config.PprofConfig   `yaml:"pprof"`
-		Logging logging.Config       `yaml:"logging"`
-	}
-	if err := yaml.Unmarshal(data, &shared); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
-	}
-
+	// The process's own logger and observability server take the miner's
+	// view of the common sections: what the file says, and where it says
+	// nothing, the miner subcommand's defaults (metrics on at :9092, async
+	// logging). Both sides received the same sections, so only the defaults
+	// for keys the file omits can differ between them.
 	return &Config{
 		Relayer:     relayerCfg,
 		Miner:       minerCfg,
-		Metrics:     shared.Metrics,
-		PProf:       shared.PProf,
-		Logging:     shared.Logging,
+		Metrics:     minerCfg.Metrics,
+		PProf:       minerCfg.PProf,
+		Logging:     minerCfg.Logging,
 		unknownKeys: config.UnknownKeys(data, &probe{}),
 	}, nil
 }
@@ -203,9 +209,6 @@ func sideDocument(name string, side *yaml.Node, common map[string]*yaml.Node) ([
 			sideRedis = &yaml.Node{Kind: yaml.MappingNode}
 		}
 		if commonRedisNode != nil {
-			if commonRedisNode.Kind != yaml.MappingNode {
-				return nil, fmt.Errorf("line %d: redis must be a mapping", commonRedisNode.Line)
-			}
 			sideRedis.Content = append(sideRedis.Content, commonRedisNode.Content...)
 		}
 		out.Content = append(out.Content, scalar(sectionRedis), sideRedis)
