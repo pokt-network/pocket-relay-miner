@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -80,7 +82,7 @@ func TestSubmissionTracker_WritesEveryKindWhileTheStoreIsClosed(t *testing.T) {
 	client, prefix := newExclusiveTestRedis(t)
 	closeStoreByReserve(t, client, prefix)
 
-	tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
+	tr := NewSubmissionTracker(zerolog.Nop(), kv.NewRedis(zerolog.Nop(), client), time.Hour)
 	const supplier = "pokt1track"
 	const sessionID = "sess-closed"
 	const txHash = "0xtx"
@@ -119,7 +121,7 @@ func TestSubmissionTracker_WritesEveryKindWhileTheStoreIsClosed(t *testing.T) {
 func TestSubmissionTracker_AWriteRefusedByRedisReachesTheCallerAndIsCounted(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newExclusiveTestRedis(t)
-	tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
+	tr := NewSubmissionTracker(zerolog.Nop(), kv.NewRedis(zerolog.Nop(), client), time.Hour)
 	const supplier = "pokt1refused"
 
 	require.NoError(t, client.ConfigSet(ctx, "maxmemory-policy", "noeviction").Err())
@@ -148,7 +150,7 @@ func TestSubmissionTracker_AWriteRefusedByRedisReachesTheCallerAndIsCounted(t *t
 func TestSubmissionTracker_AProofWithNoClaimSaysItDoesNotKnow(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
-	tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
+	tr := NewSubmissionTracker(zerolog.Nop(), kv.NewRedis(zerolog.Nop(), client), time.Hour)
 	const supplier = "pokt1unknown"
 
 	require.NoError(t, tr.TrackProofSubmission(ctx, supplier, 110, "sess-proof-first",
@@ -181,7 +183,7 @@ func TestSubmissionTracker_AProofWithNoClaimSaysItDoesNotKnow(t *testing.T) {
 func TestSubmissionTracker_AnOutcomeWithNoRecordIsCounted(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
-	tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
+	tr := NewSubmissionTracker(zerolog.Nop(), kv.NewRedis(zerolog.Nop(), client), time.Hour)
 	const supplier = "pokt1orphan"
 
 	seedClaim(t, tr, supplier, "sess-a", "0xtx-a")

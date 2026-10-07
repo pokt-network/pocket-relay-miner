@@ -109,9 +109,13 @@ func (r *Redis) Expire(ctx context.Context, key string, ttl time.Duration) (bool
 	return r.client.Expire(ctx, key, ttl).Result()
 }
 
+// scanCount is the SCAN batch: one round trip per 500 keys examined, as the
+// submission tracker's own scan used.
+const scanCount = 500
+
 func (r *Redis) ScanPrefix(ctx context.Context, prefix string) ([]string, error) {
 	var keys []string
-	iter := r.client.Scan(ctx, 0, prefix+"*", 0).Iterator()
+	iter := r.client.Scan(ctx, 0, prefix+"*", scanCount).Iterator()
 	for iter.Next(ctx) {
 		keys = append(keys, iter.Val())
 	}

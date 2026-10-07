@@ -27,8 +27,8 @@ around them:
 | memory limit (`GOMEMLIMIT`) | one per process | one, shared: the relayer's queues and the miner's trees count against the same limit |
 | logging, metrics, pprof defaults | each subcommand's own | the miner's: metrics on at `:9092`, pprof off, async JSON logging |
 | shared metrics both sides write without a `component` label (the `ha_cache_*` hits, misses, chain queries and block height) | one series per process | both sides on the same series: counters add up, gauges hold the last write |
-| relay queue, sessions, dedup marks, relay meter counters, caches, SMST trees | Redis | the embedded store (`storage.path`) |
-| leader election, supplier leases, claim/proof tracking | Redis | Redis in this version |
+| relay queue, sessions, dedup marks, relay meter counters, caches, SMST trees, claim/proof tracking and rebroadcast messages | Redis | the embedded store (`storage.path`) |
+| leader election, supplier leases | Redis | Redis in this version |
 
 ## Config
 

@@ -70,6 +70,10 @@ func (b *PebbleStoreBackend) smstStore(supplier string) smstStore {
 	return &pebbleSMSTStore{b: b, supplier: supplier}
 }
 
+func (b *PebbleStoreBackend) rebroadcastStore() RebroadcastStorage {
+	return newPebbleRebroadcastStore(b.store, 0) // 0 → default TTL
+}
+
 func (b *PebbleStoreBackend) sessionStore(supplier string) SessionStore {
 	return &pebbleSessionStore{b: b, supplier: supplier, ttl: sessionTTL(b.config.SessionTTL)}
 }

@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+	"github.com/rs/zerolog"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -20,7 +23,7 @@ func setupSubmissionTracker(t *testing.T) (*SubmissionTracker, *redisutil.Client
 
 	return NewSubmissionTracker(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		client,
+		kv.NewRedis(zerolog.Nop(), client),
 		1*time.Hour,
 	), client
 }

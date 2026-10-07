@@ -1699,10 +1699,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Wire meter cleanup publisher for notifying relayers when sessions leave active state.
 		// This publishes cleanup signals to ha:meter:cleanup so relayers can decrement their
 		// active sessions metric and clear session meter data.
-		store := m.config.KV
-		if store == nil {
-			store = kv.NewRedis(m.logger, m.config.RedisClient)
-		}
+		store := m.kvStore()
 		meterCleanupPublisher := NewRedisMeterCleanupPublisher(
 			m.logger,
 			func(ctx context.Context, channel string, message interface{}) error {
@@ -1843,6 +1840,14 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 // storeBackend is the manager's backend; a manager built without
 // NewSupplierManager (tests) gets the Redis one over its config.
+// kvStore is the manager's kv store: the one the caller passed, or Redis.
+func (m *SupplierManager) kvStore() kv.Store {
+	if m.config.KV != nil {
+		return m.config.KV
+	}
+	return kv.NewRedis(m.logger, m.config.RedisClient)
+}
+
 func (m *SupplierManager) storeBackend() StoreBackend {
 	if m.backend != nil {
 		return m.backend
@@ -3216,7 +3221,7 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 // addSupplier* calls via sync.Once.
 func (m *SupplierManager) ensureSharedTrackers() {
 	m.sharedTrackersOnce.Do(func() {
-		m.sharedSubmissionTracker = NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
+		m.sharedSubmissionTracker = NewSubmissionTracker(m.logger, m.kvStore(), m.config.SubmissionTrackingTTL)
 
 		// Only build the rebroadcast store + reconciler when we can actually run
 		// it. Leaving m.rebroadcastStore nil means the lifecycle callback skips
@@ -3237,7 +3242,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			return
 		}
 		inclusionQuery := m.config.ProofQueryClient
-		m.rebroadcastStore = NewRebroadcastStore(m.config.RedisClient, 0) // 0 → default TTL
+		m.rebroadcastStore = m.storeBackend().rebroadcastStore()
 
 		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, inclusionHeight int64) error {
 			if outcome == inclusionFound {

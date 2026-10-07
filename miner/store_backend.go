@@ -24,6 +24,9 @@ type StoreBackend interface {
 	deduplicator() Deduplicator
 	// smstStore keeps a supplier's session trees.
 	smstStore(supplier string) smstStore
+	// rebroadcastStore keeps the built claim and proof messages the inclusion
+	// reconciler sends again.
+	rebroadcastStore() RebroadcastStorage
 }
 
 // supplierStores are one supplier's stores.
@@ -110,4 +113,8 @@ func (b *redisStoreBackend) forSupplier(supplier string, dedup Deduplicator) (su
 
 func (b *redisStoreBackend) smstStore(supplier string) smstStore {
 	return newRedisSMSTStore(b.config.RedisClient, supplier)
+}
+
+func (b *redisStoreBackend) rebroadcastStore() RebroadcastStorage {
+	return NewRebroadcastStore(b.config.RedisClient, 0) // 0 → default TTL
 }
