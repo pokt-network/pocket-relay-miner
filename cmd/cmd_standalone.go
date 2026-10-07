@@ -206,14 +206,12 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 	keyBuilder := redistransport.NewKeyBuilder(cfg.Miner.Redis.Namespace)
 	store := kv.NewPebble(logger, db, keyBuilder)
 	defer func() { _ = store.Close() }()
-	broker := pebblequeue.NewBroker(logger, db, keyBuilder.StreamPrefix())
-	minerBackend := miner.NewPebbleStoreBackend(logger, db, broker, miner.SupplierManagerConfig{
-		SessionTTL:       cfg.Miner.GetSessionTTL(),
-		BlockTimeSeconds: cfg.Miner.BlockTimeSeconds,
-		BatchSize:        cfg.Miner.BatchSize,
-	})
-	openQueue := func(context.Context, logging.Logger, relayPublisherDeps) (relayPublisher, func(), error) {
-		return broker.Publisher(), func() {}, nil
+	broker := pebblequeue.NewBroker(logger, db, store, keyBuilder.StreamPrefix())
+	minerBackend := func(config miner.SupplierManagerConfig) miner.StoreBackend {
+		return miner.NewPebbleStoreBackend(logger, db, broker, config)
+	}
+	openQueue := func(_ context.Context, _ logging.Logger, d relayPublisherDeps) (relayPublisher, func(), error) {
+		return broker.Publisher(d.config.Redis.BatchPublishInterval()), func() {}, nil
 	}
 
 	minerSide := side{name: "miner", serve: func(ctx context.Context, hooks sideHooks) error {

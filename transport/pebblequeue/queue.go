@@ -5,11 +5,13 @@
 // It keeps the contract the miner reads (transport.MinedRelayConsumer):
 // "<ms>-<seq>" IDs that only increase, at-least-once delivery, an entry pending
 // from its delivery until it is acknowledged or released, and every entry found
-// at startup redelivered as a reclaim -- what a restarted miner sees on Redis,
-// where its consumer name changes with the pid.
+// at startup delivered live, as XREADGROUP ">" delivers an entry no consumer
+// holds, and a released entry delivered again once the release delay has
+// passed, as the Redis sweep takes back an entry XNACK released.
 //
-// Entries are written without an fsync (see pebblestore): a crash of the
-// process loses none, an OS crash at most the store's sync interval.
+// Entries reach the OS before Publish returns and are fsynced on the store's
+// timer (see pebblestore): a crash of the process loses none, an OS crash at
+// most the store's sync interval.
 package pebblequeue
 
 import (
@@ -55,6 +57,13 @@ type Broker struct {
 	mu      sync.Mutex
 	streams map[string]*stream
 	ledger  *redistransport.ChargeLedger
+	// counters is where the meter counters live; its lock is held while a
+	// counter is read and rewritten, so the meter's Del of a counter cannot
+	// land in between. Nil when no charges are written.
+	counters *kv.Pebble
+	// afterCountersRead, when set, runs between the counters' read and their
+	// write, with b.mu held. Tests only.
+	afterCountersRead func()
 }
 
 // stream is one supplier's queue.
@@ -66,11 +75,13 @@ type stream struct {
 	notify chan struct{}
 }
 
-// NewBroker returns the broker for the queues stored in store. streamPrefix
-// names the queues the way the Redis transport names its streams.
-func NewBroker(logger logging.Logger, store *pebblestore.Store, streamPrefix string) *Broker {
+// NewBroker returns the broker for the queues stored in store. counters is the
+// kv store the relay meter reads its counters from (nil writes no charges).
+// streamPrefix names the queues the way the Redis transport names its streams.
+func NewBroker(logger logging.Logger, store *pebblestore.Store, counters *kv.Pebble, streamPrefix string) *Broker {
 	return &Broker{
 		store:        store,
+		counters:     counters,
 		streamPrefix: streamPrefix,
 		logger:       logging.ForComponent(logger, "pebble_queue"),
 		streams:      make(map[string]*stream),
@@ -138,10 +149,38 @@ type Publisher struct {
 	closed bool
 	// lastErr is the last commit's failure, nil once a commit succeeds again.
 	lastErr error
+
+	stop      chan struct{}
+	closeOnce sync.Once
+	wg        sync.WaitGroup
 }
 
-// Publisher returns the broker's publisher.
-func (b *Broker) Publisher() *Publisher { return &Publisher{b: b} }
+// Publisher returns the broker's publisher. Every chargeInterval (none when
+// zero) and on Close it writes the meter charges no publish has carried, as
+// the Redis batcher does on every tick and in its final flush: a relay served
+// and not mined still spends its budget, and a restart must read it.
+func (b *Broker) Publisher(chargeInterval time.Duration) *Publisher {
+	p := &Publisher{b: b, stop: make(chan struct{})}
+	if chargeInterval > 0 {
+		p.wg.Add(1)
+		go logging.RecoverGoRoutine(b.logger, "pebble_queue_charges", func(context.Context) {
+			defer p.wg.Done()
+			ticker := time.NewTicker(chargeInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-p.stop:
+					return
+				case <-ticker.C:
+					if err := b.flushCharges(); err != nil {
+						b.logger.Warn().Err(err).Msg("writing meter charges failed; retried on the next tick")
+					}
+				}
+			}
+		})(context.Background())
+	}
+	return p
+}
 
 // SetChargeLedger makes every publish write the meter charges served so far in
 // the same batch as its entry, as the Redis publisher writes them in the same
@@ -189,23 +228,51 @@ func (b *Broker) publish(name string, data []byte) (*stream, error) {
 	prevMS, prevSeq := st.lastMS, st.lastSeq
 	ms, seq := st.next(time.Now())
 
-	batch := b.store.DB().NewBatch()
-	_ = batch.Set(entryKey(name, ms, seq), data, nil)
-	_ = batch.Set(lastIDKey(name), encodeID(ms, seq), nil)
+	err = b.commitWithCharges(func(batch *pebble.Batch) {
+		_ = batch.Set(entryKey(name, ms, seq), data, nil)
+		_ = batch.Set(lastIDKey(name), encodeID(ms, seq), nil)
+	})
+	if err != nil {
+		st.lastMS, st.lastSeq = prevMS, prevSeq
+		return nil, err
+	}
+	return st, nil
+}
 
-	var charges []redistransport.Charge
-	var consumed []int64
-	if b.ledger != nil {
-		charges = b.ledger.TakeAll()
-		consumed = make([]int64, len(charges))
+// flushCharges writes the charges no publish has carried yet.
+func (b *Broker) flushCharges() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ledger == nil {
+		return nil
+	}
+	return b.commitWithCharges(nil)
+}
+
+// commitWithCharges commits one batch holding what fill writes and the meter
+// charges served so far, read and rewritten under the counters' lock. With
+// nothing to write it commits nothing. Called with b.mu held.
+func (b *Broker) commitWithCharges(fill func(*pebble.Batch)) error {
+	write := func() error {
+		var charges []redistransport.Charge
+		if b.ledger != nil {
+			charges = b.ledger.TakeAll()
+		}
+		if fill == nil && len(charges) == 0 {
+			return nil
+		}
+		batch := b.store.DB().NewBatch()
+		if fill != nil {
+			fill(batch)
+		}
+		consumed := make([]int64, len(charges))
 		now := time.Now()
 		for i, c := range charges {
 			current, expiry, err := b.counterLocked(c.Key, now)
 			if err != nil {
 				_ = batch.Close()
 				b.untake(charges)
-				st.lastMS, st.lastSeq = prevMS, prevSeq
-				return nil, err
+				return err
 			}
 			// EXPIRE NX: the TTL is set when the counter has none.
 			if expiry.IsZero() && c.TTL > 0 {
@@ -214,17 +281,22 @@ func (b *Broker) publish(name string, data []byte) (*stream, error) {
 			consumed[i] = current + c.Amount
 			_ = batch.Set(kv.StringKey(c.Key), kv.EncodeValue(expiry, []byte(strconv.FormatInt(consumed[i], 10))), nil)
 		}
+		if b.afterCountersRead != nil {
+			b.afterCountersRead()
+		}
+		if err := b.store.Commit(batch); err != nil {
+			b.untake(charges)
+			return err
+		}
+		for i, c := range charges {
+			b.ledger.Committed(c, consumed[i])
+		}
+		return nil
 	}
-
-	if err := b.store.Commit(batch); err != nil {
-		b.untake(charges)
-		st.lastMS, st.lastSeq = prevMS, prevSeq
-		return nil, err
+	if b.counters == nil {
+		return write()
 	}
-	for i, c := range charges {
-		b.ledger.Committed(c, consumed[i])
-	}
-	return st, nil
+	return b.counters.WithLock(write)
 }
 
 func (b *Broker) untake(charges []redistransport.Charge) {
@@ -272,13 +344,19 @@ func (p *Publisher) DispatcherHealthy() (bool, error) {
 	return true, nil
 }
 
-// Close refuses later publishes. Nothing is held, so nothing is flushed.
+// Close refuses later publishes and writes the charges no publish carried.
 // Idempotent.
 func (p *Publisher) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.closed = true
-	return nil
+	var err error
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
+		close(p.stop)
+		p.wg.Wait()
+		err = p.b.flushCharges()
+	})
+	return err
 }
 
 var _ transport.MinedRelayPublisher = (*Publisher)(nil)

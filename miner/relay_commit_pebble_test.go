@@ -32,7 +32,7 @@ func newPebbleCommitHarness(t *testing.T, supplier string) *pebbleCommitHarness 
 	store, err := pebblestore.Open(zerolog.Nop(), pebblestore.Config{Path: t.TempDir(), SyncInterval: time.Hour})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
-	broker := pebblequeue.NewBroker(zerolog.Nop(), store, "ha:relays")
+	broker := pebblequeue.NewBroker(zerolog.Nop(), store, nil, "ha:relays")
 	backend := NewPebbleStoreBackend(zerolog.Nop(), store, broker, SupplierManagerConfig{BlockTimeSeconds: 30})
 	stores, err := backend.forSupplier(supplier, backend.deduplicator())
 	require.NoError(t, err)
@@ -52,7 +52,7 @@ func (h *pebbleCommitHarness) createSession(id string, state SessionState) {
 
 func (h *pebbleCommitHarness) publish(n int) []string {
 	h.t.Helper()
-	pub := h.broker.Publisher()
+	pub := h.broker.Publisher(0)
 	ids := make([]string, n)
 	for i := 0; i < n; i++ {
 		h.n++

@@ -38,9 +38,9 @@ type SupplierWorkerConfig struct {
 	// Redis, through RedisClient.
 	KV kv.Store
 
-	// Backend keeps each supplier's relay queue, sessions and dedup marks. Nil
-	// means Redis, through RedisClient.
-	Backend StoreBackend
+	// Backend builds the backend that keeps each supplier's relay queue,
+	// sessions and dedup marks (SupplierManagerConfig.Backend). Nil means Redis.
+	Backend func(SupplierManagerConfig) StoreBackend
 
 	KeyManager keys.KeyManager
 	Config     *Config

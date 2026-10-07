@@ -235,3 +235,27 @@ func TestStore_PublishReachesASubscriberOpenedBefore(t *testing.T) {
 		require.NoError(t, sub.Close(), "idempotent")
 	})
 }
+
+// A set whose last member is removed no longer exists, as Redis deletes an
+// empty set: Exists and ScanPrefix do not find it.
+func TestStore_ASetEmptiedBySRemIsGone(t *testing.T) {
+	eachStore(t, func(t *testing.T, h harness) {
+		ctx := context.Background()
+		prefix := key(t, h, "empty:")
+		k := prefix + "set"
+		require.NoError(t, h.store.SAdd(ctx, k, "a", "b"))
+		require.NoError(t, h.store.SRem(ctx, k, "a"))
+		exists, err := h.store.Exists(ctx, k)
+		require.NoError(t, err)
+		require.True(t, exists, "control: a set with a member left exists")
+
+		require.NoError(t, h.store.SRem(ctx, k, "b"))
+
+		exists, err = h.store.Exists(ctx, k)
+		require.NoError(t, err)
+		require.False(t, exists)
+		keys, err := h.store.ScanPrefix(ctx, prefix)
+		require.NoError(t, err)
+		require.Empty(t, keys)
+	})
+}

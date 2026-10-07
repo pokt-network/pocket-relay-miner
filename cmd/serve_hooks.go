@@ -40,7 +40,7 @@ type sideHooks struct {
 
 	// minerBackend, when not nil, keeps the miner's relay queue, sessions and
 	// dedup marks; nil means Redis.
-	minerBackend miner.StoreBackend
+	minerBackend func(miner.SupplierManagerConfig) miner.StoreBackend
 }
 
 // openOwnKeys opens a key manager the side owns: closed when the side is done.

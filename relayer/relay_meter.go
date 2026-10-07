@@ -1326,15 +1326,18 @@ func (m *RelayMeter) handleMeterError(operation string, cause error) (allowed bo
 	return true, fmt.Errorf("could not meter relay (%s): %w", operation, cause)
 }
 
-// cleanupSubscriber subscribes to cleanup signals from miners.
+// cleanupSubscriber subscribes to cleanup signals from miners, subscribing
+// again whenever the subscription fails or is lost.
 func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 	defer m.wg.Done()
+	redisutil.NewReconnectionLoop(m.logger, "pubsub_meter_cleanup", m.store.Ping, m.runCleanupSubscription).Run(ctx)
+}
 
+func (m *RelayMeter) runCleanupSubscription(ctx context.Context) error {
 	channel := m.store.KB().MeterCleanupChannel()
 	sub, err := m.store.Subscribe(ctx, channel)
 	if err != nil {
-		m.logger.Warn().Err(err).Msg("meter cleanup subscription failed; meters are cleared by their TTL")
-		return
+		return fmt.Errorf("failed to subscribe to meter cleanup: %w", err)
 	}
 	defer func() { _ = sub.Close() }()
 
@@ -1343,10 +1346,10 @@ func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case msg, ok := <-ch:
 			if !ok {
-				return
+				return fmt.Errorf("meter cleanup subscription closed")
 			}
 			// Received cleanup signal. Payload format: "sessionID|supplierAddress".
 			// Payload without a '|' is treated as a legacy per-session cleanup

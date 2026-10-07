@@ -249,9 +249,10 @@ type SupplierManagerConfig struct {
 	// Redis connection
 	RedisClient *redistransport.Client
 
-	// Backend keeps each supplier's relay queue, sessions and dedup marks. Nil
-	// means Redis, through RedisClient.
-	Backend StoreBackend
+	// Backend builds the backend that keeps each supplier's relay queue,
+	// sessions and dedup marks, from this config. Nil means Redis, through
+	// RedisClient.
+	Backend func(SupplierManagerConfig) StoreBackend
 
 	// KV carries the meter cleanup signal to the relayers. Nil means Redis,
 	// through RedisClient.
@@ -555,8 +556,9 @@ func NewSupplierManager(
 	// backend: Redis unless the caller passes another. With no Redis client
 	// (tests) the Redis backend has no deduplicator, which handleRelay treats
 	// as fail-open.
-	mgr.backend = config.Backend
-	if mgr.backend == nil {
+	if config.Backend != nil {
+		mgr.backend = config.Backend(config)
+	} else {
 		mgr.backend = newRedisStoreBackend(componentLogger, config)
 	}
 	mgr.deduplicator = mgr.backend.deduplicator()

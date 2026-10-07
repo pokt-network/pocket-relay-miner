@@ -2,7 +2,6 @@ package pebblequeue
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -19,6 +18,9 @@ import (
 // readBatch bounds how many entries one pass reads before it delivers them.
 const readBatch = 256
 
+// defaultReleaseDelay is the Redis consumer's default ClaimIdleTimeout.
+const defaultReleaseDelay = 30 * time.Second
+
 // Consumer is the miner's side of one supplier's queue. It implements
 // transport.MinedRelayConsumer.
 type Consumer struct {
@@ -29,24 +31,33 @@ type Consumer struct {
 	bufSize  int
 	logger   logging.Logger
 
+	// releaseDelay is how long a released entry waits before it is delivered
+	// again: the idle timeout after which the Redis sweep takes back an entry
+	// XNACK released.
+	releaseDelay time.Duration
+
 	mu sync.Mutex
 	// cursor is the key of the last entry read; the next read starts after it.
-	cursor []byte
-	// reclaimUpTo: entries up to this ID were in the queue when the consumer
-	// started, so they may have been delivered by a previous run and are
-	// delivered as reclaims.
-	reclaimUpToMS, reclaimUpToSeq uint64
-	pending                       map[string]struct{}
-	released                      []string
-	closed                        bool
+	cursor   []byte
+	pending  map[string]struct{}
+	released []releasedEntry
+	closed   bool
 
-	// pause holds delivery while the process admission says so; nil never
-	// holds. Set before Consume.
-	pause redistransport.IngestionPause
+	// health and pause hold delivery while the store cannot take what the
+	// miner writes for a relay, or the process admission says so; nil holds
+	// nothing. Set before Consume.
+	health redistransport.OperableSignal
+	pause  redistransport.IngestionPause
 
-	stop     chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	stopCtx context.Context
+	stop    context.CancelFunc
+	wg      sync.WaitGroup
+}
+
+// releasedEntry is an entry handed back, due for delivery again at due.
+type releasedEntry struct {
+	id  string
+	due time.Time
 }
 
 // Consumer returns a consumer of the supplier's queue. One per supplier.
@@ -60,33 +71,45 @@ func (b *Broker) Consumer(cfg transport.ConsumerConfig) (*Consumer, error) {
 	if bufSize <= 0 {
 		bufSize = 5000
 	}
-	b.mu.Lock()
-	upMS, upSeq := st.lastMS, st.lastSeq
-	b.mu.Unlock()
+	releaseDelay := time.Duration(cfg.ClaimIdleTimeout) * time.Millisecond
+	if releaseDelay <= 0 {
+		releaseDelay = defaultReleaseDelay
+	}
+	stopCtx, stop := context.WithCancel(context.Background())
 	return &Consumer{
-		b:              b,
-		st:             st,
-		supplier:       cfg.SupplierOperatorAddress,
-		prefix:         entryPrefixOf(name),
-		bufSize:        bufSize,
-		logger:         logging.ForSupplierComponent(b.logger, "pebble_queue_consumer", cfg.SupplierOperatorAddress),
-		reclaimUpToMS:  upMS,
-		reclaimUpToSeq: upSeq,
-		pending:        make(map[string]struct{}),
-		stop:           make(chan struct{}),
+		b:            b,
+		st:           st,
+		supplier:     cfg.SupplierOperatorAddress,
+		prefix:       entryPrefixOf(name),
+		bufSize:      bufSize,
+		logger:       logging.ForSupplierComponent(b.logger, "pebble_queue_consumer", cfg.SupplierOperatorAddress),
+		releaseDelay: releaseDelay,
+		pending:      make(map[string]struct{}),
+		stopCtx:      stopCtx,
+		stop:         stop,
 	}, nil
 }
 
 // Consume starts delivery. Called at most once.
 func (c *Consumer) Consume(ctx context.Context) <-chan transport.StreamMessage {
 	out := make(chan transport.StreamMessage, c.bufSize)
+	ctx, cancel := context.WithCancel(ctx)
+	stopWatch := context.AfterFunc(c.stopCtx, cancel)
 	c.wg.Add(1)
 	go logging.RecoverGoRoutine(c.logger, "pebble_queue_consume", func(ctx context.Context) {
 		defer c.wg.Done()
 		defer close(out)
+		defer stopWatch()
+		defer cancel()
 		c.deliverLoop(ctx, out)
 	})(ctx)
 	return out
+}
+
+// SetStoreHealth holds delivery while health is not operable. Call it before
+// Consume.
+func (c *Consumer) SetStoreHealth(health redistransport.OperableSignal) {
+	c.health = health
 }
 
 // SetIngestionPause holds delivery while pause is Paused. Call it before
@@ -95,26 +118,12 @@ func (c *Consumer) SetIngestionPause(pause redistransport.IngestionPause) {
 	c.pause = pause
 }
 
-// waitUnpaused blocks while delivery is paused; false when stopping.
-func (c *Consumer) waitUnpaused(ctx context.Context) bool {
-	for c.pause != nil && c.pause.Paused() {
-		select {
-		case <-c.pause.PauseChanged():
-		case <-ctx.Done():
-			return false
-		case <-c.stop:
-			return false
-		}
-	}
-	return true
-}
-
 func (c *Consumer) deliverLoop(ctx context.Context, out chan<- transport.StreamMessage) {
 	for {
-		if !c.waitUnpaused(ctx) {
+		if redistransport.WaitOperable(ctx, c.health, c.pause) != nil {
 			return
 		}
-		msgs, err := c.nextBatch()
+		msgs, nextDue, err := c.nextBatch(time.Now())
 		if err != nil {
 			c.logger.Warn().Err(err).Msg("reading the relay queue failed; retrying on the next wake")
 		}
@@ -124,19 +133,26 @@ func (c *Consumer) deliverLoop(ctx context.Context, out chan<- transport.StreamM
 			case <-ctx.Done():
 				c.putBack(msgs[i:])
 				return
-			case <-c.stop:
-				c.putBack(msgs[i:])
-				return
 			}
 		}
 		if len(msgs) > 0 {
 			continue
 		}
+		var due <-chan time.Time
+		var timer *time.Timer
+		if !nextDue.IsZero() {
+			timer = time.NewTimer(time.Until(nextDue))
+			due = timer.C
+		}
 		select {
 		case <-c.st.notify:
+		case <-due:
 		case <-ctx.Done():
-			return
-		case <-c.stop:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+		if ctx.Err() != nil {
 			return
 		}
 	}
@@ -149,41 +165,53 @@ func (c *Consumer) putBack(msgs []transport.StreamMessage) {
 	defer c.mu.Unlock()
 	for _, m := range msgs {
 		delete(c.pending, m.ID)
-		c.released = append(c.released, m.ID)
+		c.released = append(c.released, releasedEntry{id: m.ID})
 		transport.ReleaseMinedRelayMessage(m.Message)
 	}
 }
 
-// nextBatch reads what is due: released entries first, then entries after the
-// cursor. Each is pending once returned.
-func (c *Consumer) nextBatch() ([]transport.StreamMessage, error) {
+// nextBatch reads what is due at now: released entries past their delay
+// first, as reclaims, then entries after the cursor. Each is pending once
+// returned. nextDue is when the next released entry falls due, zero for none.
+func (c *Consumer) nextBatch(now time.Time) (out []transport.StreamMessage, nextDue time.Time, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var out []transport.StreamMessage
 
 	released := c.released
 	c.released = nil
-	for _, id := range released {
-		msg, ok, err := c.readLocked(id)
+	for i, r := range released {
+		if r.due.After(now) {
+			c.released = append(c.released, r)
+			if nextDue.IsZero() || r.due.Before(nextDue) {
+				nextDue = r.due
+			}
+			continue
+		}
+		msg, ok, err := c.readLocked(r.id)
 		if err != nil {
-			c.released = append(c.released, id)
-			return out, err
+			c.released = append(c.released, released[i:]...)
+			return out, nextDue, err
 		}
 		if !ok {
 			continue // acknowledged since
 		}
 		msg.IsReclaim = true
-		c.pending[id] = struct{}{}
+		c.pending[r.id] = struct{}{}
 		out = append(out, msg)
 	}
 
+	// An entry read here has never been delivered by this process. One a
+	// previous run delivered and did not acknowledge comes back live too: its
+	// dedup marks, counters and acknowledgement were committed together, so if
+	// the acknowledgement is missing the marks are too, and it is processed as
+	// new, which is what it is for the store.
 	lower := c.prefix
 	if c.cursor != nil {
 		lower = append(append([]byte(nil), c.cursor...), 0)
 	}
 	iter, err := c.b.store.DB().NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: prefixEnd(c.prefix)})
 	if err != nil {
-		return out, fmt.Errorf("pebblequeue: iterate: %w", err)
+		return out, nextDue, fmt.Errorf("pebblequeue: iterate: %w", err)
 	}
 	defer func() { _ = iter.Close() }()
 	for valid := iter.First(); valid && len(out) < readBatch; valid = iter.Next() {
@@ -198,18 +226,10 @@ func (c *Consumer) nextBatch() ([]transport.StreamMessage, error) {
 			c.dropUndecodable(id, err)
 			continue
 		}
-		raw := key[len(c.prefix):]
-		msg.IsReclaim = !c.after(raw)
 		c.pending[id] = struct{}{}
 		out = append(out, msg)
 	}
-	return out, iter.Error()
-}
-
-// after reports whether an entry's raw ID is past what was queued at startup.
-func (c *Consumer) after(raw []byte) bool {
-	ms, seq := decodeRaw(raw)
-	return ms > c.reclaimUpToMS || (ms == c.reclaimUpToMS && seq > c.reclaimUpToSeq)
+	return out, nextDue, iter.Error()
 }
 
 func (c *Consumer) decode(id string, value []byte) (transport.StreamMessage, error) {
@@ -301,17 +321,17 @@ func (c *Consumer) AckMessage(_ context.Context, msg transport.StreamMessage) er
 }
 
 // ReleaseMessage hands a pending entry back: it is delivered again, as a
-// reclaim, on the next pass.
+// reclaim, once the release delay has passed, as the Redis sweep takes back an
+// entry XNACK released once it has been idle for the claim timeout. A relay
+// released because the store refused it is not retried at once.
 func (c *Consumer) ReleaseMessage(_ context.Context, msg transport.StreamMessage) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := c.checkOpen(msg); err != nil {
-		c.mu.Unlock()
 		return err
 	}
 	delete(c.pending, msg.ID)
-	c.released = append(c.released, msg.ID)
-	c.mu.Unlock()
-	c.st.wake()
+	c.released = append(c.released, releasedEntry{id: msg.ID, due: time.Now().Add(c.releaseDelay)})
 	return nil
 }
 
@@ -352,15 +372,14 @@ func (c *Consumer) Exists(id string) (bool, error) {
 }
 
 // EachOwnPending calls fn with every pending entry, oldest first, as a
-// reclaim. One no longer in the queue is forgotten instead.
+// reclaim. One no longer in the queue is forgotten instead. A released entry is
+// no longer pending, as an XNACK'd one is no longer in the consumer's PEL.
 func (c *Consumer) EachOwnPending(_ context.Context, fn func(transport.StreamMessage)) error {
 	c.mu.Lock()
-	ids := make([]string, 0, len(c.pending)+len(c.released))
+	ids := make([]string, 0, len(c.pending))
 	for id := range c.pending {
 		ids = append(ids, id)
 	}
-	ids = append(ids, c.released...)
-	c.released = nil
 	sortIDs(ids)
 	var msgs []transport.StreamMessage
 	var firstErr error
@@ -436,7 +455,7 @@ func (c *Consumer) StreamName() string { return c.st.name }
 // Stop ends delivery and waits for it. Ack and Release keep working.
 // Idempotent.
 func (c *Consumer) Stop() {
-	c.stopOnce.Do(func() { close(c.stop) })
+	c.stop()
 	c.wg.Wait()
 }
 
@@ -450,10 +469,6 @@ func (c *Consumer) Close() error {
 }
 
 var _ transport.MinedRelayConsumer = (*Consumer)(nil)
-
-func decodeRaw(raw []byte) (ms, seq uint64) {
-	return binary.BigEndian.Uint64(raw[:8]), binary.BigEndian.Uint64(raw[8:16])
-}
 
 // sortIDs orders "<ms>-<seq>" IDs numerically.
 func sortIDs(ids []string) {

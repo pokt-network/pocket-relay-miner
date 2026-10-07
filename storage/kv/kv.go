@@ -87,8 +87,8 @@ type Message struct {
 
 // Subscription delivers the messages of the channels it was opened on.
 type Subscription interface {
-	// Messages is closed when the subscription ends: closed, or lost (Redis),
-	// in which case the caller subscribes again.
+	// Messages is closed when the subscription is closed. A lost Redis
+	// connection does not close it: the client subscribes again on its own.
 	Messages() <-chan Message
 	Close() error
 }

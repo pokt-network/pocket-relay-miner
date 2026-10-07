@@ -3,6 +3,7 @@ package pebblequeue
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,13 +35,22 @@ type fixture struct {
 
 func open(t *testing.T, dir string) *fixture {
 	t.Helper()
+	return openWith(t, dir, nil)
+}
+
+// openWith opens a fixture whose consumer setup configures before Consume.
+func openWith(t *testing.T, dir string, setup func(*Consumer)) *fixture {
+	t.Helper()
 	store, err := pebblestore.Open(zerolog.Nop(), pebblestore.Config{Path: dir, SyncInterval: time.Hour})
 	require.NoError(t, err)
-	b := NewBroker(zerolog.Nop(), store, testPrefix)
+	b := NewBroker(zerolog.Nop(), store, nil, testPrefix)
 	c, err := b.Consumer(transport.ConsumerConfig{SupplierOperatorAddress: testSupplier})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
-	f := &fixture{t: t, dir: dir, store: store, broker: b, pub: b.Publisher(), consumer: c, cancel: cancel}
+	f := &fixture{t: t, dir: dir, store: store, broker: b, pub: b.Publisher(0), consumer: c, cancel: cancel}
+	if setup != nil {
+		setup(c)
+	}
 	f.ch = c.Consume(ctx)
 	t.Cleanup(f.close)
 	return f
@@ -135,20 +145,96 @@ func TestQueue_AnAckedEntryIsNeverDeliveredAgain(t *testing.T) {
 
 	again := f.receive(1)
 	require.Equal(t, got[1].ID, again[0].ID, "only the unacknowledged entry comes back")
-	require.True(t, again[0].IsReclaim, "an entry from a previous run is a reclaim")
+	// Live, as XREADGROUP ">" delivers an entry no consumer holds: a reclaim
+	// would not advance the claim gate's watermark, so a restart with a
+	// backlog and no new traffic would hold every claim to its cap height.
+	require.False(t, again[0].IsReclaim, "an entry found at startup is delivered live")
 	f.nothingDelivered()
 }
 
-func TestQueue_ReleaseRedeliversAsAReclaim(t *testing.T) {
+// A released entry waits for the release delay, as an XNACK'd entry waits for
+// the sweep: retried at once, a relay the store refuses would spin.
+func TestQueue_AReleasedEntryIsNotRedeliveredAtOnce(t *testing.T) {
 	f := open(t, t.TempDir())
 	f.publish(1)
 	got := f.receive(1)
 
 	require.NoError(t, f.consumer.ReleaseMessage(context.Background(), got[0]))
 
-	again := f.receive(1)
-	require.Equal(t, got[0].ID, again[0].ID)
-	require.True(t, again[0].IsReclaim)
+	f.nothingDelivered()
+}
+
+func TestQueue_AReleasedEntryIsDueAfterTheDelayAsAReclaim(t *testing.T) {
+	store, err := pebblestore.Open(zerolog.Nop(), pebblestore.Config{Path: t.TempDir(), SyncInterval: time.Hour})
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+	b := NewBroker(zerolog.Nop(), store, nil, testPrefix)
+	c, err := b.Consumer(transport.ConsumerConfig{SupplierOperatorAddress: testSupplier, ClaimIdleTimeout: 1000})
+	require.NoError(t, err)
+	require.NoError(t, b.Publisher(0).Publish(context.Background(), relay("s1", 0)))
+	now := time.Now()
+	first, _, err := c.nextBatch(now)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+
+	released := time.Now()
+	require.NoError(t, c.ReleaseMessage(context.Background(), first[0]))
+
+	early, due, err := c.nextBatch(released)
+	require.NoError(t, err)
+	require.Empty(t, early)
+	require.False(t, due.Before(released.Add(time.Second)), "due one release delay later")
+	late, due, err := c.nextBatch(due)
+	require.NoError(t, err)
+	require.Len(t, late, 1)
+	require.Equal(t, first[0].ID, late[0].ID)
+	require.True(t, late[0].IsReclaim)
+	require.True(t, due.IsZero(), "nothing else released")
+}
+
+// gate is a store health signal a test opens and closes.
+type gate struct {
+	mu       sync.Mutex
+	operable bool
+	changed  chan struct{}
+}
+
+func (g *gate) Operable() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.operable
+}
+
+func (g *gate) Changed() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.changed
+}
+
+func (g *gate) set(operable bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.operable = operable
+	close(g.changed)
+	g.changed = make(chan struct{})
+}
+
+// Nothing is delivered while the store cannot take what the miner writes for
+// a relay, as the Redis consumer does not read then.
+func TestQueue_NothingIsDeliveredWhileTheStoreIsNotOperable(t *testing.T) {
+	g := &gate{changed: make(chan struct{})}
+	f := openWith(t, t.TempDir(), func(c *Consumer) { c.SetStoreHealth(g) })
+	f.publish(1)
+
+	select {
+	case m := <-f.ch:
+		t.Fatalf("delivered %s while the store was not operable", m.ID)
+	case <-time.After(100 * time.Millisecond):
+	}
+	g.set(true)
+
+	got := f.receive(1)
+	require.Equal(t, "relay-0", string(got[0].Message.RelayBytes))
 }
 
 func TestQueue_EachOwnPendingVisitsWhatIsDeliveredAndNotAcked(t *testing.T) {
@@ -265,4 +351,89 @@ func TestQueue_AnInvalidRelayIsRefusedBeforeTheQueue(t *testing.T) {
 	bad := relay("", 0)
 	require.Error(t, f.pub.Publish(context.Background(), bad))
 	f.nothingDelivered()
+}
+
+// chargeFixture is a queue whose publisher writes charges for the relay meter.
+func chargeFixture(t *testing.T, interval time.Duration) (*fixture, *kv.Pebble, *redistransport.ChargeLedger, chan int64) {
+	t.Helper()
+	f := open(t, t.TempDir())
+	counters := kv.NewPebble(zerolog.Nop(), f.store, redistransport.NewKeyBuilder(config.RedisNamespaceConfig{}))
+	t.Cleanup(func() { _ = counters.Close() })
+	f.broker.counters = counters
+	f.pub = f.broker.Publisher(interval)
+	ledger := redistransport.NewChargeLedger()
+	written := make(chan int64, 16)
+	ledger.OnWritten(func(key string, amount, consumed int64) {
+		ledger.FinishWrite(key, amount)
+		written <- consumed
+	})
+	f.pub.SetChargeLedger(ledger)
+	return f, counters, ledger, written
+}
+
+// A relay served and not mined still spends its budget: its charge is written
+// on the next tick, with no publish to carry it.
+func TestQueue_ChargesWithNoPublishAreWrittenOnTheTick(t *testing.T) {
+	_, counters, ledger, written := chargeFixture(t, 10*time.Millisecond)
+
+	ledger.Add("meter:s1:sup", testSupplier, 7, time.Hour)
+
+	select {
+	case consumed := <-written:
+		require.Equal(t, int64(7), consumed)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the charge was never written")
+	}
+	value, err := counters.Get(context.Background(), "meter:s1:sup")
+	require.NoError(t, err)
+	require.Equal(t, "7", string(value))
+}
+
+// Close writes the charges no publish carried, as the batcher's final flush
+// does: a graceful restart must read them.
+func TestQueue_CloseWritesTheChargesLeft(t *testing.T) {
+	f, _, ledger, _ := chargeFixture(t, 0)
+	ledger.Add("meter:s1:sup", testSupplier, 9, time.Hour)
+
+	require.NoError(t, f.pub.Close())
+
+	f = f.restart()
+	counters := kv.NewPebble(zerolog.Nop(), f.store, redistransport.NewKeyBuilder(config.RedisNamespaceConfig{}))
+	defer func() { _ = counters.Close() }()
+	value, err := counters.Get(context.Background(), "meter:s1:sup")
+	require.NoError(t, err)
+	require.Equal(t, "9", string(value))
+}
+
+// The meter's Del of a counter (a session cleared) cannot land between the
+// counter's read and its rewrite: if it did, the rewrite would bring back the
+// value the Del removed. A Del after the rewrite leaves no counter, as DEL
+// after INCRBY does on Redis.
+func TestQueue_AClearedCounterDoesNotComeBack(t *testing.T) {
+	f, counters, ledger, _ := chargeFixture(t, 0)
+	ctx := context.Background()
+	ledger.Add("meter:s1:sup", testSupplier, 100, time.Hour)
+	f.publish(1)
+
+	deleted := make(chan struct{})
+	f.broker.mu.Lock()
+	f.broker.afterCountersRead = func() {
+		f.broker.afterCountersRead = nil
+		go func() {
+			_ = counters.Del(ctx, "meter:s1:sup")
+			close(deleted)
+		}()
+		// Give an unserialized Del the time to land before the write.
+		select {
+		case <-deleted:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	f.broker.mu.Unlock()
+	ledger.Add("meter:s1:sup", testSupplier, 5, time.Hour)
+	f.publish(1)
+	<-deleted
+
+	_, err := counters.Get(ctx, "meter:s1:sup")
+	require.ErrorIs(t, err, kv.ErrNotFound, "the Del ran after the rewrite, so nothing is left")
 }

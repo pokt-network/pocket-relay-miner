@@ -31,9 +31,10 @@ const janitorInterval = time.Minute
 // Pebble is the Store over the embedded store, with pub/sub delivered inside
 // the process.
 //
-// One mutex serializes the operations that read before they write (SetNX,
-// CompareAndDelete, SetKeepTTL, Expire), which is what Redis's single thread
-// gave them.
+// One mutex serializes every write, and every read that a write depends on
+// (SetNX, CompareAndDelete, SetKeepTTL, Expire, the janitor), which is what
+// Redis's single thread gave them: a write never lands between another's read
+// and its write.
 type Pebble struct {
 	store  *pebblestore.Store
 	kb     *redisutil.KeyBuilder
@@ -85,6 +86,15 @@ func (p *Pebble) Close() error {
 }
 
 func (p *Pebble) KB() *redisutil.KeyBuilder { return p.kb }
+
+// WithLock runs fn holding the store's write lock, for a writer outside this
+// type that reads and rewrites string keys (the relay queue's meter counters):
+// a Del or the janitor cannot land between its read and its write.
+func (p *Pebble) WithLock(fn func() error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return fn()
+}
 
 // StringKey is where a string key is stored; the relay queue writes the meter
 // counters there, in the same batch as its entries.
@@ -190,6 +200,8 @@ func (p *Pebble) MGet(_ context.Context, keys ...string) ([][]byte, error) {
 }
 
 func (p *Pebble) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.commit(func(b *pebble.Batch) {
 		_ = b.Set(StringKey(key), EncodeValue(expiryOf(p.now(), ttl), value), nil)
 	})
@@ -197,6 +209,8 @@ func (p *Pebble) Set(_ context.Context, key string, value []byte, ttl time.Durat
 
 // SetAll is one batch: every entry or none.
 func (p *Pebble) SetAll(_ context.Context, entries ...Entry) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	now := p.now()
 	return p.commit(func(b *pebble.Batch) {
 		for _, e := range entries {
@@ -242,6 +256,8 @@ func (p *Pebble) CompareAndDelete(_ context.Context, key string, expected []byte
 }
 
 func (p *Pebble) Del(_ context.Context, keys ...string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.commit(func(b *pebble.Batch) {
 		for _, key := range keys {
 			_ = b.Delete(StringKey(key), nil)
@@ -337,12 +353,26 @@ func (p *Pebble) SAdd(_ context.Context, key string, members ...string) error {
 	})
 }
 
+// SRem removes members; a set left empty is deleted, as Redis deletes it.
 func (p *Pebble) SRem(_ context.Context, key string, members ...string) error {
-	return p.commit(func(b *pebble.Batch) {
+	if len(members) == 0 {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	err := p.commit(func(b *pebble.Batch) {
 		for _, m := range members {
 			_ = b.Delete(append(setMemberPrefix(key), m...), nil)
 		}
 	})
+	if err != nil {
+		return err
+	}
+	left, err := p.members(key)
+	if err != nil || len(left) > 0 {
+		return err
+	}
+	return p.commit(func(b *pebble.Batch) { _ = b.Delete(setMetaKey(key), nil) })
 }
 
 func (p *Pebble) members(key string) ([]string, error) {

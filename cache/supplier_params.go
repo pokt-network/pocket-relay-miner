@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -88,25 +89,28 @@ func (c *RedisSupplierParamCache) Start(ctx context.Context) error {
 	return nil
 }
 
-// subscribeToInvalidations listens for cache invalidation events from other instances.
+// subscribeToInvalidations listens for cache invalidation events from other
+// instances, subscribing again whenever the subscription fails or is lost.
 func (c *RedisSupplierParamCache) subscribeToInvalidations(ctx context.Context) {
 	defer c.wg.Done()
+	redisutil.NewReconnectionLoop(c.logger, "pubsub_supplier_params", c.store.Ping, c.runInvalidations).Run(ctx)
+}
 
+func (c *RedisSupplierParamCache) runInvalidations(ctx context.Context) error {
 	channel := c.store.KB().SupplierParamsInvalidateChannel()
 	sub, err := c.store.Subscribe(ctx, channel)
 	if err != nil {
-		c.logger.Warn().Err(err).Msg("supplier params invalidation subscription failed; the cache refreshes on its TTL")
-		return
+		return fmt.Errorf("failed to subscribe to supplier params invalidations: %w", err)
 	}
 	defer func() { _ = sub.Close() }()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case _, ok := <-sub.Messages():
 			if !ok {
-				return
+				return fmt.Errorf("supplier params invalidation subscription closed")
 			}
 			// Clear local cache
 			c.localCacheMu.Lock()

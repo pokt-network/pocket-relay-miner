@@ -61,13 +61,20 @@ The relay queue between the relayer and the miner, the sessions and their
 dedup marks, the relay meter's counters and the caches live in an embedded
 database under `storage.path`. Keep it on local disk.
 
-- Writes are synced to disk every `storage.sync_interval` (default 1 s), not
-  one by one. A crash of the process, of the operating system or a power loss
-  can lose what was written since the last sync: relays served in that window
-  are not claimed, and the relay meter forgets the budget they used.
+- A write reaches the operating system before the call returns, so a crash or
+  a kill of the process loses nothing.
+- The disk is synced every `storage.sync_interval` (default 1 s), not write by
+  write. An operating system crash or a power loss can lose what was written
+  since the last sync: relays served in that window are not claimed, and the
+  relay meter forgets the budget they used. A write that records a claim or
+  proof transaction is synced before the miner goes on.
 - Within the embedded store a relay is counted once whatever is lost: its dedup
   mark, its session counters and the removal of its queue entry are written
   together, and the database recovers to a prefix of what was written.
+- Run one standalone process per Redis namespace. In this version the supplier
+  leases are in Redis while the relay queue is in each process's store, so a
+  second process on the same namespace would take suppliers whose relays the
+  other process queues.
 
 ## Startup and shutdown
 

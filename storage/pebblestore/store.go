@@ -2,15 +2,15 @@
 // state in instead of Redis: one Pebble database per process, shared by the
 // relayer and the miner.
 //
-// Durability model. Every write is a pebble.Batch committed without an fsync:
-// it is in the write-ahead log, in the OS page cache, the moment Commit
-// returns, so a crash of this PROCESS loses nothing. What an OS crash or a
-// power loss can lose is the tail of the log since the last fsync, and the log
-// is replayed as a prefix: a batch that survives implies every earlier batch
-// survived, and a batch is all or nothing. Sync fsyncs the log, which also makes
-// every earlier unsynced batch durable; the store calls it on a timer
-// (SyncInterval) so that tail is bounded, and the miner calls it where a lost
-// tail would cost more than rewards (before a claim is broadcast).
+// Durability model. Every write is a pebble.Batch committed with pebble.Sync,
+// but the write-ahead log's syncs are left to a timer (walFS): when Commit
+// returns, the batch has been written to the OS, so a crash of this PROCESS
+// loses nothing. What an OS crash or a power loss can lose is the tail of the
+// log since the last real fsync, and the log is replayed as a prefix: a batch
+// that survives implies every earlier batch survived, and a batch is all or
+// nothing. Sync fsyncs the log for real; the store calls it every SyncInterval
+// so that tail is bounded, and callers call it where a lost tail would cost more
+// than rewards.
 package pebblestore
 
 import (
@@ -53,6 +53,7 @@ type Config struct {
 // Store is an open database.
 type Store struct {
 	db     *pebble.DB
+	wal    *walFS
 	logger logging.Logger
 
 	dirty     atomic.Bool
@@ -80,11 +81,17 @@ func Open(logger logging.Logger, cfg Config) (*Store, error) {
 		cacheBytes = DefaultCacheBytes
 	}
 
+	fs := cfg.FS
+	if fs == nil {
+		fs = vfs.Default
+	}
+	wal := newWALFS(fs)
+
 	cache := pebble.NewCache(cacheBytes)
 	defer cache.Unref() // the DB holds its own reference
 	opts := &pebble.Options{
 		Cache:  cache,
-		FS:     cfg.FS,
+		FS:     wal,
 		Logger: pebbleLogger{logger: logger},
 	}
 	db, err := pebble.Open(cfg.Path, opts)
@@ -94,6 +101,7 @@ func Open(logger logging.Logger, cfg Config) (*Store, error) {
 
 	s := &Store{
 		db:     db,
+		wal:    wal,
 		logger: logging.ForComponent(logger, "pebblestore"),
 		stop:   make(chan struct{}),
 	}
@@ -108,9 +116,10 @@ func Open(logger logging.Logger, cfg Config) (*Store, error) {
 // DB is the database, for the packages that keep their state in it.
 func (s *Store) DB() *pebble.DB { return s.db }
 
-// Commit commits b without an fsync (see the package doc) and closes it.
+// Commit commits b to the OS, without an fsync (see the package doc), and
+// closes it.
 func (s *Store) Commit(b *pebble.Batch) error {
-	err := b.Commit(pebble.NoSync)
+	err := b.Commit(pebble.Sync)
 	_ = b.Close()
 	if err != nil {
 		return fmt.Errorf("pebblestore: commit: %w", err)
@@ -123,7 +132,7 @@ func (s *Store) Commit(b *pebble.Batch) error {
 // returns.
 func (s *Store) Sync() error {
 	s.dirty.Store(false)
-	if err := s.db.LogData(nil, pebble.Sync); err != nil {
+	if err := s.wal.syncAll(); err != nil {
 		s.dirty.Store(true)
 		return fmt.Errorf("pebblestore: sync: %w", err)
 	}

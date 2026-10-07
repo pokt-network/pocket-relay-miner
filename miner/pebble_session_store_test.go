@@ -7,7 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/storage/pebblestore"
+	"github.com/pokt-network/pocket-relay-miner/transport/pebblequeue"
 )
 
 // The embedded session store applies the same state rules as the Redis one
@@ -107,7 +112,7 @@ func TestPebbleSessionStore_AnExpiredSessionIsGoneWithItsMarks(t *testing.T) {
 	require.NoError(t, err)
 	old.LastUpdatedAt = time.Now().Add(-sessions.ttl - time.Minute)
 	h.backend.mu.Lock()
-	require.NoError(t, sessions.writeLocked(old))
+	require.NoError(t, sessions.writeLocked(old, old))
 	h.backend.mu.Unlock()
 
 	all, err := s.GetBySupplier(ctx)
@@ -166,4 +171,112 @@ func TestPebbleDeduplicator_MarksOnceAndForgetsAfterTheTTL(t *testing.T) {
 	dup, err = d.IsDuplicate(ctx, []byte("r2"), "s2")
 	require.NoError(t, err)
 	require.False(t, dup)
+}
+
+// eachSessionStore runs body against both backends' session stores.
+func eachSessionStore(t *testing.T, body func(t *testing.T, s SessionStore)) {
+	t.Run("redis", func(t *testing.T) {
+		client, _ := newTestRedis(t)
+		s := NewRedisSessionStore(testLogger(), client, SessionStoreConfig{SupplierAddress: "pokt1save", SessionTTL: time.Hour})
+		t.Cleanup(func() { _ = s.Close() })
+		body(t, s)
+	})
+	t.Run("pebble", func(t *testing.T) {
+		_, s := newPebbleSessions(t)
+		body(t, s)
+	})
+}
+
+// A Save from a snapshot read before relays were counted must not take the
+// count back: the lifecycle saves snapshots it read under another lock.
+func TestSessionStore_SaveKeepsTheCountedRelays(t *testing.T) {
+	eachSessionStore(t, func(t *testing.T, s SessionStore) {
+		ctx := context.Background()
+		stale := &SessionSnapshot{SessionID: "s1", SupplierOperatorAddress: "pokt1save", State: SessionStateActive}
+		_, err := s.CreateIfAbsent(ctx, stale)
+		require.NoError(t, err)
+		require.NoError(t, s.IncrementRelayCount(ctx, "s1", 7))
+		require.NoError(t, s.IncrementRelayCount(ctx, "s1", 5))
+
+		stale.State = SessionStateClaimed
+		stale.ClaimTxHash = "ABC"
+		require.NoError(t, s.Save(ctx, stale))
+
+		snap, err := s.Get(ctx, "s1")
+		require.NoError(t, err)
+		require.Equal(t, int64(2), snap.RelayCount)
+		require.Equal(t, uint64(12), snap.TotalComputeUnits)
+		require.Equal(t, SessionStateClaimed, snap.State, "the metadata is written")
+		require.Equal(t, "ABC", snap.ClaimTxHash)
+	})
+}
+
+// A write that records a claim tx hash is fsynced before Save returns, so an
+// OS crash right after the broadcast cannot forget the claim was sent.
+func TestPebbleSessionStore_ATxHashSurvivesAnOSCrash(t *testing.T) {
+	fs := vfs.NewStrictMem()
+	require.NoError(t, fs.MkdirAll("db", 0o755))
+	root, err := fs.OpenDir("")
+	require.NoError(t, err)
+	require.NoError(t, root.Sync())
+	require.NoError(t, root.Close())
+	open := func() (*pebblestore.Store, SessionStore) {
+		store, err := pebblestore.Open(zerolog.Nop(), pebblestore.Config{Path: "db", FS: fs, SyncInterval: time.Hour})
+		require.NoError(t, err)
+		backend := NewPebbleStoreBackend(zerolog.Nop(), store, pebblequeue.NewBroker(zerolog.Nop(), store, nil, "ha:relays"), SupplierManagerConfig{BlockTimeSeconds: 30})
+		return store, backend.sessionStore("pokt1sync")
+	}
+	ctx := context.Background()
+	store, s := open()
+
+	claimed := &SessionSnapshot{SessionID: "claimed", State: SessionStateClaimed, ClaimTxHash: "ABC"}
+	require.NoError(t, s.Save(ctx, &SessionSnapshot{SessionID: "plain", State: SessionStateActive}))
+	require.NoError(t, s.Save(ctx, claimed))
+	require.NoError(t, s.Save(ctx, &SessionSnapshot{SessionID: "after", State: SessionStateActive}))
+
+	fs.SetIgnoreSyncs(true)
+	_ = store.Close()
+	fs.ResetToSyncedState()
+	fs.SetIgnoreSyncs(false)
+	store, s = open()
+	defer func() { _ = store.Close() }()
+
+	snap, err := s.Get(ctx, "claimed")
+	require.NoError(t, err)
+	require.NotNil(t, snap, "the claim tx hash write was fsynced")
+	require.Equal(t, "ABC", snap.ClaimTxHash)
+	plain, err := s.Get(ctx, "plain")
+	require.NoError(t, err)
+	require.NotNil(t, plain, "an earlier write is kept with it: the log is a prefix")
+	after, err := s.Get(ctx, "after")
+	require.NoError(t, err)
+	require.Nil(t, after, "control: a write with no tx hash is not fsynced, so the crash took it")
+}
+
+// What no supplier's scan reaches is swept by any scan: an expired session of
+// a supplier no longer served, and the expired marks of a session that has no
+// snapshot. Live state is kept.
+func TestPebbleBackend_AScanSweepsWhatNoSupplierScanReaches(t *testing.T) {
+	h, s := newPebbleSessions(t)
+	ctx := context.Background()
+	gone := h.backend.sessionStore("pokt1removed").(*pebbleSessionStore)
+	old := time.Now().Add(-gone.ttl - time.Minute)
+	h.backend.mu.Lock()
+	expired := &SessionSnapshot{SessionID: "stale", State: SessionStateActive, LastUpdatedAt: old}
+	require.NoError(t, gone.writeLocked(expired, expired))
+	batch := h.store.DB().NewBatch()
+	h.backend.dedup.markLocked(batch, "stale", []byte("h1"), old)
+	h.backend.dedup.markLocked(batch, "orphan", []byte("h2"), old.Add(-h.backend.dedupCf.ttl()))
+	h.backend.dedup.markLocked(batch, "live", []byte("h3"), time.Now())
+	require.NoError(t, h.store.Commit(batch))
+	h.backend.mu.Unlock()
+	require.Equal(t, int64(1), h.marked("orphan"), "premise: the orphan's mark is stored")
+
+	_, err := s.GetBySupplier(ctx)
+	require.NoError(t, err)
+
+	require.Zero(t, h.count([]byte(pebbleSessionPrefix+"pokt1removed\x00")), "the removed supplier's expired session")
+	require.Zero(t, h.marked("stale"))
+	require.Zero(t, h.marked("orphan"), "marks with no snapshot, past their TTL")
+	require.Equal(t, int64(1), h.marked("live"), "live marks are kept")
 }
