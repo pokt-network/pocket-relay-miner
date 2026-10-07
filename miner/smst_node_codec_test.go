@@ -33,7 +33,7 @@ func TestANodeSurvivesTheRoundTripWhateverItCompressesTo(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
 	const supplier, sessionID = "pokt1codec_roundtrip", "sess-codec-roundtrip"
-	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*RedisMapStore)
+	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*nodeStore)
 	require.True(t, ok)
 	hashKey := client.KB().SMSTNodesKey(supplier, sessionID)
 
@@ -83,7 +83,7 @@ func TestANodeWrittenByThePreviousBinaryIsStillRead(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
 	const supplier, sessionID = "pokt1codec_oldbinary", "sess-codec-oldbinary"
-	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*RedisMapStore)
+	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*nodeStore)
 	require.True(t, ok)
 	hashKey := client.KB().SMSTNodesKey(supplier, sessionID)
 

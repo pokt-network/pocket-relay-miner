@@ -176,7 +176,7 @@ func TestRedisMapStore_ALargeNodesWriteIsSplitAndFullyWritten(t *testing.T) {
 	client, _ := newTestRedis(t)
 	counter := newNamedCommandCounter(client)
 	const supplier, sessionID = "pokt1nodes_chunks", "sess-nodes-chunks"
-	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*RedisMapStore)
+	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*nodeStore)
 	require.True(t, ok)
 
 	// About 600 KiB of values: more than two nodesWriteChunkBytes.
@@ -262,7 +262,7 @@ func TestRedisMapStore_AFullRelayBatchOfNodesGoesInPiecesOfAtMost32KiB(t *testin
 	client, _ := newTestRedis(t)
 	recorder := newHSetBytesRecorder(client)
 	const supplier, sessionID = "pokt1nodes_32k_pieces", "sess-nodes-32k-pieces"
-	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*RedisMapStore)
+	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*nodeStore)
 	require.True(t, ok)
 
 	// relayBatchCap leaves of about 1 KiB each.

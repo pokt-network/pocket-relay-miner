@@ -66,9 +66,8 @@ func NewPebbleStoreBackend(logger logging.Logger, store *pebblestore.Store, brok
 
 func (b *PebbleStoreBackend) deduplicator() Deduplicator { return b.dedup }
 
-// smstStore keeps the session trees in Redis in this version.
 func (b *PebbleStoreBackend) smstStore(supplier string) smstStore {
-	return newRedisSMSTStore(b.config.RedisClient, supplier)
+	return &pebbleSMSTStore{b: b, supplier: supplier}
 }
 
 func (b *PebbleStoreBackend) sessionStore(supplier string) SessionStore {
@@ -84,8 +83,8 @@ func (b *PebbleStoreBackend) forSupplier(supplier string, dedup Deduplicator) (s
 	if err != nil {
 		return supplierStores{}, fmt.Errorf("failed to create consumer for %s: %w", supplier, err)
 	}
-	// The relays read here are written to the tree in Redis, so delivery waits
-	// on Redis health as the Redis consumer does.
+	// The supplier's lease and its claim and proof tracking are still in
+	// Redis, so delivery waits on Redis health as the Redis consumer does.
 	consumer.SetStoreHealth(b.config.StoreHealth)
 	sessions := b.sessionStore(supplier).(*pebbleSessionStore)
 	var commit relayCommitter
@@ -404,8 +403,8 @@ var _ SessionStore = (*pebbleSessionStore)(nil)
 
 // sweepLocked deletes what Redis TTLs would have expired and no supplier's
 // scan reaches: the sessions of every supplier, including one no longer
-// served, and the dedup marks of every session, including one with no
-// snapshot.
+// served, the dedup marks of every session, including one with no snapshot,
+// and the session trees' expired records and nodes.
 func (b *PebbleStoreBackend) sweepLocked(now time.Time, ttl time.Duration) error {
 	batch := b.store.DB().NewBatch()
 	found := 0
@@ -428,6 +427,12 @@ func (b *PebbleStoreBackend) sweepLocked(now time.Time, ttl time.Duration) error
 		_ = batch.Close()
 		return err
 	}
+	smst, err := b.sweepSMSTLocked(batch, now)
+	if err != nil {
+		_ = batch.Close()
+		return err
+	}
+	found += smst
 	ttls := []byte(pebbleDedupTTLPrefix)
 	iter, err = b.store.DB().NewIter(&pebble.IterOptions{LowerBound: ttls, UpperBound: keyUpperBound(ttls)})
 	if err != nil {

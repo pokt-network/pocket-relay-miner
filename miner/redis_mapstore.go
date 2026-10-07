@@ -9,17 +9,13 @@ import (
 
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/smt/kvstore"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/observability"
 )
 
-// RedisMapStore implements kvstore.MapStore using Redis hashes with pipelining optimization.
-// This enables shared storage across HA instances, avoiding local disk IOPS issues.
-//
-// The RedisMapStore uses a single Redis hash to store all key-value pairs for a session's SMST.
-// This provides O(1) access for Get/Set/Delete operations and enables instant failover since
-// all instances can access the same Redis data.
+// nodeStore implements kvstore.MapStore over a nodeBackend -- a Redis hash, or
+// the embedded store -- with pipelining. On Redis every instance reads the same
+// hash, which is what makes failover instant.
 //
 // Pipelining Optimization:
 // During SMST Commit(), the library calls Set() 10-20 times for dirty nodes and
@@ -44,11 +40,12 @@ import (
 //	Key: Built via KeyBuilder.SMSTNodesKey(supplierAddress, sessionID)
 //	Fields: hex-encoded SMST node keys
 //	Values: raw SMST node data
-type RedisMapStore struct {
-	redisClient *redisutil.Client
-	hashKey     string // Redis hash key built via KeyBuilder.SMSTNodesKey()
-	liveRootKey string // the session's live_root, written by FlushOrphansWithLiveRoot
-	ctx         context.Context
+type nodeStore struct {
+	// backend is where the nodes are stored: a Redis hash, or the embedded
+	// store. Everything else here -- the buffers, the orphan rules, the
+	// codec -- is the same for both.
+	backend nodeBackend
+	ctx     context.Context
 
 	// Pipeline buffers — separated because they have different lifetimes.
 	//   pipelineBuffer is flushed by every FlushPipeline (one round-trip per
@@ -67,11 +64,18 @@ type RedisMapStore struct {
 	orphanBuffer   map[string]struct{} // field set (orphan deletes pending checkpoint)
 }
 
-func newRedisMapStore(ctx context.Context, redisClient *redisutil.Client, supplierAddress, sessionID string) *RedisMapStore {
-	return &RedisMapStore{
-		redisClient:    redisClient,
-		hashKey:        redisClient.KB().SMSTNodesKey(supplierAddress, sessionID),
-		liveRootKey:    redisClient.KB().SMSTLiveRootKey(supplierAddress, sessionID),
+func newRedisMapStore(ctx context.Context, redisClient *redisutil.Client, supplierAddress, sessionID string) *nodeStore {
+	return newNodeStore(ctx, &redisNodes{
+		client:      redisClient,
+		hashKey:     redisClient.KB().SMSTNodesKey(supplierAddress, sessionID),
+		liveRootKey: redisClient.KB().SMSTLiveRootKey(supplierAddress, sessionID),
+	})
+}
+
+// newNodeStore is the node store over backend.
+func newNodeStore(ctx context.Context, backend nodeBackend) *nodeStore {
+	return &nodeStore{
+		backend:        backend,
 		ctx:            ctx,
 		pipelineBuffer: make(map[string][]byte),
 		orphanBuffer:   make(map[string]struct{}),
@@ -89,28 +93,14 @@ func newRedisMapStore(ctx context.Context, redisClient *redisutil.Client, suppli
 //
 // HSCAN may return a field twice; this passes both through, because what a
 // repeat means belongs to the caller.
-func (s *RedisMapStore) RangeNodes(ctx context.Context, fn func(field string, node []byte, storedBytes int) error) error {
-	var cursor uint64
-	for {
-		kvs, next, err := s.redisClient.HScan(ctx, s.hashKey, cursor, "", coldLeavesScanCount).Result()
-		if err != nil {
-			return err
+func (s *nodeStore) RangeNodes(ctx context.Context, fn func(field string, node []byte, storedBytes int) error) error {
+	return s.backend.scan(ctx, func(field string, stored []byte) error {
+		node, decErr := decompressNode(stored)
+		if decErr != nil {
+			return fmt.Errorf("field=%s hash=%s: %w", field, s.backend.name(), decErr)
 		}
-		for i := 0; i+1 < len(kvs); i += 2 {
-			field, stored := kvs[i], kvs[i+1]
-			node, decErr := decompressNode([]byte(stored))
-			if decErr != nil {
-				return fmt.Errorf("field=%s hash=%s: %w", field, s.hashKey, decErr)
-			}
-			if fnErr := fn(field, node, len(stored)); fnErr != nil {
-				return fnErr
-			}
-		}
-		cursor = next
-		if cursor == 0 {
-			return nil
-		}
-	}
+		return fn(field, node, len(stored))
+	})
 }
 
 // Get retrieves a value from the Redis hash.
@@ -131,7 +121,7 @@ func (s *RedisMapStore) RangeNodes(ctx context.Context, fn func(field string, no
 // The official reference implementation (smt/kvstore/simplemap) also
 // returns an error on missing keys (ErrKVStoreKeyNotFound), so this
 // brings us in line with the canonical contract.
-func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
+func (s *nodeStore) Get(key []byte) ([]byte, error) {
 	start := time.Now()
 	defer func() {
 		observability.SMSTStoreOperationDuration.WithLabelValues("get").Observe(time.Since(start).Seconds())
@@ -156,10 +146,10 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	}
 	s.pipelineMu.Unlock()
 
-	stored, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
-	if err == redis.Nil {
+	stored, found, err := s.backend.get(s.ctx, field)
+	if err == nil && !found {
 		observability.SMSTStoreOperations.WithLabelValues("get", "not_found").Inc()
-		return nil, fmt.Errorf("%w: field=%s hash=%s", ErrSMSTNodeMissing, field, s.hashKey)
+		return nil, fmt.Errorf("%w: field=%s hash=%s", ErrSMSTNodeMissing, field, s.backend.name())
 	}
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("get", "error").Inc()
@@ -173,7 +163,7 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("get", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("get", "store_error").Inc()
-		return nil, fmt.Errorf("field=%s hash=%s: %w", field, s.hashKey, err)
+		return nil, fmt.Errorf("field=%s hash=%s: %w", field, s.backend.name(), err)
 	}
 	// Defense-in-depth: a zero-length payload would also panic the smt
 	// library (data[:1] in isLeafNode). Reject explicitly so we never
@@ -181,7 +171,7 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	if len(val) == 0 {
 		observability.SMSTStoreOperations.WithLabelValues("get", "not_found").Inc()
 		return nil, fmt.Errorf("%w: empty payload for field=%s hash=%s",
-			ErrSMSTNodeMissing, field, s.hashKey)
+			ErrSMSTNodeMissing, field, s.backend.name())
 	}
 	observability.SMSTStoreOperations.WithLabelValues("get", "success").Inc()
 	return val, nil
@@ -194,7 +184,7 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 //
 // When pipelining is enabled (via BeginPipeline), Set() buffers the operation
 // instead of executing it immediately. Call FlushPipeline() to execute all buffered operations.
-func (s *RedisMapStore) Set(key, value []byte) error {
+func (s *nodeStore) Set(key, value []byte) error {
 	field := hex.EncodeToString(key)
 
 	// Check if we're in pipeline mode
@@ -232,7 +222,7 @@ func (s *RedisMapStore) Set(key, value []byte) error {
 		observability.SMSTStoreOperationDuration.WithLabelValues("set").Observe(time.Since(start).Seconds())
 	}()
 
-	err := s.redisClient.HSet(s.ctx, s.hashKey, field, compressNode(value)).Err()
+	err := s.backend.put(s.ctx, []string{field}, [][]byte{compressNode(value)})
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("set", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("set", "store_error").Inc()
@@ -255,7 +245,7 @@ func (s *RedisMapStore) Set(key, value []byte) error {
 //
 // Non-pipeline mode keeps the immediate HDEL for ClearAll / direct callers
 // (unused today by the SMST manager but kept for the kvstore interface).
-func (s *RedisMapStore) Delete(key []byte) error {
+func (s *nodeStore) Delete(key []byte) error {
 	field := hex.EncodeToString(key)
 
 	s.pipelineMu.Lock()
@@ -282,7 +272,7 @@ func (s *RedisMapStore) Delete(key []byte) error {
 		observability.SMSTStoreOperationDuration.WithLabelValues("delete").Observe(time.Since(start).Seconds())
 	}()
 
-	err := s.redisClient.HDel(s.ctx, s.hashKey, field).Err()
+	err := s.backend.del(s.ctx, field)
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("delete", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("delete", "store_error").Inc()
@@ -295,13 +285,13 @@ func (s *RedisMapStore) Delete(key []byte) error {
 // Len returns the number of keys in the Redis hash.
 //
 // This operation is O(1) as it uses Redis's HLEN command.
-func (s *RedisMapStore) Len() (int, error) {
+func (s *nodeStore) Len() (int, error) {
 	start := time.Now()
 	defer func() {
 		observability.SMSTStoreOperationDuration.WithLabelValues("len").Observe(time.Since(start).Seconds())
 	}()
 
-	count, err := s.redisClient.HLen(s.ctx, s.hashKey).Result()
+	count, err := s.backend.count(s.ctx)
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("len", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("len", "store_error").Inc()
@@ -315,7 +305,7 @@ func (s *RedisMapStore) Len() (int, error) {
 //
 // This is an atomic operation that removes all SMST nodes for the session.
 // After calling ClearAll, Len() will return 0.
-func (s *RedisMapStore) ClearAll() error {
+func (s *nodeStore) ClearAll() error {
 	start := time.Now()
 	defer func() {
 		observability.SMSTStoreOperationDuration.WithLabelValues("clear_all").Observe(time.Since(start).Seconds())
@@ -327,7 +317,7 @@ func (s *RedisMapStore) ClearAll() error {
 	s.pipelineBuffer = make(map[string][]byte)
 	s.pipelineMu.Unlock()
 
-	err := s.redisClient.Del(s.ctx, s.hashKey).Err()
+	err := s.backend.clear(s.ctx)
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("clear_all", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("clear_all", "store_error").Inc()
@@ -343,7 +333,7 @@ func (s *RedisMapStore) ClearAll() error {
 // are flushed atomically with the next live_root SET by FlushOrphansWithLiveRoot.
 // This is used during SMST Commit() to batch 10-20 HSET operations into a
 // single round trip while keeping orphan deletions deferred for HA correctness.
-func (s *RedisMapStore) BeginPipeline() {
+func (s *nodeStore) BeginPipeline() {
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
 
@@ -371,7 +361,7 @@ func (s *RedisMapStore) BeginPipeline() {
 //
 // After flushing, pipeline mode is disabled and subsequent Set()/Delete()
 // calls execute immediately.
-func (s *RedisMapStore) FlushPipeline() error {
+func (s *nodeStore) FlushPipeline() error {
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
 
@@ -388,7 +378,7 @@ func (s *RedisMapStore) FlushPipeline() error {
 // commits the tree first (RedisSMSTManager.commitLocked), and that commit's
 // FlushPipeline writes the whole buffer, the failed write's nodes included.
 //
-// func (s *RedisMapStore) FlushPendingNodes() error {
+// func (s *nodeStore) FlushPendingNodes() error {
 // 	s.pipelineMu.Lock()
 // 	defer s.pipelineMu.Unlock()
 // 	return s.writePendingNodesLocked()
@@ -417,7 +407,7 @@ const nodesWriteChunkBytes = 32 << 10
 // piece was written; on failure the nodes stay buffered for the next write, and
 // the pieces that did land are written again, which HSET makes harmless. The
 // caller holds pipelineMu.
-func (s *RedisMapStore) writePendingNodesLocked() error {
+func (s *nodeStore) writePendingNodesLocked() error {
 	if len(s.pipelineBuffer) == 0 {
 		return nil
 	}
@@ -427,37 +417,15 @@ func (s *RedisMapStore) writePendingNodesLocked() error {
 		observability.SMSTStoreOperationDuration.WithLabelValues("flush_pipeline").Observe(time.Since(start).Seconds())
 	}()
 
-	// Build field-value pairs for HSET
-	// Redis HSET accepts: HSET key field1 value1 field2 value2 ...
-	var chunks [][]interface{}
-	args := make([]interface{}, 0, len(s.pipelineBuffer)*2)
-	chunkBytes := 0
+	// Compressed on the way out, so the buffer keeps raw nodes and the
+	// backend counts the bytes that actually travel.
+	fields := make([]string, 0, len(s.pipelineBuffer))
+	stored := make([][]byte, 0, len(s.pipelineBuffer))
 	for field, value := range s.pipelineBuffer {
-		// Compressed on the way out, so the buffer keeps raw nodes and the
-		// chunking counts the bytes that actually travel.
-		stored := compressNode(value)
-		if len(args) > 0 && chunkBytes+len(field)+len(stored) > nodesWriteChunkBytes {
-			chunks = append(chunks, args)
-			args = make([]interface{}, 0, len(s.pipelineBuffer)*2-len(args))
-			chunkBytes = 0
-		}
-		args = append(args, field, stored)
-		chunkBytes += len(field) + len(stored)
+		fields = append(fields, field)
+		stored = append(stored, compressNode(value))
 	}
-	chunks = append(chunks, args)
-
-	// Execute batched HSET
-	var err error
-	if len(chunks) == 1 {
-		err = s.redisClient.HSet(s.ctx, s.hashKey, chunks[0]...).Err()
-	} else {
-		_, err = s.redisClient.Pipelined(s.ctx, func(pipe redis.Pipeliner) error {
-			for _, chunk := range chunks {
-				pipe.HSet(s.ctx, s.hashKey, chunk...)
-			}
-			return nil
-		})
-	}
+	err := s.backend.put(s.ctx, fields, stored)
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("flush_pipeline", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("flush_pipeline", "store_error").Inc()
@@ -498,12 +466,11 @@ func (s *RedisMapStore) writePendingNodesLocked() error {
 // operators who want the nodes hash to persist indefinitely).
 // On transaction failure the orphanBuffer is preserved so the next
 // checkpoint can retry, and live_root stays at its previous value.
-func (s *RedisMapStore) FlushOrphansWithLiveRoot(
+func (s *nodeStore) FlushOrphansWithLiveRoot(
 	ctx context.Context,
 	liveRoot []byte,
 	cacheTTL time.Duration,
 ) error {
-	liveRootKey := s.liveRootKey
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
 
@@ -522,28 +489,12 @@ func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 			WithLabelValues("flush_orphans_live_root").Observe(time.Since(start).Seconds())
 	}()
 
-	pipe := s.redisClient.TxPipeline()
-
 	orphanCount := len(s.orphanBuffer)
-	if orphanCount > 0 {
-		fields := make([]string, 0, orphanCount)
-		for f := range s.orphanBuffer {
-			fields = append(fields, f)
-		}
-		pipe.HDel(ctx, s.hashKey, fields...)
+	orphans := make([]string, 0, orphanCount)
+	for f := range s.orphanBuffer {
+		orphans = append(orphans, f)
 	}
-	pipe.Set(ctx, liveRootKey, liveRoot, 0)
-
-	// Sliding TTL on both keys: as long as UpdateTree keeps firing, the
-	// TTL gets pushed out. When the session goes idle without a
-	// DeleteTree (crash, abandoned, etc.) the keys expire together so
-	// live_root never outlives the nodes it references.
-	if cacheTTL > 0 {
-		pipe.Expire(ctx, s.hashKey, cacheTTL)
-		pipe.Expire(ctx, liveRootKey, cacheTTL)
-	}
-
-	if _, err := pipe.Exec(ctx); err != nil {
+	if err := s.backend.checkpoint(ctx, orphans, liveRoot, cacheTTL); err != nil {
 		observability.SMSTStoreOperations.
 			WithLabelValues("flush_orphans_live_root", "error").Inc()
 		observability.SMSTStoreErrors.
@@ -564,4 +515,4 @@ func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 }
 
 // Verify interface compliance at compile time.
-var _ kvstore.MapStore = (*RedisMapStore)(nil)
+var _ kvstore.MapStore = (*nodeStore)(nil)

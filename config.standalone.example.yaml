@@ -34,7 +34,7 @@ pprof:
   addr: "127.0.0.1:6060"
 
 # The embedded store: the relay queue, the sessions and their dedup marks, the
-# relay meter's counters and the caches live here. A write reaches the OS
+# relay meter's counters, the caches and the session trees live here. A write reaches the OS
 # before it returns (a crash of the process loses nothing); the disk is synced
 # every sync_interval, which bounds what an OS crash or a power loss can lose.
 storage:

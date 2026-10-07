@@ -27,8 +27,8 @@ around them:
 | memory limit (`GOMEMLIMIT`) | one per process | one, shared: the relayer's queues and the miner's trees count against the same limit |
 | logging, metrics, pprof defaults | each subcommand's own | the miner's: metrics on at `:9092`, pprof off, async JSON logging |
 | shared metrics both sides write without a `component` label (the `ha_cache_*` hits, misses, chain queries and block height) | one series per process | both sides on the same series: counters add up, gauges hold the last write |
-| relay queue, sessions, dedup marks, relay meter counters, caches | Redis | the embedded store (`storage.path`) |
-| SMST trees, leader election, supplier leases, claim/proof tracking | Redis | Redis in this version |
+| relay queue, sessions, dedup marks, relay meter counters, caches, SMST trees | Redis | the embedded store (`storage.path`) |
+| leader election, supplier leases, claim/proof tracking | Redis | Redis in this version |
 
 ## Config
 
@@ -58,16 +58,18 @@ both sides.
 ## The embedded store
 
 The relay queue between the relayer and the miner, the sessions and their
-dedup marks, the relay meter's counters and the caches live in an embedded
-database under `storage.path`. Keep it on local disk.
+dedup marks, the relay meter's counters, the caches and the session trees
+(SMST) the claims and proofs are built from live in an embedded database under
+`storage.path`. Keep it on local disk.
 
 - A write reaches the operating system before the call returns, so a crash or
   a kill of the process loses nothing.
 - The disk is synced every `storage.sync_interval` (default 1 s), not write by
   write. An operating system crash or a power loss can lose what was written
   since the last sync: relays served in that window are not claimed, and the
-  relay meter forgets the budget they used. A write that records a claim or
-  proof transaction is synced before the miner goes on.
+  relay meter forgets the budget they used. The root a claim is built from is
+  synced to disk when it is stored, and so is a write that records a claim or
+  proof transaction.
 - Within the embedded store a relay is counted once whatever is lost: its dedup
   mark, its session counters and the removal of its queue entry are written
   together, and the database recovers to a prefix of what was written.

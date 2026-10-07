@@ -204,4 +204,4 @@ func smstSessionOfNodesKey(key, prefix string) (string, bool) {
 }
 
 var _ smstStore = (*redisSMSTStore)(nil)
-var _ smstNodeStore = (*RedisMapStore)(nil)
+var _ smstNodeStore = (*nodeStore)(nil)
