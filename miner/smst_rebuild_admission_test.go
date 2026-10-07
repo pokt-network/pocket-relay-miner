@@ -939,7 +939,9 @@ func TestAddSupplierWithData_WiresTheProcessAdmissionIntoTheConsumerAndTheSMSTMa
 	require.True(t, ok)
 	require.Same(t, mgr.rebuildAdmission, state.SMSTManager.config.RebuildAdmission,
 		"LINK wiring-smst: the supplier's SMST manager loads trees through the process admission")
-	require.Equal(t, redisutil.IngestionPause(mgr.rebuildAdmission.IngestionPause(supplier)), state.Consumer.IngestionPauseForTest(),
+	redisConsumer, isRedis := state.Consumer.(*redisutil.StreamsConsumer)
+	require.True(t, isRedis, "premise: the miner wires a Redis consumer")
+	require.Equal(t, redisutil.IngestionPause(mgr.rebuildAdmission.IngestionPause(supplier)), redisConsumer.IngestionPauseForTest(),
 		"LINK wiring-consumer: the supplier's consumer is held by its own view of the process admission")
 
 	// The running consumer is not wired twice: an idle one takes the call.

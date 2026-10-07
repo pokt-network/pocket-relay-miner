@@ -128,8 +128,9 @@ type SupplierState struct {
 	stakeView atomic.Pointer[supplierStakeView]
 	status    atomic.Int32
 
-	// Redis stream consumer for this supplier
-	Consumer *redistransport.StreamsConsumer
+	// Relay queue consumer for this supplier. Assigned only a non-nil value:
+	// the nil checks on it are nil-interface checks.
+	Consumer transport.MinedRelayConsumer
 
 	// Session management
 	SessionStore       *RedisSessionStore
@@ -1620,8 +1621,8 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 	// Built before the lifecycle manager, whose claim transition flushes it.
 	relayBatch := newRelayBatch(
-		m.logger, m.config.RedisClient, operatorAddr,
-		sessionStore, m.deduplicator, smstManager, sessionCoordinator, consumer,
+		m.logger, operatorAddr, m.deduplicator, smstManager, sessionCoordinator, consumer,
+		newRedisRelayCommitter(m.config.RedisClient, sessionStore, m.deduplicator, consumer),
 	)
 
 	// SMST trees are lazy-loaded from Redis on-demand:

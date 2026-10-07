@@ -98,7 +98,8 @@ func newBatchWorker(t *testing.T, client *redisutil.Client, supplier, consumerNa
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = consumer.Close() })
 
-	batch := newRelayBatch(logger, client, supplier, store, dedup, smstMgr, coordinator, consumer)
+	batch := newRelayBatch(logger, supplier, dedup, smstMgr, coordinator, consumer,
+		newRedisRelayCommitter(client, store, dedup, consumer))
 	require.NotNil(t, batch, "a Redis deduplicator must get a batch")
 
 	mgr := &SupplierManager{
@@ -339,7 +340,7 @@ func TestRelayBatchScript_RefusesALegacySessionBeforeWriting(t *testing.T) {
 		session: relaySession{sessionID: sessionID, supplier: supplier, serviceID: "svc-1"},
 		relays:  []batchedRelay{{id: ids[0], hash: []byte("hash-0"), computeUnits: 100}, {id: ids[1], hash: []byte("hash-1"), computeUnits: 100}},
 	}
-	_, err = w.batch.runScript(w.ctx, sb)
+	_, err = w.batch.commit.(*redisRelayCommitter).runScript(w.ctx, sb.session.sessionID, sb.relays)
 	require.True(t, isLegacyKeyErr(err), "the script must refuse a legacy session, got %v", err)
 
 	require.Zero(t, w.marked(sessionID),
