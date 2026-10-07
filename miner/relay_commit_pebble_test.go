@@ -18,7 +18,7 @@ import (
 )
 
 type pebbleCommitHarness struct {
-	t        *testing.T
+	t        testing.TB
 	supplier string
 	store    *pebblestore.Store
 	broker   *pebblequeue.Broker
@@ -27,9 +27,17 @@ type pebbleCommitHarness struct {
 	n        int
 }
 
-func newPebbleCommitHarness(t *testing.T, supplier string) *pebbleCommitHarness {
+func newPebbleCommitHarness(t testing.TB, supplier string) *pebbleCommitHarness {
 	t.Helper()
-	store, err := pebblestore.Open(zerolog.Nop(), pebblestore.Config{Path: t.TempDir(), SyncInterval: time.Hour})
+	return newPebbleCommitHarnessSyncing(t, supplier, time.Hour)
+}
+
+// newPebbleCommitHarnessSyncing is the harness with the store's WAL fsynced
+// every syncInterval: a benchmark passes the production default, so the cost of
+// the fsync is in what it measures.
+func newPebbleCommitHarnessSyncing(t testing.TB, supplier string, syncInterval time.Duration) *pebbleCommitHarness {
+	t.Helper()
+	store, err := pebblestore.Open(zerolog.Nop(), pebblestore.Config{Path: t.TempDir(), SyncInterval: syncInterval})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	broker := pebblequeue.NewBroker(zerolog.Nop(), store, nil, "ha:relays")

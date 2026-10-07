@@ -41,7 +41,7 @@ func eachCommitter(t *testing.T, supplier string, body func(t *testing.T, h comm
 
 type redisCommitHarness struct{ w *batchWorker }
 
-func newRedisCommitHarness(t *testing.T, supplier string) *redisCommitHarness {
+func newRedisCommitHarness(t testing.TB, supplier string) *redisCommitHarness {
 	t.Helper()
 	client, _ := newTestRedis(t)
 	w := newBatchWorker(t, client, supplier, "a")

@@ -54,7 +54,7 @@ func (s *syncBuffer) String() string {
 // Redis. The stream is real because acknowledgement is what the batch changes,
 // and the only honest check that an entry was acknowledged is asking the server.
 type batchWorker struct {
-	t            *testing.T
+	t            testing.TB
 	ctx          context.Context
 	client       *redisutil.Client
 	supplier     string
@@ -72,7 +72,7 @@ type batchWorker struct {
 	logs         *syncBuffer
 }
 
-func newBatchWorker(t *testing.T, client *redisutil.Client, supplier, consumerName string) *batchWorker {
+func newBatchWorker(t testing.TB, client *redisutil.Client, supplier, consumerName string) *batchWorker {
 	t.Helper()
 	ctx := context.Background()
 	logs := &syncBuffer{}
