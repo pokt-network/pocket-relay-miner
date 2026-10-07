@@ -823,7 +823,11 @@ func (c *Config) Warnings() []string {
 }
 
 // Validate validates the configuration and returns an error if invalid.
-func (c *Config) Validate() error {
+func (c *Config) Validate() error { return c.validate(true) }
+
+// validate validates the configuration; redis.url is checked only for a
+// process that keeps its state in Redis.
+func (c *Config) validate(usesRedis bool) error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("listen_addr is required")
 	}
@@ -832,7 +836,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if c.Redis.URL == "" {
+	if usesRedis && c.Redis.URL == "" {
 		return fmt.Errorf("redis.url is required")
 	}
 
@@ -843,7 +847,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if _, err := url.Parse(c.Redis.URL); err != nil {
+	if _, err := url.Parse(c.Redis.URL); usesRedis && err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
 
@@ -1604,7 +1608,13 @@ func LoadConfig(path string) (*Config, error) {
 
 // ParseConfig is LoadConfig on bytes already read: defaults, decode, unknown
 // keys, Validate and BuildPools.
-func ParseConfig(data []byte) (*Config, error) {
+func ParseConfig(data []byte) (*Config, error) { return parseConfig(data, true) }
+
+// ParseConfigWithoutRedis is ParseConfig for a process that keeps nothing in
+// Redis (standalone mode): redis.url is neither required nor checked.
+func ParseConfigWithoutRedis(data []byte) (*Config, error) { return parseConfig(data, false) }
+
+func parseConfig(data []byte, usesRedis bool) (*Config, error) {
 	// Second pass over the same bytes, diagnostic only: the yaml.Unmarshal below
 	// is lenient and drops every key this struct does not declare, so the file
 	// and the process can disagree with no signal at all. What to DO with the
@@ -1626,7 +1636,7 @@ func ParseConfig(data []byte) (*Config, error) {
 
 	config.unknownKeys = unknownKeys
 
-	if err := config.Validate(); err != nil {
+	if err := config.validate(usesRedis); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 

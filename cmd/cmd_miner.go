@@ -14,6 +14,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -236,17 +237,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	})
 }
 
-// serveMiner builds the miner's components on a running process, serves until
-// hooks.started's channel delivers or the leader controller fails, and shuts
-// them down in the reverse order it built them (its defers). The caller owns
-// config, logger, memory limit and observability.
-//
-// err is a NAMED result, which is what the comments below about closeErr refer
-// to: assigning a Close error to it would overwrite what this returns.
-func serveMiner(parent context.Context, logger logging.Logger, config *miner.Config, hooks sideHooks) (err error) {
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
-
+// openMinerRedisStore is the miner's store in high-availability mode: its
+// Redis client, the kv store over it, the health of that Redis, and the Redis
+// memory metrics and monitor. The returned func closes the monitor and the
+// client.
+func openMinerRedisStore(ctx context.Context, logger logging.Logger, config *miner.Config) (sideStore, func(), error) {
 	// Create a wrapped Redis client with KeyBuilder for namespace-aware key construction
 	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
 		URL:                    config.Redis.URL,
@@ -257,16 +252,13 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 		Namespace:              config.Redis.Namespace,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create Redis client: %w", err)
+		return sideStore{}, nil, fmt.Errorf("failed to create Redis client: %w", err)
 	}
-	defer func() {
-		// closeErr, NOT err: serveMiner has a NAMED result, so assigning to
-		// err here overwrites whatever the function returned — a nil Close
-		// would mask the leader-controller failure below and exit 0.
+	closeClient := func() {
 		if closeErr := redisClient.Close(); closeErr != nil {
 			logger.Error().Err(closeErr).Msg("failed to close Redis client")
 		}
-	}()
+	}
 	logger.Info().
 		Str("redis_url", config.Redis.URL).
 		Str("consumer_name", config.Redis.ConsumerName).
@@ -292,7 +284,8 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 	// A Redis with no memory limit, or one that evicts, is refused here: the
 	// miner would serve relays it cannot claim, and find out at the settlement.
 	if err := storeHealth.Start(ctx); err != nil {
-		return fmt.Errorf("redis is not configured for this miner: %w", err)
+		closeClient()
+		return sideStore{}, nil, fmt.Errorf("redis is not configured for this miner: %w", err)
 	}
 	miner.RecordStoreMemoryOnClose(ctx, logger, redisClient, storeHealth)
 
@@ -300,19 +293,52 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 	redisPools.Add("shared", redisClient)
 	observability.SharedRegistry.MustRegister(redisPools)
 
-	// Set readiness check to verify Redis connectivity via PING
-	if hooks.setReadiness != nil {
-		hooks.setReadiness(func(ctx context.Context) error {
-			return redisClient.Ping(ctx).Err()
-		})
-	}
-
 	// Start Redis health monitor (runs on ALL replicas for OOM visibility)
 	redisHealthMonitor := leader.NewRedisHealthMonitor(logger, redisClient)
-	if err = redisHealthMonitor.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start Redis health monitor: %w", err)
+	if err := redisHealthMonitor.Start(ctx); err != nil {
+		closeClient()
+		return sideStore{}, nil, fmt.Errorf("failed to start Redis health monitor: %w", err)
 	}
-	defer func() { _ = redisHealthMonitor.Close() }()
+
+	closeStore := func() {
+		_ = redisHealthMonitor.Close()
+		closeClient()
+	}
+	return sideStore{kv: kv.NewRedis(logger, redisClient), health: storeHealth, redisClient: redisClient, redisPools: redisPools}, closeStore, nil
+}
+
+// serveMiner builds the miner's components on a running process, serves until
+// hooks.started's channel delivers or the leader controller fails, and shuts
+// them down in the reverse order it built them (its defers). The caller owns
+// config, logger, memory limit and observability.
+//
+// err is a NAMED result, which is what the comments below about closeErr refer
+// to: assigning a Close error to it would overwrite what this returns.
+func serveMiner(parent context.Context, logger logging.Logger, config *miner.Config, hooks sideHooks) (err error) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
+	// Where the miner keeps its state, and whether that store can take writes:
+	// Redis (high-availability mode), or what the process hands it.
+	openStore := hooks.openStore
+	if openStore == nil {
+		openStore = func(ctx context.Context, logger logging.Logger, _ string, _ redistransport.StoreGate) (sideStore, func(), error) {
+			return openMinerRedisStore(ctx, logger, config)
+		}
+	}
+	st, closeStore, err := openStore(ctx, logger, "miner", redistransport.StoreGateIngestion)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+	storeHealth, redisClient := st.health, st.redisClient
+
+	// Readiness: the store answers.
+	if hooks.setReadiness != nil {
+		hooks.setReadiness(func(ctx context.Context) error {
+			return st.kv.Ping(ctx)
+		})
+	}
 
 	// One shared sequence for both binaries: build the providers the config
 	// names, put a key manager over them, load once, arm the watch and the
@@ -381,8 +407,10 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 	// flusher — and their claims will expire once. The migration is a no-op
 	// on clusters that have never run the legacy code, and idempotent on
 	// re-runs (all keys already in the new schema are skipped).
-	if _, migrateErr := miner.MigrateLegacySMSTKeys(ctx, logger, redisClient); migrateErr != nil {
-		logger.Warn().Err(migrateErr).Msg("legacy SMST migration encountered errors (continuing startup)")
+	if redisClient != nil { // standalone mode keeps no legacy Redis keys
+		if _, migrateErr := miner.MigrateLegacySMSTKeys(ctx, logger, redisClient); migrateErr != nil {
+			logger.Warn().Err(migrateErr).Msg("legacy SMST migration encountered errors (continuing startup)")
+		}
 	}
 
 	// Start SupplierWorker for ALL miners
@@ -392,7 +420,7 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 	supplierWorker := miner.NewSupplierWorker(miner.SupplierWorkerConfig{
 		Logger:           logger,
 		RedisClient:      redisClient,
-		KV:               hooks.kv,
+		KV:               st.kv,
 		Backend:          hooks.minerBackend,
 		StoreHealth:      storeHealth,
 		KeyManager:       keyManager,
@@ -443,7 +471,7 @@ func serveMiner(parent context.Context, logger logging.Logger, config *miner.Con
 	leaderController := miner.NewLeaderController(miner.LeaderControllerConfig{
 		Logger:           logger,
 		RedisClient:      redisClient,
-		KV:               hooks.kv,
+		KV:               st.kv,
 		KeyManager:       keyManager,
 		Config:           config,
 		GlobalLeader:     globalLeader,

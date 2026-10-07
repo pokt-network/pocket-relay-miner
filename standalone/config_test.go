@@ -62,7 +62,6 @@ const storageYAML = "storage:\n  path: \"/data/standalone\"\n"
 
 func standaloneYAML() string {
 	return commonYAML + storageYAML +
-		"redis:\n  url: \"redis://redis:6379\"\n" +
 		"relayer:\n" + indent(relayerOnlyYAML+"redis:\n  batch_publish_interval_ms: 750\n") +
 		"miner:\n" + indent(minerOnlyYAML+"redis:\n  claim_idle_timeout_ms: 90000\n")
 }
@@ -73,11 +72,11 @@ func TestParseConfig_GivesEachSideWhatItsOwnFileGives(t *testing.T) {
 	got, err := ParseConfig([]byte(standaloneYAML()))
 	require.NoError(t, err)
 
-	wantRelayer, err := relayer.ParseConfig([]byte(commonYAML + relayerOnlyYAML +
-		"redis:\n  url: \"redis://redis:6379\"\n  batch_publish_interval_ms: 750\n"))
+	wantRelayer, err := relayer.ParseConfigWithoutRedis([]byte(commonYAML + relayerOnlyYAML +
+		"redis:\n  batch_publish_interval_ms: 750\n"))
 	require.NoError(t, err)
-	wantMiner, err := miner.ParseConfig([]byte(commonYAML + minerOnlyYAML +
-		"redis:\n  url: \"redis://redis:6379\"\n  claim_idle_timeout_ms: 90000\n"))
+	wantMiner, err := miner.ParseConfigWithoutRedis([]byte(commonYAML + minerOnlyYAML +
+		"redis:\n  claim_idle_timeout_ms: 90000\n"))
 	require.NoError(t, err)
 
 	// Each side's own unknown-key list is discarded by design (it names lines
@@ -105,9 +104,9 @@ func TestParseConfig_RefusesASettingWrittenTwice(t *testing.T) {
 			want: "relayer.keys is set at the top level",
 		},
 		{
-			name: "common redis key inside a side",
+			name: "a redis server inside a side",
 			yaml: strings.Replace(standaloneYAML(), "claim_idle_timeout_ms: 90000", "claim_idle_timeout_ms: 90000\n    url: \"redis://other:6379\"", 1),
-			want: "miner.redis.url is set at the top level",
+			want: "miner.redis.url: standalone connects to no Redis",
 		},
 		{
 			name: "side key at the top level",
@@ -115,9 +114,9 @@ func TestParseConfig_RefusesASettingWrittenTwice(t *testing.T) {
 			want: `"listen_addr" is not a section of a standalone config`,
 		},
 		{
-			name: "per-side redis key at the top level",
-			yaml: strings.Replace(standaloneYAML(), "redis:\n  url: \"redis://redis:6379\"\n", "redis:\n  url: \"redis://redis:6379\"\n  pool_size: 77\n", 1),
-			want: "redis.pool_size goes under relayer.redis or miner.redis",
+			name: "a redis section at the top level",
+			yaml: "redis:\n  url: \"redis://redis:6379\"\n" + standaloneYAML(),
+			want: "a standalone config has no redis section",
 		},
 		{
 			name: "missing storage path",
@@ -126,7 +125,7 @@ func TestParseConfig_RefusesASettingWrittenTwice(t *testing.T) {
 		},
 		{
 			name: "missing side",
-			yaml: commonYAML + storageYAML + "redis:\n  url: \"redis://redis:6379\"\nrelayer:\n" + indent(relayerOnlyYAML),
+			yaml: commonYAML + storageYAML + "relayer:\n" + indent(relayerOnlyYAML),
 			want: "the miner: section is required",
 		},
 	} {
@@ -169,8 +168,6 @@ func TestParseConfig_AnOmittedCommonSectionKeepsItsDefault(t *testing.T) {
   chain_id: "pocket-lego-testnet"
 keys:
   keys_file: "/keys/supplier-keys.yaml"
-redis:
-  url: "redis://redis:6379"
 ` + storageYAML + `relayer:
 ` + indent(relayerOnlyYAML) + "miner:\n" + indent(minerOnlyYAML)
 

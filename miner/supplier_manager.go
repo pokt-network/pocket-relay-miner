@@ -760,6 +760,9 @@ func (m *SupplierManager) reconcileLoop(ctx context.Context, interval time.Durat
 // every block interval, so the connection is held continuously in practice.
 // Formula: poolSize = numSuppliers + 20 overhead
 func (m *SupplierManager) checkPoolSize(numSuppliers int) {
+	if m.config.RedisClient == nil {
+		return // standalone mode: no Redis pool to size
+	}
 	poolSize := m.config.RedisClient.PoolSize()
 	minRequired := numSuppliers + 20 // Formula: numSuppliers + 20 overhead
 

@@ -54,6 +54,8 @@ type Config struct {
 type Store struct {
 	db     *pebble.DB
 	wal    *walFS
+	fs     vfs.FS
+	path   string
 	logger logging.Logger
 
 	dirty     atomic.Bool
@@ -102,6 +104,8 @@ func Open(logger logging.Logger, cfg Config) (*Store, error) {
 	s := &Store{
 		db:     db,
 		wal:    wal,
+		fs:     fs,
+		path:   cfg.Path,
 		logger: logging.ForComponent(logger, "pebblestore"),
 		stop:   make(chan struct{}),
 	}
@@ -111,6 +115,19 @@ func Open(logger logging.Logger, cfg Config) (*Store, error) {
 		s.syncLoop(interval)
 	})(context.Background())
 	return s, nil
+}
+
+// DiskUsage is the disk the database lives on: total bytes, and used as total
+// minus what this process can still write (reserved blocks count as used).
+func (s *Store) DiskUsage() (used, total uint64, err error) {
+	u, err := s.fs.GetDiskUsage(s.path)
+	if err != nil {
+		return 0, 0, fmt.Errorf("pebblestore: disk usage of %s: %w", s.path, err)
+	}
+	if u.AvailBytes > u.TotalBytes {
+		return 0, u.TotalBytes, nil
+	}
+	return u.TotalBytes - u.AvailBytes, u.TotalBytes, nil
 }
 
 // DB is the database, for the packages that keep their state in it.

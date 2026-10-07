@@ -430,8 +430,12 @@ func (c TransactionConfig) txMaxConcurrent() int {
 }
 
 // Validate validates the configuration.
-func (c *Config) Validate() error {
-	if c.Redis.URL == "" {
+func (c *Config) Validate() error { return c.validate(true) }
+
+// validate validates the configuration; redis.url is checked only for a
+// process that keeps its state in Redis.
+func (c *Config) validate(usesRedis bool) error {
+	if usesRedis && c.Redis.URL == "" {
 		return fmt.Errorf("redis.url is required")
 	}
 
@@ -446,7 +450,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if _, err := url.Parse(c.Redis.URL); err != nil {
+	if _, err := url.Parse(c.Redis.URL); usesRedis && err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
 
@@ -981,7 +985,13 @@ func LoadConfig(path string) (*Config, error) {
 
 // ParseConfig is LoadConfig on bytes already read: defaults, decode, unknown
 // keys, the unique consumer name and Validate.
-func ParseConfig(data []byte) (*Config, error) {
+func ParseConfig(data []byte) (*Config, error) { return parseConfig(data, true) }
+
+// ParseConfigWithoutRedis is ParseConfig for a process that keeps nothing in
+// Redis (standalone mode): redis.url is neither required nor checked.
+func ParseConfigWithoutRedis(data []byte) (*Config, error) { return parseConfig(data, false) }
+
+func parseConfig(data []byte, usesRedis bool) (*Config, error) {
 	// Start with defaults
 	cf := DefaultConfig()
 
@@ -1000,7 +1010,7 @@ func ParseConfig(data []byte) (*Config, error) {
 
 	cf.Redis.ConsumerName = UniqueConsumerName(cf.Redis.ConsumerName)
 
-	if err := cf.Validate(); err != nil {
+	if err := cf.validate(usesRedis); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 

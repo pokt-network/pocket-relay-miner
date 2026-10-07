@@ -1,16 +1,26 @@
-# Standalone: the relayer and the miner in one process
+# Standalone mode: the relayer and the miner in one process, no Redis
 
 `pocket-relay-miner standalone` runs the relayer and the miner in one process,
-from one config file. It is meant for one host that serves and claims for its
-own suppliers.
+from one config file, with their state in an embedded store on local disk and
+no Redis. It is meant for one host that serves and claims for its own
+suppliers.
 
 ```bash
 pocket-relay-miner standalone validate --config config.standalone.yaml
 pocket-relay-miner standalone --config config.standalone.yaml
 ```
 
-Standalone does not replace running `relayer` and `miner` as separate
-processes. That remains the deployment for more than one relayer or miner.
+The relay miner runs in one of two modes:
+
+| | standalone mode | high-availability mode |
+|---|---|---|
+| run | `standalone` | `relayer` and `miner`, one or more of each |
+| state | an embedded store on the host's disk | one Redis shared by every relayer and miner |
+| replicas, failover | no: one process | yes: miners share suppliers through leases, relayers scale out |
+| to operate | one process and a directory | the processes, and a Redis 8.10+ with `maxmemory` and `noeviction` |
+
+Standalone mode does not replace high-availability mode, and a standalone
+config has no `redis` section: to run on Redis, run the two subcommands.
 
 ## What it runs
 
@@ -18,7 +28,7 @@ The relayer and the miner are the same code the two subcommands run, built
 from the same config keys with the same defaults. What differs is the process
 around them:
 
-| | `relayer` + `miner` | `standalone` |
+| | high-availability mode (`relayer` + `miner`) | standalone mode |
 |---|---|---|
 | processes | two | one |
 | config files | two | one: common sections once, `relayer:` and `miner:` for the rest |
@@ -35,16 +45,17 @@ around them:
 Start from [config.standalone.example.yaml](../config.standalone.example.yaml).
 
 - At the top level, once: `pocket_node`, `keys`, `logging`, `metrics`, `pprof`,
-  `storage` (the embedded store: `path`, required, and `sync_interval`),
-  and `redis` with `url` and `namespace` (and nothing else: a `redis` key that
-  sizes a client goes under the side whose client it sizes).
+  and `storage` (the embedded store: `path`, required, and `sync_interval`).
+  There is no `redis` section: writing one is an error.
 - Under `relayer:`: every other key of
   [config.relayer.example.yaml](../config.relayer.example.yaml), with the same
-  meaning and default. That includes its own `redis` keys
-  (`batch_publish_interval_ms`, `pool_size`, ...).
+  meaning and default. One of its `redis` keys still applies:
+  `batch_publish_interval_ms`, how often the budget charges of relays served
+  and not yet mined are written; the others (pool sizes) size nothing.
 - Under `miner:`: every other key of
-  [config.miner.example.yaml](../config.miner.example.yaml), with its own
-  `redis` keys (`claim_idle_timeout_ms`, `pool_size`, ...).
+  [config.miner.example.yaml](../config.miner.example.yaml).
+  `redis.claim_idle_timeout_ms` is how long a relay handed back waits before it
+  is delivered again.
 
 A top-level section written again inside `relayer:` or `miner:` is an error. So
 is `redis.url` or `redis.namespace` inside a side, and a key at the top level
@@ -52,15 +63,21 @@ that is not one of the sections above. Unknown keys are reported with their
 line in your file: as a warning at startup, as an error with `--strict-config`,
 and always as an error from `standalone validate`.
 
-Flags: `--config`, `--strict-config`, and `--redis-url`, which sets the URL for
-both sides.
+Flags: `--config` and `--strict-config`.
 
 ## The embedded store
 
-The relay queue between the relayer and the miner, the sessions and their
-dedup marks, the relay meter's counters, the caches and the session trees
-(SMST) the claims and proofs are built from live in an embedded database under
-`storage.path`. Keep it on local disk.
+Everything the process keeps lives in an embedded database under
+`storage.path`: the relay queue between the relayer and the miner, the sessions
+and their dedup marks, the relay meter's counters, the caches, the session
+trees (SMST) the claims and proofs are built from, and the claim and proof
+tracking. Keep it on local disk.
+
+- New work stops while the disk holding `storage.path` has less than 1 GiB
+  free (or an eighth of a disk smaller than 8 GiB): the relayer answers new
+  relays as the HA relayer does when Redis is full, and the miner stops taking
+  relays from the queue. Work resumes with 2 GiB free for the relayer and
+  1.5 GiB for the miner.
 
 - A write reaches the operating system before the call returns, so a crash or
   a kill of the process loses nothing.
@@ -92,5 +109,5 @@ dedup marks, the relay meter's counters, the caches and the session trees
   (`TimeoutStopSec`, or the container's grace period), more if you measure
   longer. A signal while a side is still starting cancels that startup.
 - The relayer's health server (`relayer.health_check`) works as it does in the
-  `relayer` subcommand. The observability server's `/ready` checks the miner's
-  Redis connection.
+  `relayer` subcommand. The observability server's `/ready` answers once the
+  miner side is up.

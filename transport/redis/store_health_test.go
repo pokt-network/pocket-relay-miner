@@ -474,3 +474,39 @@ func TestStoreHealth_StartRefusesAnOldServer(t *testing.T) {
 		"LINK version-gate-start: an old server stops the process, and the refusal names the version")
 	require.NotContains(t, err.Error(), "maxmemory", "the version is the root cause and is reported first")
 }
+
+// Over a disk the gates close and reopen at the same free-space lines as over
+// Redis memory, and a disk is never refused for a server version or a policy.
+func TestStoreHealth_OverADiskClosesWhenItFillsAndReopensWithRoom(t *testing.T) {
+	const gib = uint64(1) << 30
+	used := 10 * gib
+	h := NewDiskStoreHealth(zerolog.Nop(), func() (uint64, uint64, error) { return used, 100 * gib, nil },
+		"test_disk", StoreGateAdmission)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, h.Start(ctx), "a disk has no version or policy to refuse")
+	require.True(t, h.Operable())
+
+	used = 100*gib - gib/2 // half a GiB free
+	h.poll(ctx)
+	require.False(t, h.Operable(), "below the 1 GiB reserve")
+
+	used = 100*gib - gib*3/2 // 1.5 GiB free: above the close line, below admission's reopen
+	h.poll(ctx)
+	require.False(t, h.Operable())
+
+	used = 100*gib - 3*gib
+	h.poll(ctx)
+	require.True(t, h.Operable(), "2 GiB free reopens admission")
+}
+
+// A disk whose usage cannot be read is a store that did not answer: closed.
+func TestStoreHealth_OverADiskThatCannotBeReadCloses(t *testing.T) {
+	h := NewDiskStoreHealth(zerolog.Nop(), func() (uint64, uint64, error) { return 0, 0, errors.New("statfs failed") },
+		"test_disk_err", StoreGateIngestion)
+
+	require.NoError(t, h.Start(context.Background()))
+
+	require.False(t, h.Operable())
+}

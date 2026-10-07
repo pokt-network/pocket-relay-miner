@@ -40,11 +40,9 @@ type StorageConfig struct {
 // commonSections are given whole to both sides.
 var commonSections = []string{"pocket_node", "keys", "logging", "metrics", "pprof"}
 
-// commonRedisKeys are the redis leaves both sides must agree on: the server and
-// the key namespace. Pool sizes stay per side, because they size each side's
-// own clients and mean different things there (the relayer derives its pool
-// from its workers when pool_size is 0).
-var commonRedisKeys = []string{"url", "namespace"}
+// redisConnectionKeys are the redis leaves that name a server and a keyspace;
+// a side's other redis keys (the relayer's publish interval) still apply.
+var redisConnectionKeys = []string{"url", "namespace"}
 
 // Config is a parsed standalone file: each side's config, built by that side's
 // own parser, so defaults and validation are the ones the relayer and miner
@@ -68,12 +66,6 @@ type Config struct {
 // config does not declare, with the line it is on in this file.
 func (c *Config) Warnings() []string { return c.unknownKeys }
 
-// commonRedis is the redis block of the top level.
-type commonRedis struct {
-	URL       string                      `yaml:"url"`
-	Namespace config.RedisNamespaceConfig `yaml:"namespace,omitempty"`
-}
-
 // probe is the whole file's shape, for the unknown-key pass over the original
 // bytes: the sides' own passes run on documents this package assembles, whose
 // line numbers are not the operator's.
@@ -83,7 +75,6 @@ type probe struct {
 	Logging    logging.Config          `yaml:"logging"`
 	Metrics    config.MetricsConfig    `yaml:"metrics"`
 	PProf      config.PprofConfig      `yaml:"pprof"`
-	Redis      commonRedis             `yaml:"redis"`
 	Storage    StorageConfig           `yaml:"storage"`
 	Relayer    relayer.Config          `yaml:"relayer"`
 	Miner      miner.Config            `yaml:"miner"`
@@ -123,16 +114,9 @@ func ParseConfig(data []byte) (*Config, error) {
 			}
 			sides[key.Value] = value
 		case key.Value == sectionRedis:
-			if value.Kind != yaml.MappingNode {
-				return nil, fmt.Errorf("line %d: redis must be a mapping", key.Line)
-			}
-			for j := 0; j+1 < len(value.Content); j += 2 {
-				if leaf := value.Content[j]; !slices.Contains(commonRedisKeys, leaf.Value) {
-					return nil, fmt.Errorf("line %d: redis.%s goes under relayer.redis or miner.redis: "+
-						"only url and namespace are shared by both sides", leaf.Line, leaf.Value)
-				}
-			}
-			common[key.Value] = value
+			return nil, fmt.Errorf("line %d: a standalone config has no redis section: standalone keeps its "+
+				"state in storage.path and connects to no Redis; to run on Redis, run the relayer and miner "+
+				"subcommands (the high-availability mode)", key.Line)
 		case slices.Contains(commonSections, key.Value):
 			common[key.Value] = value
 		case key.Value == sectionStorage:
@@ -163,11 +147,11 @@ func ParseConfig(data []byte) (*Config, error) {
 		return nil, err
 	}
 
-	relayerCfg, err := relayer.ParseConfig(relayerDoc)
+	relayerCfg, err := relayer.ParseConfigWithoutRedis(relayerDoc)
 	if err != nil {
 		return nil, fmt.Errorf("relayer: %w", err)
 	}
-	minerCfg, err := miner.ParseConfig(minerDoc)
+	minerCfg, err := miner.ParseConfigWithoutRedis(minerDoc)
 	if err != nil {
 		return nil, fmt.Errorf("miner: %w", err)
 	}
@@ -205,9 +189,9 @@ func sideDocument(name string, side *yaml.Node, common map[string]*yaml.Node) ([
 				return nil, fmt.Errorf("line %d: %s.redis must be a mapping", key.Line, name)
 			}
 			for j := 0; j+1 < len(value.Content); j += 2 {
-				if slices.Contains(commonRedisKeys, value.Content[j].Value) {
-					return nil, fmt.Errorf("line %d: %s.redis.%s is set at the top level (redis.%s), once for both sides",
-						value.Content[j].Line, name, value.Content[j].Value, value.Content[j].Value)
+				if slices.Contains(redisConnectionKeys, value.Content[j].Value) {
+					return nil, fmt.Errorf("line %d: %s.redis.%s: standalone connects to no Redis",
+						value.Content[j].Line, name, value.Content[j].Value)
 				}
 			}
 			sideRedis = &yaml.Node{Kind: yaml.MappingNode, Content: append([]*yaml.Node(nil), value.Content...)}
@@ -228,13 +212,7 @@ func sideDocument(name string, side *yaml.Node, common map[string]*yaml.Node) ([
 		out.Content = append(out.Content, scalar(k), common[k])
 	}
 
-	if commonRedisNode := common[sectionRedis]; commonRedisNode != nil || sideRedis != nil {
-		if sideRedis == nil {
-			sideRedis = &yaml.Node{Kind: yaml.MappingNode}
-		}
-		if commonRedisNode != nil {
-			sideRedis.Content = append(sideRedis.Content, commonRedisNode.Content...)
-		}
+	if sideRedis != nil {
 		out.Content = append(out.Content, scalar(sectionRedis), sideRedis)
 	}
 

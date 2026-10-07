@@ -30,12 +30,15 @@ const flagStandaloneConfig = "config"
 func StandaloneCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "standalone",
-		Short: "Run the relayer and the miner in one process",
-		Long: `Run the relayer and the miner in one process, from one config file.
+		Short: "Run the relayer and the miner in one process, with no Redis (standalone mode)",
+		Long: `Run the relayer and the miner in one process, from one config file, with
+their state in an embedded store (storage.path) and no Redis: the standalone
+mode. For replicas and failover on a shared Redis, run the relayer and miner
+subcommands instead: the high-availability mode.
 
-The common sections (pocket_node, keys, logging, metrics, pprof, and redis url
-and namespace) are written once, at the top level; relayer: and miner: hold the
-keys only that side reads, the same keys as in its own config file.
+The common sections (pocket_node, keys, logging, metrics, pprof, storage) are
+written once, at the top level; relayer: and miner: hold the keys only that
+side reads, the same keys as in its own config file.
 
 The miner starts first and the relayer once the miner is serving; on SIGINT or
 SIGTERM the relayer drains first, then the miner stops. One observability
@@ -48,7 +51,6 @@ Example:
 	}
 	cmd.Flags().String(flagStandaloneConfig, "", "Path to standalone config YAML file (required)")
 	cmd.Flags().Bool(flagStrictConfig, false, "Refuse to start when the config carries keys this binary does not understand (default: warn and start)")
-	cmd.Flags().String(flagRedisURL, "", "Redis connection URL for both sides (overrides config)")
 	cmd.AddCommand(standaloneValidateCmd())
 	return cmd
 }
@@ -94,11 +96,6 @@ func loadStandaloneConfig(cmd *cobra.Command) (*standalone.Config, error) {
 	cfg, err := standalone.LoadConfig(configPath)
 	if err != nil {
 		return nil, err
-	}
-	if cmd.Flags().Changed(flagRedisURL) {
-		url, _ := cmd.Flags().GetString(flagRedisURL)
-		cfg.Relayer.Redis.URL = url
-		cfg.Miner.Redis.URL = url
 	}
 	if err := validateMinerConfig(cfg.Miner); err != nil {
 		return nil, fmt.Errorf("miner: %w", err)
@@ -211,6 +208,15 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 	minerBackend := func(config miner.SupplierManagerConfig) miner.StoreBackend {
 		return miner.NewPebbleStoreBackend(logger, db, broker, config)
 	}
+	// Each side's store: the embedded kv store, and a health gate over the
+	// disk it lives on, so a filling disk stops new work before writes fail.
+	openStore := func(ctx context.Context, logger logging.Logger, component string, gate redistransport.StoreGate) (sideStore, func(), error) {
+		health := redistransport.NewDiskStoreHealth(logger, db.DiskUsage, component, gate)
+		if err := health.Start(ctx); err != nil {
+			return sideStore{}, nil, err
+		}
+		return sideStore{kv: store, health: health}, func() {}, nil
+	}
 	openQueue := func(_ context.Context, _ logging.Logger, d relayPublisherDeps) (relayPublisher, func(), error) {
 		return broker.Publisher(d.config.Redis.BatchPublishInterval()), func() {}, nil
 	}
@@ -226,7 +232,7 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 	logger.Info().Msg("starting standalone: miner first, then relayer")
 	return runSides(ctx, logger, minerSide, relayerSide, sideHooks{
 		openKeys:      sharedKeys,
-		kv:            store,
+		openStore:     openStore,
 		openPublisher: openQueue,
 		minerBackend:  minerBackend,
 		// One process, no peers: it holds the leadership and every lease.

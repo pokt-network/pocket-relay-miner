@@ -413,15 +413,18 @@ func (c *LeaderController) Start(ctx context.Context) error {
 
 	// Relay streams no longer expire, so a supplier decommissioned for good
 	// leaves its lane behind. This reports those lanes; it never deletes one.
-	c.orphanStreamMonitor = NewOrphanStreamMonitor(
-		c.logger,
-		c.config.RedisClient,
-		c.config.GlobalLeader,
-		0, // default sweep interval
-	)
-	if err := c.orphanStreamMonitor.Start(ctx); err != nil {
-		c.cleanup()
-		return fmt.Errorf("failed to start orphan stream monitor: %w", err)
+	// The lanes are Redis streams: in standalone mode there is no Redis.
+	if c.config.RedisClient != nil {
+		c.orphanStreamMonitor = NewOrphanStreamMonitor(
+			c.logger,
+			c.config.RedisClient,
+			c.config.GlobalLeader,
+			0, // default sweep interval
+		)
+		if err := c.orphanStreamMonitor.Start(ctx); err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to start orphan stream monitor: %w", err)
+		}
 	}
 
 	c.active = true

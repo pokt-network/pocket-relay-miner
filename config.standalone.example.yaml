@@ -1,4 +1,9 @@
-# Pocket RelayMiner -- standalone: the relayer and the miner in one process.
+# Pocket RelayMiner -- STANDALONE MODE: the relayer and the miner in one
+# process, their state in an embedded store, and no Redis.
+#
+# For HIGH-AVAILABILITY MODE (replicas and failover on a shared Redis), run the
+# relayer and miner subcommands with config.relayer.example.yaml and
+# config.miner.example.yaml instead. A standalone config has no redis section.
 #
 #   pocket-relay-miner standalone validate --config config.standalone.yaml
 #   pocket-relay-miner standalone --config config.standalone.yaml
@@ -33,19 +38,15 @@ pprof:
   enabled: false
   addr: "127.0.0.1:6060"
 
-# The embedded store: the relay queue, the sessions and their dedup marks, the
-# relay meter's counters, the caches and the session trees live here. A write reaches the OS
-# before it returns (a crash of the process loses nothing); the disk is synced
-# every sync_interval, which bounds what an OS crash or a power loss can lose.
+# The embedded store: everything the process keeps lives here (the relay
+# queue, the sessions and their dedup marks, the relay meter's counters, the
+# caches, the session trees, the claim and proof tracking). A write reaches the
+# OS before it returns (a crash of the process loses nothing); the disk is
+# synced every sync_interval, which bounds what an OS crash or a power loss can
+# lose. New work stops when the disk has less than 1 GiB free.
 storage:
   path: "/data/pocket-relay-miner"
   sync_interval: "1s"
-
-# Only the server and namespace both sides share. Every other redis key
-# (pool sizes, batching, consumer settings) goes under relayer.redis or
-# miner.redis; written here it is an error.
-redis:
-  url: "redis://localhost:6379"
 
 relayer:
   listen_addr: "0.0.0.0:8080"
@@ -59,10 +60,12 @@ relayer:
       backends:
         jsonrpc:
           url: "http://backend:8545"
+  # How often relays served but not yet mined write their budget charges.
   redis:
     batch_publish_interval_ms: 1000
 
 miner:
   block_time_seconds: 30
+  # How long a relay handed back waits before it is delivered again.
   redis:
     claim_idle_timeout_ms: 60000

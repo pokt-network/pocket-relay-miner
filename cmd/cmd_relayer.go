@@ -522,100 +522,21 @@ func serveRelayer(parent context.Context, logger logging.Logger, config *relayer
 	// cgroup quota at startup, so this is what the runtime will schedule on.
 	sizing := relayer.ComputeWorkerSizingForProcess()
 
-	// An operator value wins; otherwise the pool follows the workers.
-	redisPoolSize := config.Redis.PoolSize
-	if redisPoolSize <= 0 {
-		redisPoolSize = sizing.RedisPoolSize()
-	}
-
-	redisURL := config.Redis.URL
-
-	// Create wrapped Redis client with KeyBuilder for namespace-aware key construction
-	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
-		URL:                    redisURL,
-		PoolSize:               redisPoolSize,
-		MinIdleConns:           config.Redis.MinIdleConns,
-		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
-		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
-		Namespace:              config.Redis.Namespace,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create Redis client: %w", err)
-	}
-	defer func() { _ = redisClient.Close() }()
-	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
-
-	// The caches, the meter and the registries read and write through this:
-	// Redis, unless the process hands the relayer its own store.
-	var store kv.Store = kv.NewRedis(logger, redisClient)
-	if hooks.kv != nil {
-		store = hooks.kv
-	}
-
-	// Whether Redis can take writes, answered once for the whole relayer: every
-	// client this process writes through reports refused writes to it, and every
-	// admission path reads it.
-	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer", redistransport.StoreGateAdmission)
-	redisClient.AddHook(storeHealth.Hook())
-	// A Redis with no memory limit, or one that evicts, is refused here: the
-	// relayer would serve relays whose record the store drops or loses.
-	if err := storeHealth.Start(ctx); err != nil {
-		return fmt.Errorf("redis is not configured for this relayer: %w", err)
-	}
-
-	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
-	// files and the redis CLI build clients, and a repeated MustRegister panics.
-	// The collector is also the registry of pools, so a client per supplier can
-	// be added and removed as suppliers are adopted and released.
-	// What the pool ACTUALLY holds, published from the client. See
-	// RegisterEffectivePoolGauges: reading the config here would certify the
-	// request rather than what runs, and the pool timeout is precisely the
-	// value nobody sets and go-redis defaults behind our backs.
-	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
-		observability.SharedRegistry, "relayer", redisClient,
-	); gaugeErr != nil {
-		return fmt.Errorf("failed to register effective Redis pool gauges: %w", gaugeErr)
-	}
-
-	// The pool has to cover the workers that will use it. This compares the
-	// EFFECTIVE size -- what the client holds, not what we asked for -- against
-	// the bounded users, and refuses to start rather than discovering it under
-	// load as a queue nobody can explain.
-	//
-	// WHAT THIS GUARD DOES NOT COVER: in eager validation mode the relay meter
-	// runs inline in the HTTP handler, not inside a subpool, so its concurrency
-	// is whatever the HTTP server admits and no startup number can bound it.
-	// This guard covers the BOUNDED users; the pool metrics show the rest. Read
-	// it as "the floor is right", never as "the pool is sufficient".
-	if eff, ok := redisClient.EffectivePoolOptions(); ok {
-		needed := sizing.Validation + sizing.Publish
-		if eff.PoolSize < needed {
-			return fmt.Errorf(
-				"redis pool too small: the client holds %d connections but the bounded workers that use it "+
-					"need %d (validation %d + publish %d); raise redis.pool_size or lower the worker count",
-				eff.PoolSize, needed, sizing.Validation, sizing.Publish)
+	// Where the relayer keeps its state, and whether that store can take
+	// writes: Redis (high-availability mode), or what the process hands it.
+	openStore := hooks.openStore
+	if openStore == nil {
+		openStore = func(ctx context.Context, logger logging.Logger, _ string, _ redistransport.StoreGate) (sideStore, func(), error) {
+			return openRelayerRedisStore(ctx, logger, config, sizing)
 		}
-		logger.Info().
-			Int("pool_size_effective", eff.PoolSize).
-			Int("min_idle_conns_effective", eff.MinIdleConns).
-			Dur("pool_timeout_effective", eff.PoolTimeout).
-			Int("bounded_workers", needed).
-			Msg("Redis pool covers the bounded workers (the eager meter path is NOT bounded by this)")
-	} else {
-		logger.Warn().
-			Msg("could not read the effective Redis pool settings from this client type: " +
-				"the startup pool guard did NOT run")
 	}
-
-	// How long each Redis command really takes from here, pool wait and
-	// go-redis retries included. The pool's own wait series cannot answer that:
-	// they count only waits that ended in a connection, so their mean improves
-	// as the pool starts failing.
-	redisClient.AddHook(redistransport.NewCommandLatencyHook("relayer"))
-
-	redisPools := redistransport.NewPoolCollector("relayer")
-	redisPools.Add("shared", redisClient)
-	observability.SharedRegistry.MustRegister(redisPools)
+	st, closeStore, err := openStore(ctx, logger, "relayer", redistransport.StoreGateAdmission)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+	store, storeHealth, redisClient, redisPools := st.kv, st.health, st.redisClient, st.redisPools
+	redisURL := config.Redis.URL
 
 	// Create supplier cache for checking supplier staking state
 	supplierCache := cache.NewSupplierCache(
@@ -851,7 +772,6 @@ func serveRelayer(parent context.Context, logger logging.Logger, config *relayer
 		Int("validation_workers", sizing.Validation).
 		Int("publish_workers", sizing.Publish).
 		Int("metrics_workers", sizing.Metrics).
-		Int("redis_pool_size", redisPoolSize).
 		Int("gomaxprocs", runtime.GOMAXPROCS(0)).
 		Int("num_cpu", runtime.NumCPU()).
 		Msg("created master worker pool (unbounded, non-blocking, 8x GOMAXPROCS)")
@@ -1352,6 +1272,108 @@ func openRedisRelayPublisher(ctx context.Context, logger logging.Logger, d relay
 	)
 	logger.Info().Dur("interval", config.Redis.BatchPublishInterval()).Msg("batched relay publishing")
 	return batcher, closeClient, nil
+}
+
+// openRelayerRedisStore is the relayer's store in high-availability mode: a
+// Redis client sized for the relayer's workers, the kv store over it, and the
+// health of that Redis. The returned func closes the client.
+func openRelayerRedisStore(ctx context.Context, logger logging.Logger, config *relayer.Config, sizing relayer.WorkerSizing) (sideStore, func(), error) {
+	// An operator value wins; otherwise the pool follows the workers.
+	redisPoolSize := config.Redis.PoolSize
+	if redisPoolSize <= 0 {
+		redisPoolSize = sizing.RedisPoolSize()
+	}
+
+	redisURL := config.Redis.URL
+
+	// Create wrapped Redis client with KeyBuilder for namespace-aware key construction
+	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
+		URL:                    redisURL,
+		PoolSize:               redisPoolSize,
+		MinIdleConns:           config.Redis.MinIdleConns,
+		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
+		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		Namespace:              config.Redis.Namespace,
+	})
+	if err != nil {
+		return sideStore{}, nil, fmt.Errorf("failed to create Redis client: %w", err)
+	}
+	closeClient := func() { _ = redisClient.Close() }
+	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
+
+	// The caches, the meter and the registries read and write through this:
+	// Redis, unless the process hands the relayer its own store.
+	store := kv.NewRedis(logger, redisClient)
+
+	// Whether Redis can take writes, answered once for the whole relayer: every
+	// client this process writes through reports refused writes to it, and every
+	// admission path reads it.
+	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer", redistransport.StoreGateAdmission)
+	redisClient.AddHook(storeHealth.Hook())
+	// A Redis with no memory limit, or one that evicts, is refused here: the
+	// relayer would serve relays whose record the store drops or loses.
+	if err := storeHealth.Start(ctx); err != nil {
+		closeClient()
+		return sideStore{}, nil, fmt.Errorf("redis is not configured for this relayer: %w", err)
+	}
+
+	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
+	// files and the redis CLI build clients, and a repeated MustRegister panics.
+	// The collector is also the registry of pools, so a client per supplier can
+	// be added and removed as suppliers are adopted and released.
+	// What the pool ACTUALLY holds, published from the client. See
+	// RegisterEffectivePoolGauges: reading the config here would certify the
+	// request rather than what runs, and the pool timeout is precisely the
+	// value nobody sets and go-redis defaults behind our backs.
+	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
+		observability.SharedRegistry, "relayer", redisClient,
+	); gaugeErr != nil {
+		closeClient()
+		return sideStore{}, nil, fmt.Errorf("failed to register effective Redis pool gauges: %w", gaugeErr)
+	}
+
+	// The pool has to cover the workers that will use it. This compares the
+	// EFFECTIVE size -- what the client holds, not what we asked for -- against
+	// the bounded users, and refuses to start rather than discovering it under
+	// load as a queue nobody can explain.
+	//
+	// WHAT THIS GUARD DOES NOT COVER: in eager validation mode the relay meter
+	// runs inline in the HTTP handler, not inside a subpool, so its concurrency
+	// is whatever the HTTP server admits and no startup number can bound it.
+	// This guard covers the BOUNDED users; the pool metrics show the rest. Read
+	// it as "the floor is right", never as "the pool is sufficient".
+	if eff, ok := redisClient.EffectivePoolOptions(); ok {
+		needed := sizing.Validation + sizing.Publish
+		if eff.PoolSize < needed {
+			closeClient()
+			return sideStore{}, nil, fmt.Errorf(
+				"redis pool too small: the client holds %d connections but the bounded workers that use it "+
+					"need %d (validation %d + publish %d); raise redis.pool_size or lower the worker count",
+				eff.PoolSize, needed, sizing.Validation, sizing.Publish)
+		}
+		logger.Info().
+			Int("pool_size_effective", eff.PoolSize).
+			Int("min_idle_conns_effective", eff.MinIdleConns).
+			Dur("pool_timeout_effective", eff.PoolTimeout).
+			Int("bounded_workers", needed).
+			Msg("Redis pool covers the bounded workers (the eager meter path is NOT bounded by this)")
+	} else {
+		logger.Warn().
+			Msg("could not read the effective Redis pool settings from this client type: " +
+				"the startup pool guard did NOT run")
+	}
+
+	// How long each Redis command really takes from here, pool wait and
+	// go-redis retries included. The pool's own wait series cannot answer that:
+	// they count only waits that ended in a connection, so their mean improves
+	// as the pool starts failing.
+	redisClient.AddHook(redistransport.NewCommandLatencyHook("relayer"))
+
+	redisPools := redistransport.NewPoolCollector("relayer")
+	redisPools.Add("shared", redisClient)
+	observability.SharedRegistry.MustRegister(redisPools)
+
+	return sideStore{kv: store, health: storeHealth, redisClient: redisClient, redisPools: redisPools}, closeClient, nil
 }
 
 // startHealthServer starts a simple HTTP server for health and readiness checks.

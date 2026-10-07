@@ -105,7 +105,7 @@ type storeGateState struct {
 // OnChange answer for the gate the process was built with; Gate answers for any.
 type StoreHealth struct {
 	logger      logging.Logger
-	client      redis.UniversalClient
+	sampler     storeSampler
 	component   string
 	defaultGate StoreGate
 	now         func() time.Time
@@ -122,9 +122,21 @@ type StoreHealth struct {
 // Start runs. component labels its metrics ("miner", "relayer"); gate is the
 // threshold Operable, Changed and OnChange use.
 func NewStoreHealth(logger logging.Logger, client redis.UniversalClient, component string, gate StoreGate) *StoreHealth {
+	return newStoreHealth(logger, redisSampler{client: client}, component, gate)
+}
+
+// NewDiskStoreHealth returns a StoreHealth over the disk an embedded store
+// lives on: usage reports the bytes used and the total of that disk, and the
+// gates close and reopen at the same free-space lines as over Redis memory, so
+// the process stops taking work before the disk is full.
+func NewDiskStoreHealth(logger logging.Logger, usage func() (used, total uint64, err error), component string, gate StoreGate) *StoreHealth {
+	return newStoreHealth(logger, diskSampler{usage: usage}, component, gate)
+}
+
+func newStoreHealth(logger logging.Logger, sampler storeSampler, component string, gate StoreGate) *StoreHealth {
 	h := &StoreHealth{
 		logger:      logging.ForComponent(logger, "store_health"),
-		client:      client,
+		sampler:     sampler,
 		component:   component,
 		defaultGate: gate,
 		now:         time.Now,
@@ -237,18 +249,11 @@ func (h *StoreHealth) Start(ctx context.Context) error {
 func (h *StoreHealth) preflight(ctx context.Context) error {
 	sampleCtx, cancel := context.WithTimeout(ctx, storeHealthSampleMaxAge)
 	defer cancel()
-	info, err := h.sample(sampleCtx)
+	s, err := h.sampler.sample(sampleCtx)
 	if err != nil {
 		h.closeAll(StoreReasonSampleStale)
 		h.logger.Error().Err(err).Str("process", h.component).
-			Msg("redis did not answer INFO at startup: the store stays closed until it does")
-		return nil
-	}
-	s, ok := parseStoreInfo(info)
-	if !ok {
-		h.closeAll(StoreReasonSampleStale)
-		h.logger.Error().Str("process", h.component).
-			Msg("redis INFO has no used_memory, maxmemory or maxmemory_policy: the store stays closed")
+			Msg("the store did not answer at startup: it stays closed until it does")
 		return nil
 	}
 	// Applied before the refusal is returned, so what the metrics show is the
@@ -256,20 +261,45 @@ func (h *StoreHealth) preflight(ctx context.Context) error {
 	return h.apply(s)
 }
 
-// sample reads INFO with no section argument. The default reply carries both
-// the Server and the Memory sections on every Redis version, while INFO with
-// several sections is a newer syntax: an old server would answer it with an
-// error, which preflight reads as "did not answer" -- and the process would
+// storeSampler takes one sample of the store's room.
+type storeSampler interface {
+	sample(ctx context.Context) (storeSample, error)
+}
+
+// redisSampler reads INFO with no section argument. The default reply carries
+// both the Server and the Memory sections on every Redis version, while INFO
+// with several sections is a newer syntax: an old server would answer it with
+// an error, which preflight reads as "did not answer" -- and the process would
 // start without ever learning the version it has to refuse.
 //
 // With a cluster client INFO answers from one node; the supported topology is
 // one Redis.
-func (h *StoreHealth) sample(ctx context.Context) (string, error) {
-	info, err := h.client.Info(ctx).Result()
+type redisSampler struct{ client redis.UniversalClient }
+
+func (r redisSampler) sample(ctx context.Context) (storeSample, error) {
+	info, err := r.client.Info(ctx).Result()
 	if err != nil {
-		return "", fmt.Errorf("redis INFO: %w", err)
+		return storeSample{}, fmt.Errorf("redis INFO: %w", err)
 	}
-	return info, nil
+	s, ok := parseStoreInfo(info)
+	if !ok {
+		return storeSample{}, fmt.Errorf("redis INFO has no used_memory, maxmemory or maxmemory_policy")
+	}
+	return s, nil
+}
+
+// diskSampler reads the room on the disk an embedded store lives on. A disk
+// never evicts, and has no server version to check.
+type diskSampler struct {
+	usage func() (used, total uint64, err error)
+}
+
+func (d diskSampler) sample(context.Context) (storeSample, error) {
+	used, total, err := d.usage()
+	if err != nil {
+		return storeSample{}, fmt.Errorf("disk usage: %w", err)
+	}
+	return storeSample{used: used, maxmemory: total, policy: storeEvictionPolicy, unversioned: true}, nil
 }
 
 // apply checks the server's version, then applies the memory sample. A version
@@ -281,7 +311,7 @@ func (h *StoreHealth) sample(ctx context.Context) (string, error) {
 // had not answered when the process started, or one replaced by an older
 // server behind the same address, would otherwise never be looked at again.
 func (h *StoreHealth) apply(s storeSample) error {
-	if err := storeVersionRefusal(s.version, s.fork); err != nil {
+	if err := storeVersionRefusal(s.version, s.fork); !s.unversioned && err != nil {
 		h.mu.Lock()
 		h.lastSample = h.now()
 		h.lastUsed, h.lastMax = s.used, s.maxmemory
@@ -298,13 +328,8 @@ func (h *StoreHealth) apply(s storeSample) error {
 func (h *StoreHealth) poll(ctx context.Context) {
 	sampleCtx, cancel := context.WithTimeout(ctx, storeHealthSampleMaxAge)
 	defer cancel()
-	info, err := h.sample(sampleCtx)
+	s, err := h.sampler.sample(sampleCtx)
 	if err != nil {
-		h.observeFailure()
-		return
-	}
-	s, ok := parseStoreInfo(info)
-	if !ok {
 		h.observeFailure()
 		return
 	}
@@ -498,6 +523,9 @@ type storeSample struct {
 	// fork is "<field> <value>" for the first storeForkVersionKeys field the
 	// reply carries, "" when it carries none.
 	fork string
+	// unversioned is a sample from a store with no server version to check
+	// (a disk); every other sample's version is checked.
+	unversioned bool
 }
 
 // parseStoreInfo reads a sample from an INFO reply. A reply without

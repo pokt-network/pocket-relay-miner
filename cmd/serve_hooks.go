@@ -13,6 +13,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // sideHooks is what serveRelayer and serveMiner take from the process that runs
@@ -32,9 +33,11 @@ type sideHooks struct {
 	// process's observability server.
 	setReadiness func(observability.ReadinessCheck)
 
-	// kv, when not nil, is the store the caches, the meter and the registries
-	// keep their state in; nil means Redis.
-	kv kv.Store
+	// openStore, when not nil, opens the side's store: what its caches, meter
+	// and registries keep their state in, and whether that store can take
+	// writes. component labels the health metrics and gate is the side's
+	// threshold. nil means Redis (high-availability mode).
+	openStore func(ctx context.Context, logger logging.Logger, component string, gate redistransport.StoreGate) (sideStore, func(), error)
 
 	// openPublisher builds the relayer's mined-relay publisher.
 	openPublisher func(ctx context.Context, logger logging.Logger, d relayPublisherDeps) (relayPublisher, func(), error)
@@ -65,4 +68,16 @@ func waitForSignal() <-chan os.Signal {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	return sigCh
+}
+
+// sideStore is where a side keeps its state, and whether that store can take
+// writes.
+type sideStore struct {
+	kv     kv.Store
+	health *redistransport.StoreHealth
+	// redisClient and redisPools are the side's Redis client and its pool
+	// collector in high-availability mode; nil in standalone mode, which keeps
+	// nothing in Redis.
+	redisClient *redistransport.Client
+	redisPools  *redistransport.PoolCollector
 }

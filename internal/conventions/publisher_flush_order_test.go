@@ -76,11 +76,18 @@ func TestPublisherFlushIsDeferredAfterTheRedisClient(t *testing.T) {
 		t.Fatalf("%s not found: if it moved, point this rule at its new path", path)
 	}
 
-	client := deferredCloseOf(f, "redisClient")
+	// The Redis client is opened by openRelayerRedisStore, which hands its
+	// Close back as the side's closeStore; serveRelayer defers that.
+	if !closesInFuncLit(f, "closeClient", "redisClient") {
+		t.Fatalf("%s: the closer openRelayerRedisStore returns must close redisClient.\n"+
+			"  If the client is now closed some other way, this rule has to be rewritten\n"+
+			"  against that shape -- not deleted: the ordering it protects still exists.", path)
+	}
+	client := deferredCallOf(f, "closeStore")
 	publisher := deferredCloseOf(f, "publisher")
 
 	if client == token.NoPos {
-		t.Fatalf("%s has no deferred redisClient.Close().\n"+
+		t.Fatalf("%s has no deferred closeStore(), which closes the Redis client.\n"+
 			"  If the client is now closed some other way, this rule has to be rewritten\n"+
 			"  against that shape -- not deleted: the ordering it protects still exists.", path)
 	}
@@ -90,13 +97,13 @@ func TestPublisherFlushIsDeferredAfterTheRedisClient(t *testing.T) {
 			"  defer, a shutdown with a backlog drops every relay in it.", path)
 	}
 	if publisher <= client {
-		t.Errorf("%s defers publisher.Close() BEFORE redisClient.Close().\n"+
+		t.Errorf("%s defers publisher.Close() BEFORE closeStore().\n"+
 			"  Defers run LIFO, so declaring the publisher's first makes it run LAST: the\n"+
 			"  Redis client is already closed when the final flush tries to write through\n"+
 			"  it, every command returns redis: client is closed, and the queued chunk is\n"+
 			"  put back on a queue nobody drains again. Those relays were served, signed\n"+
 			"  and answered -- they are simply never written.\n"+
-			"  Declare the publisher's defer AFTER the client's.", path)
+			"  Declare the publisher's defer AFTER closeStore's.", path)
 	}
 }
 
