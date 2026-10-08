@@ -305,7 +305,7 @@ func TestPublishBlockEvent_IsOneRoundTripOnRedis(t *testing.T) {
 	defer cancel()
 	redisClient, counted := newTestRedisPair(t)
 	trips := &roundTrips{}
-	counted.AddHook(trips)
+	counted.AddHook(testredis.ProductCommands(trips))
 	pub := NewRedisBlockPublisher(testLogger(), kv.NewRedis(zerolog.Nop(), counted))
 
 	require.NoError(t, pub.PublishBlockHeight(ctx, BlockEvent{Height: 900, Hash: []byte{0x09}}))
