@@ -97,7 +97,8 @@ func (r *runningSide) finish(err error, stoppedOnItsOwn bool) error {
 // delivers or either side stops. It then stops second and waits for it, and
 // only then stops first: the relayer drains what it serves before the miner it
 // hands relays to goes away. A side that fails to start stops the one already
-// running; a side that fails while serving stops the other. A signal while a
+// running; a side that fails while serving stops the other, also while the
+// other is still starting. A signal while a
 // side is still starting cancels that side's startup and stops the other in
 // order; the process then exits cleanly.
 func runSides(ctx context.Context, logger logging.Logger, first, second side, hooks sideHooks, sigCh <-chan os.Signal) error {
@@ -119,6 +120,16 @@ func runSides(ctx context.Context, logger logging.Logger, first, second side, ho
 	b := startSide(ctx, logger, second, hooks)
 	select {
 	case <-b.started:
+	case err := <-a.done:
+		// The first side failed while the second was starting: cancel that
+		// startup, which ends with the context's error, not a failure of its own.
+		b.abort()
+		b.requestStop()
+		bErr := <-b.done
+		if errors.Is(bErr, context.Canceled) {
+			bErr = nil
+		}
+		return errors.Join(a.finish(err, true), b.finish(bErr, false))
 	case err := <-b.done:
 		a.requestStop()
 		return errors.Join(b.finish(err, true), a.finish(<-a.done, false))

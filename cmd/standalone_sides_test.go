@@ -7,6 +7,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -206,4 +207,22 @@ func TestRunSides_ASignalDuringTheFirstStartupNeverStartsTheSecond(t *testing.T)
 
 	require.NoError(t, <-r.result)
 	require.Equal(t, []string{"miner:build", "miner:startup-cancelled"}, r.log.all())
+}
+
+func TestRunSides_AMinerThatFailsWhileTheRelayerStartsStopsTheRelayer(t *testing.T) {
+	r := startSidesRun(t, func(_, relayer *fakeSide) { relayer.slowStart = make(chan struct{}) })
+	<-r.relayer.building
+	minerErr := errors.New("leader controller failed")
+	r.miner.failWhile <- minerErr
+
+	select {
+	case err := <-r.result:
+		require.ErrorIs(t, err, minerErr)
+		require.Equal(t, []string{
+			"miner:build", "miner:serving",
+			"relayer:build", "miner:failed", "relayer:startup-cancelled",
+		}, r.log.all())
+	case <-time.After(5 * time.Second):
+		t.Fatal("a miner that failed while the relayer was starting went unnoticed")
+	}
 }
