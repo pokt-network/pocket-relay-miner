@@ -24,7 +24,7 @@ tilt/
 │   ├── backend.Tiltfile    # Backend server
 │   ├── nginx-backend.Tiltfile  # Static JSON-RPC backend for load tests
 │   ├── observability.Tiltfile  # Prometheus, Grafana, Loki and Promtail
-│   ├── path.Tiltfile       # PATH gateway (optional)
+│   ├── path.Tiltfile       # The gateway that sends relays (optional)
 │   ├── account-init.Tiltfile   # Account initialization
 │   └── accounts.star       # Accounts account-init initializes, derived from the genesis
 ├── config/                 # Shared configuration files
@@ -89,7 +89,7 @@ by `scripts/dashboards/generate.py`.
 | Validator gRPC | 9090 | Pocket queries |
 | Backend HTTP | 8545 | Demo backend |
 | Backend gRPC | 50051 | Demo backend |
-| PATH Gateway | 3069 | Relay routing |
+| Gateway | 3069 | Relay routing |
 | Relayer HTTP | 8180 | Relay processing |
 | Miner Metrics | 9092 | Miner metrics |
 | Prometheus | 9091 | Metrics |
@@ -109,7 +109,7 @@ pocket-relay-miner relay jsonrpc --localnet --service develop-http
 Through the gateway, which only confirms it is wired:
 
 ```bash
-# Send a test relay via PATH
+# Send a test relay through the gateway
 curl -X POST http://localhost:3069/v1 \
   -H "Target-Service-Id: develop-http" \
   -H "Content-Type: application/json" \
@@ -158,7 +158,7 @@ go tool pprof http://localhost:6065/debug/pprof/heap
 ### Request Flow
 
 ```
-Client → PATH Gateway → Relayer → Backend
+Client → Gateway → Relayer → Backend
                  ↓
            Redis Streams
                  ↓
