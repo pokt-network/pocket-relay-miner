@@ -99,7 +99,7 @@ fi
 gate_step "go build"
 # -o /dev/null: without it, `go build` on a pattern that resolves to a SINGLE
 # main package writes the executable into the current directory. Measured
-# 2026-08-26 with PKG=scripts/ws-test: an 8 MB binary appeared at the repo root,
+# 2026-08-26 with PKG naming a single main package: an 8 MB binary appeared at the repo root,
 # untracked and NOT gitignored, so the next `git add` would have offered it.
 if build_out="$(go build -o /dev/null "$pkg" 2>&1)"; then
     gate_pass "root module builds"

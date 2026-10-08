@@ -1,7 +1,6 @@
 # Shared helpers for scripts that drive the relayer through the repo's own
 # relay CLI. Load and smoke tests go through `relay jsonrpc` (ring-signed
-# requests, supplier-signature-verified responses) straight to the relayer —
-# never through the gateway, which masks relayer 503s as empty 200s.
+# requests, supplier-signature-verified responses) straight to the relayer.
 #
 # Source this file; it defines functions only and runs nothing.
 
