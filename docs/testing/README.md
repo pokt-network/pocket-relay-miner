@@ -20,13 +20,10 @@ keyring backends, the passphrase, and hot reload — see
   transports (JSON-RPC, WebSocket, gRPC, streaming, CometBFT) and carries
   sustained load with `--load-test`.
 
-> **Do not measure relays through a gateway.** A gateway can answer a relayer
-> `503` with `200` and an empty body, so any tool that reads status codes counts
-> relays that were never mined: a real run reported `20000/20000 OK` with the
-> WAL at `XLEN 0`. This is not confined to error paths — it invalidates
-> throughput and lifecycle numbers too. Send relays with the `relay` CLI at
-> `:8180`, which verifies the supplier signature and the backend's own error
-> field, so a failure reads as a failure.
+> **Measure relays with the `relay` CLI at `:8180`.** It verifies the supplier
+> signature and the backend's own error field, so a failure reads as a failure.
+> A status-code check on anything in front of the relayer can count relays that
+> were never mined, which invalidates throughput and lifecycle numbers too.
 
 ## Reference material
 

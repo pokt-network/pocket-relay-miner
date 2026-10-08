@@ -25,9 +25,8 @@
 #
 # Three things that will otherwise waste an afternoon, all learned the hard way:
 #
-#   * Load goes through the relay CLI at :8180, NEVER the gateway. The gateway
-#     answers a relayer 503 with 200 and an empty body, so a gateway-side run
-#     reports 20000/20000 OK with an empty WAL.
+#   * Load goes through the relay CLI straight at :8180, which verifies each
+#     response; a status-code count can report OK for relays never mined.
 #   * There is an economic cap of roughly 115-130 mined relays per supplier per
 #     session (~109s). Past it the relayer correctly returns 429 and only the
 #     first session claims, which looks like a broken pipeline and is not. The
@@ -798,11 +797,10 @@ fi
 
 # ---------------------------------------------------------------------------
 # Multi-backend distribution (absorbed from the retired test-round-robin.sh,
-# which measured this through the gateway and could not tell a relayer 503 from a
-# served relay). The demo backend stamps backend_id into eth_blockNumber
-# responses; when the rendered config gives develop-http more than one
-# jsonrpc backend, a handful of signed single relays must land on more than
-# one of them, or the pool is not distributing.
+# which could not tell a relayer 503 from a served relay). The demo backend
+# stamps backend_id into eth_blockNumber responses; when the rendered config
+# gives develop-http more than one jsonrpc backend, a handful of signed single
+# relays must land on more than one of them, or the pool is not distributing.
 case " $MATRIX " in
 *" jsonrpc:develop-http "*)
     # Capture the configmap FIRST: piping kubectl straight into python under

@@ -7,14 +7,12 @@
 # uninterrupted claim/proof pipeline.
 #
 # Load is driven by the built-in relay CLI (`pocket-relay-miner relay
-# jsonrpc --localnet`) DIRECTLY against the relayer (localhost:8180), NOT
-# through the gateway: the gateway masks relayer 503s as 200 + empty body
-# (known issue), which hid a real rejection burst during development. The
+# jsonrpc --localnet`) DIRECTLY against the relayer (localhost:8180). The
 # CLI validates each relay end-to-end (supplier signature, JSON-RPC error
 # field), so its Failed count reports the relayer's true behavior.
 #
 # Requirements: Tilt localnet up (relayer/miner/validator/redis),
-# redis-cli, jq. The gateway is NOT required.
+# redis-cli, jq.
 #
 # Usage: ./scripts/test-cache-cleanup-live.sh [--relays 9000] [--concurrency 10]
 
@@ -78,8 +76,7 @@ only_meter_capped() {
 # run_load <label> <count> <output-file>: runs the CLI load and asserts zero
 # TRUE failures. Retries (next session) when the only failures are 429
 # claimable-cap. The CLI validates supplier signatures and JSON-RPC errors
-# per relay, so Failed>0 here is a REAL relayer-side failure — no gateway
-# masking.
+# per relay, so Failed>0 here is a REAL relayer-side failure.
 run_load() {
   local label="$1" count="$2" out="$3" attempt failed
   for attempt in 1 2 3; do
@@ -89,7 +86,7 @@ run_load() {
     failed=$(parse_failed "$out")
     [[ -n "$failed" ]] || fail "${label}: could not parse CLI summary (run died?)"
     if [[ "$failed" == "0" ]]; then
-      echo "PASS: ${label} — 0 failed relays (signature-validated, no gateway masking)"
+      echo "PASS: ${label} — 0 failed relays (signature-validated)"
       return 0
     fi
     if only_meter_capped "$out"; then
@@ -174,7 +171,7 @@ echo "bursts complete: ${total_ok} ok, ${total_errors} errors (${meter_capped} m
 
 log "Assertions"
 # 1. Zero TRUE failures across every burst (signature-validated per relay by
-#    the CLI — no gateway masking). Meter-capped 429s are an economic limit,
+#    the CLI). Meter-capped 429s are an economic limit,
 #    tolerated only if they are the ONLY error type AND some bursts spanned
 #    the cleanup.
 true_failures=$((total_errors - meter_capped))
