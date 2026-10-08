@@ -415,7 +415,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "sessions_failed_total",
-			Help:      "Failed session attempts by reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, proof_window_closed, proof_tx_error, panic_recovered on relays only); claim_tx_error and proof_tx_error are retried by the inclusion reconciler ONLY when a transaction was actually broadcast, since the reconciler walks rebroadcast entries -- a session marked proof_tx_error before any proof was built has none, and nothing retries it. What settles the broadcast case is claim_inclusion_outcome_total / proof_inclusion_outcome_total with outcome=on_chain_found",
+			Help:      "Failed session attempts by reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, claim_missing, proof_window_closed, proof_tx_error, panic_recovered on relays only); claim_tx_error and proof_tx_error are retried by the inclusion reconciler ONLY when a transaction was actually broadcast, since the reconciler walks rebroadcast entries -- a session marked proof_tx_error before any proof was built has none, and nothing retries it. What settles the broadcast case is claim_inclusion_outcome_total / proof_inclusion_outcome_total with outcome=on_chain_found",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -1809,6 +1809,20 @@ func RecordClaimWindowClosed(supplier, serviceID, claimTxHash string, relays, co
 		return
 	}
 	recordSessionLoss(supplier, serviceID, "claim_window_closed", relays, computeUnits)
+}
+
+// RecordClaimMissing records a session whose claim the chain does not hold at
+// proof time, although this miner had it as claimed: the proof is skipped and
+// the session ends. heldClaim is whether the session was in a state that holds
+// a claim on chain -- every way into claimed counted its money in `claimed`
+// (the broadcast, or the reconciler finding the claim), so that money is lost.
+// A session that never got there was never in the book: forgone.
+func RecordClaimMissing(supplier, serviceID string, heldClaim bool, relays, computeUnits int64) {
+	if !heldClaim {
+		recordSessionForgone(supplier, serviceID, "claim_missing", relays, computeUnits)
+		return
+	}
+	recordSessionLoss(supplier, serviceID, "claim_missing", relays, computeUnits)
 }
 
 // RecordClaimEjectedUnrecoverable records a claim the chain named inside a batch

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -382,4 +383,68 @@ func TestPreProofGuard_APendingClaimGetsItsProof(t *testing.T) {
 	signed, result := judgedProofCycle(t, prooftypes.ClaimProofStatus_PENDING_VALIDATION)
 	require.Equal(t, 1, signed, "control: a claim waiting for its proof gets it")
 	require.True(t, result.IsSettled("session-judged"))
+}
+
+// A claim the chain does not hold at proof time ends the session: it is counted
+// once in sessions_failed_total, and the money its claim put in `claimed` moves
+// to `lost`, so claimed = proved + lost + unresolved still closes. A second call
+// counts nothing.
+func TestOnClaimMissing_CountsTheSessionOnceAndItsMoneyAsLost(t *testing.T) {
+	coord, store, _ := setupTestCoordinator(t)
+	ctx := context.Background()
+	const service = "svc-claim-missing-lost"
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID: "sess-missing-lost", SupplierOperatorAddress: "pokt1test", ServiceID: service,
+		SessionStartHeight: 100, SessionEndHeight: 110, State: SessionStateClaimed, ClaimTxHash: "deadbeef",
+		RelayCount: 3, TotalComputeUnits: 3_000_000,
+	}))
+	saved, err := store.Get(ctx, "sess-missing-lost")
+	require.NoError(t, err)
+	require.Equal(t, int64(3), saved.RelayCount, "premise: the session carries its weight")
+	before := readLedger("pokt1test", service, "claim_missing", "")
+	relaysBefore := testutil.ToFloat64(relaysLostTotal.WithLabelValues("pokt1test", service, "claim_missing"))
+
+	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-lost"))
+	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-lost"))
+
+	after := readLedger("pokt1test", service, "claim_missing", "")
+	require.Equal(t, before.sessions+1, after.sessions, "one failed session, once")
+	require.InDelta(t, before.lost+3, after.lost, 1e-9, "the claimed money is lost")
+	require.Equal(t, before.forgone, after.forgone, "nothing forgone: the claim was in the book")
+	require.Equal(t, relaysBefore+3, testutil.ToFloat64(relaysLostTotal.WithLabelValues("pokt1test", service, "claim_missing")))
+}
+
+// A session that never held a claim never put money in `claimed`: its money
+// is forgone, not lost.
+func TestOnClaimMissing_ASessionThatNeverHeldAClaimIsForgone(t *testing.T) {
+	coord, store, _ := setupTestCoordinator(t)
+	ctx := context.Background()
+	const service = "svc-claim-missing-forgone"
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID: "sess-missing-forgone", SupplierOperatorAddress: "pokt1test", ServiceID: service,
+		SessionStartHeight: 100, SessionEndHeight: 110, State: SessionStateActive,
+		RelayCount: 2, TotalComputeUnits: 2_000_000,
+	}))
+	before := readLedger("pokt1test", service, "claim_missing", "")
+
+	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-forgone"))
+
+	after := readLedger("pokt1test", service, "claim_missing", "")
+	require.Equal(t, before.sessions+1, after.sessions)
+	require.InDelta(t, before.forgone+2, after.forgone, 1e-9)
+	require.Equal(t, before.lost, after.lost)
+}
+
+// A session another miner settled is not marked, and not counted.
+func TestOnClaimMissing_ASettledSessionIsNotCounted(t *testing.T) {
+	coord, store, _ := setupTestCoordinator(t)
+	ctx := context.Background()
+	const service = "svc-claim-missing-settled"
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID: "sess-missing-settled", SupplierOperatorAddress: "pokt1test", ServiceID: service,
+		SessionStartHeight: 100, SessionEndHeight: 110, State: SessionStateProved, RelayCount: 1, TotalComputeUnits: 1_000_000,
+	}))
+	before := readLedger("pokt1test", service, "claim_missing", "")
+	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-settled"))
+	require.Equal(t, before, readLedger("pokt1test", service, "claim_missing", ""))
 }

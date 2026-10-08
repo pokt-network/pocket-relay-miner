@@ -648,6 +648,9 @@ func (c *SessionCoordinator) OnClaimMissing(ctx context.Context, sessionID strin
 	if err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to read session state before marking claim_missing")
+	} else if current != nil && current.State == SessionStateClaimMissing {
+		// Already marked and counted: a session fails once.
+		return nil
 	} else if current != nil && current.State.IsSuccess() {
 		c.logger.Warn().
 			Str(logging.FieldSessionID, sessionID).
@@ -660,6 +663,16 @@ func (c *SessionCoordinator) OnClaimMissing(ctx context.Context, sessionID strin
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_missing")
 		return err
+	}
+
+	// Counted once, on the transition. Without the snapshot (its read failed
+	// above) there is no supplier, service or weight to count it under.
+	if current != nil {
+		RecordClaimMissing(current.SupplierOperatorAddress, current.ServiceID, current.State.HoldsClaimOnChain(),
+			current.RelayCount, int64(current.TotalComputeUnits))
+	} else {
+		c.logger.Warn().Str(logging.FieldSessionID, sessionID).
+			Msg("claim_missing not counted in sessions_failed_total: the session could not be read to weigh it")
 	}
 
 	if terminalCallback != nil {
