@@ -1,188 +1,69 @@
-# Pocket RelayMiner - Tilt Development Environments
+# Pocket RelayMiner - Tilt development environment
 
-This directory contains the Tilt-based development environment for Pocket RelayMiner,
-in either mode: `relay_miner_mode: ha` (the default; relayer and miner Deployments
-over Redis) or `relay_miner_mode: standalone` (one process, its store on a volume,
-no Redis) in `tilt_config.yaml`. [docs/testing/TILT.md](../docs/testing/TILT.md)
-says what each mode brings up.
+This directory holds the Tilt environment that runs a Pocket Network localnet
+in a local kind cluster, with the relay miner under test in either mode:
+`relay_miner_mode: ha` (the default; relayer and miner Deployments over Redis)
+or `relay_miner_mode: standalone` (one process, its store on a volume, no Redis)
+in `tilt_config.yaml`.
 
-## Directory Structure
+How to bring it up, what each mode runs, the port map, the smoke test, logs,
+metrics and profiling are in [docs/testing/TILT.md](../docs/testing/TILT.md).
+Sending relays and load is in [docs/testing/DIRECT_CLI.md](../docs/testing/DIRECT_CLI.md);
+the live gate that validates either mode is in
+[scripts/gates/README.md](../scripts/gates/README.md). This file only maps the
+directory.
+
+## Directory structure
 
 ```
 Tiltfile                    # Entry point, at the repository root
+tilt_config.example.yaml    # Tracked reference config; copy it to tilt_config.yaml
 tilt/
-├── k8s/                    # Kubernetes Tilt environment
+├── k8s/                    # The Tiltfiles the entry point loads
 │   ├── config.Tiltfile     # Config loading & validation
-│   ├── defaults.Tiltfile   # Default values
+│   ├── defaults.Tiltfile   # Default values, relay_miner_mode among them
 │   ├── ports.Tiltfile      # Centralized port registry
-│   ├── utils.Tiltfile      # Helper functions
-│   ├── redis.Tiltfile      # Redis deployment
+│   ├── utils.Tiltfile      # Helpers, the keyring init container all relay-miner pods share
+│   ├── redis.Tiltfile      # Redis (high-availability mode, and the gateway)
 │   ├── validator.Tiltfile  # Validator + genesis
-│   ├── miner.Tiltfile      # Miner deployment
-│   ├── relayer.Tiltfile    # Relayer deployment
-│   ├── standalone.Tiltfile # Standalone-mode deployment (relay_miner_mode: standalone)
-│   ├── backend.Tiltfile    # Backend server
+│   ├── miner.Tiltfile      # Miner Deployment (high-availability mode)
+│   ├── relayer.Tiltfile    # Relayer Deployment (high-availability mode)
+│   ├── standalone.Tiltfile # Standalone Deployment (standalone mode)
+│   ├── backend.Tiltfile    # Demo backend server
 │   ├── nginx-backend.Tiltfile  # Static JSON-RPC backend for load tests
 │   ├── observability.Tiltfile  # Prometheus, Grafana, Loki and Promtail
 │   ├── path.Tiltfile       # The gateway that sends relays (optional)
 │   ├── account-init.Tiltfile   # Account initialization
 │   └── accounts.star       # Accounts account-init initializes, derived from the genesis
-├── config/                 # Shared configuration files
-│   ├── genesis.json        # Localnet genesis: 50 suppliers, 5 applications per service
-│   ├── all-keys.yaml       # All account keys
-│   ├── *.toml              # Validator configs
-│   └── *.json              # Validator keys
-├── backend-server/         # Demo backend server
+├── config/                 # Localnet chain files
+├── backend-server/         # Demo backend server (its own Go module)
 ├── local-registry.sh       # Local image registry for kind
 └── README.md               # This file
 ```
 
-## Quick Start
+## Demo backend (`backend-server/`)
 
-```bash
-# Prerequisites: kubectl, kind/minikube, tilt
+The backend every localnet service is served from, one server for every
+transport the relayer routes:
 
-# From project root
-make tilt-up-k8s
+- HTTP JSON-RPC and WebSocket on `:8545`
+- gRPC on `:50051`
+- SSE streaming at `/stream/sse` and NDJSON streaming at `/stream/ndjson`
 
-# Stop
-make tilt-down-k8s
-```
+## Localnet chain files (`config/`)
 
-## Components
+| File | What it is |
+|------|------------|
+| `genesis.json` | the localnet genesis: 50 suppliers, the applications and the gateway, staked |
+| `all-keys.yaml` | every localnet account's key; the supplier keys become the `supplier-keys` Secret |
+| `config.toml`, `app.toml`, `client.toml` | the validator's configs; the Tiltfile sets the block time on `config.toml` |
+| `node_key.json`, `priv_validator_key.json`, `priv_validator_state.json` | the validator's keys and state |
 
-### Backend Server (`backend-server/`)
+These are localnet values: the keys are public and fund nothing outside it.
 
-Multi-protocol demo server for testing relay capabilities.
-
-**Protocols Supported:**
-- HTTP JSON-RPC (`:8545`)
-- WebSocket subscriptions (`:8545`)
-- gRPC (`:50051`)
-- SSE streaming (`/stream/sse`)
-- NDJSON streaming (`/stream/ndjson`)
-
-### Shared Config (`config/`)
-
-Configuration files for the K8s environment:
-
-| File | Description |
-|------|-------------|
-| `genesis.json` | Pocket Network genesis with apps, suppliers, gateway |
-| `all-keys.yaml` | All account keys (apps, suppliers, gateway) |
-| `config.toml` | Validator CometBFT config |
-| `app.toml` | Validator app config |
-
-### Grafana dashboards
+## Grafana dashboards
 
 Tilt provisions the 7 dashboards of
 [examples/observability/](../examples/observability/README.md), the same files
 the compose example runs; they are generated from the metrics the code defines
 by `scripts/dashboards/generate.py`.
-
-## Services
-
-| Service | Port | Description |
-|---------|------|-------------|
-| Redis | 6379 | Shared state |
-| Validator RPC | 26657 | Pocket node |
-| Validator gRPC | 9090 | Pocket queries |
-| Backend HTTP | 8545 | Demo backend |
-| Backend gRPC | 50051 | Demo backend |
-| Gateway | 3069 | Relay routing |
-| Relayer HTTP | 8180 | Relay processing |
-| Miner Metrics | 9092 | Miner metrics |
-| Prometheus | 9091 | Metrics |
-| Grafana | 3000 | Dashboards |
-
-## Testing Relays
-
-The check that counts is a relay sent straight to the relayer, which verifies
-the signature and the backend's answer
-([docs/testing/DIRECT_CLI.md](../docs/testing/DIRECT_CLI.md)):
-
-```bash
-# Expect: Status: ✅ SUCCESS
-pocket-relay-miner relay jsonrpc --localnet --service develop-http
-```
-
-Through the gateway, which only confirms it is wired:
-
-```bash
-# Send a test relay through the gateway
-curl -X POST http://localhost:3069/v1 \
-  -H "Target-Service-Id: develop-http" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-
-# Expected response:
-# {"id":1,"jsonrpc":"2.0","result":{"method":"eth_blockNumber","params":[],"status":"ok"}}
-```
-
-## Debugging
-
-### Redis Commands
-
-High-availability mode only. In standalone mode the process holds its store's
-lock: read its logs (`kubectl logs -f -l app=standalone`) and its metrics.
-
-```bash
-# Check Redis keys
-go run main.go redis keys --pattern "ha:*" --stats
-
-# View sessions
-go run main.go redis sessions --supplier pokt1...
-
-# Check leader status
-go run main.go redis leader
-```
-
-### Logs
-
-```bash
-kubectl logs -f -l app=relayer
-```
-
-### Profiling
-
-```bash
-# Relayer pprof
-go tool pprof http://localhost:6060/debug/pprof/profile
-
-# Miner pprof
-go tool pprof http://localhost:6065/debug/pprof/heap
-```
-
-## Architecture
-
-### Request Flow
-
-```
-Client → Gateway → Relayer → Backend
-                 ↓
-           Redis Streams
-                 ↓
-              Miner → Validator (claims/proofs)
-```
-
-### HA Failover
-
-```
-┌─────────────┐     ┌─────────────┐
-│   Miner 1   │────▶│   Miner 2   │
-│  (Leader)   │     │  (Standby)  │
-└─────────────┘     └─────────────┘
-       │                   │
-       └───────┬───────────┘
-               ↓
-         Redis Lock
-      (Leader Election)
-```
-
-## Performance Targets
-
-- **Relayer**: 1000+ RPS per replica
-- **Relay Validation**: <1ms average
-- **SMST Update**: <100µs
-- **Cache L1 Hit**: <100ns
-- **Cache L2 Hit**: <2ms
