@@ -299,16 +299,21 @@ fi
 # relay pinned to one of those is answered 503 ("supplier ... is not_staked").
 # The count also feeds the thin-load warning and the settlement filter.
 #
-# Standalone mode has no registry this CLI can read (the process holds its
-# store's lock), so the same fact comes from the miner side itself: the stake
-# gauge it sets only for a supplier whose key it holds AND the chain reports
-# staked (miner/balance_monitor.go). Its first check runs 30s after start.
+# Standalone mode: no other process can open the store while the standalone
+# process runs, so the registry is read through its inspect server, which Tilt
+# forwards to STANDALONE_INSPECT_ADDR. A server that does not answer fails the
+# gate: an empty list would read as "no suppliers".
+STANDALONE_INSPECT_ADDR="${STANDALONE_INSPECT_ADDR:-127.0.0.1:9094}"
 printf '%s\n' "$relay_miner_mode" >"${BIN_DIR}/relay_miner_mode"
 if [ "$relay_miner_mode" = standalone ]; then
-    suppliers="$(curl -fsS --max-time 10 "${PROMETHEUS_URL}/api/v1/query" \
-        --data-urlencode 'query=ha_miner_supplier_stake_upokt > 0' 2>/dev/null |
-        jq -r '.data.result[].metric.supplier // empty' 2>/dev/null | sort -u)"
-    supplier_source="the miner side's stake gauge (ha_miner_supplier_stake_upokt)"
+    if inspect_out="$("$BIN" standalone inspect supplier --list --addr "$STANDALONE_INSPECT_ADDR" 2>&1)"; then
+        suppliers="$(printf '%s\n' "$inspect_out" | awk '/^pokt/ && $2 == "active" {print $1}')"
+    else
+        suppliers=""
+        gate_fail "the standalone inspect server at ${STANDALONE_INSPECT_ADDR} did not answer:"
+        gate_detail "$inspect_out"
+    fi
+    supplier_source="the registry, through the standalone inspect server"
 else
     suppliers="$("$BIN" redis supplier --list 2>/dev/null | awk '/^pokt/ && $2 == "active" {print $1}')"
     supplier_source="the registry"
@@ -1058,7 +1063,7 @@ while IFS=$'\t' read -r mode svc sent exact; do
         *)
             unexplained="$(gate_unexplained_shortfall "$sent" "${relays_n:-0}" "${dropped:-0}")"
             gate_fail "${svc} (${mode}): served ${sent}, billed ${relays_n:-0}, announced drops ${dropped:-0} -- ${unexplained} relay(s) LOST with no counter"
-            printf '         check the WAL and submissions for this service (redis streams and submissions in high-availability mode; the standalone process'"'"'s logs and ha_miner_* metrics in standalone mode)\n'
+            printf '         check the WAL and submissions for this service (redis streams and submissions in high-availability mode; standalone inspect streams and submissions in standalone mode)\n'
             ;;
         esac
     else
@@ -1123,21 +1128,28 @@ fi
 # start with the bare hex session ID), so the check could never fire.
 fail_states_file="${BIN_DIR}/miner_session_states.txt"
 : >"$fail_states_file"
-# Standalone mode: the store is locked by the running process, so this listing
-# cannot be read, and no counter stands in for it -- the coordinator writes the
-# failure states straight to the store (miner/session_coordinator.go), past
-# session_state_transitions_total. Said as a skip, never read as zero failures;
-# the chain's verdict above is the authority either way.
+# Standalone mode reads the same listing through the inspect server; a
+# supplier whose listing does not come back fails the gate, never reads as
+# zero failures.
 if [ "$relay_miner_mode" = standalone ]; then
-    gate_skip "miner session states not read: the standalone process holds its store's lock (the on-chain checks above are the authority)"
-    suppliers_for_states=""
+    states_read=0
+    for supplier in $suppliers; do
+        if listing="$("$BIN" standalone inspect sessions --supplier "$supplier" --json --addr "$STANDALONE_INSPECT_ADDR" 2>&1)" &&
+            printf '%s\n' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            printf '%s\n' "$listing" | jq -r '.[] | .state // empty' >>"$fail_states_file"
+            states_read=$((states_read + 1))
+        else
+            gate_fail "miner session states of ${supplier} not read from the standalone inspect server:"
+            gate_detail "$listing"
+        fi
+    done
+    gate_exercised coverage session_state_listings "$states_read"
 else
-    suppliers_for_states="$suppliers"
+    for supplier in $suppliers; do
+        "$BIN" redis sessions --supplier "$supplier" --json 2>/dev/null |
+            jq -r '(if type == "array" then . else [] end)[] | .state // empty' 2>/dev/null
+    done >>"$fail_states_file"
 fi
-for supplier in $suppliers_for_states; do
-    "$BIN" redis sessions --supplier "$supplier" --json 2>/dev/null |
-        jq -r '(if type == "array" then . else [] end)[] | .state // empty' 2>/dev/null
-done >>"$fail_states_file"
 # The unordered-nonce cause, read as a delta over this run.
 nonce_rejections_after="$(nonce_rejections_now)"
 broadcasts_after="$(max_broadcasts_per_supplier_now)"

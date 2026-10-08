@@ -5,6 +5,7 @@ package standalone
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"slices"
 	"sort"
@@ -26,7 +27,12 @@ const (
 	sectionMiner   = "miner"
 	sectionRedis   = "redis"
 	sectionStorage = "storage"
+	sectionInspect = "inspect"
 )
+
+// DefaultInspectAddr is where the inspect server listens when it is enabled
+// without an address.
+const DefaultInspectAddr = "127.0.0.1:9094"
 
 // StorageConfig is the embedded store the process keeps its state in.
 type StorageConfig struct {
@@ -35,6 +41,17 @@ type StorageConfig struct {
 	// SyncInterval bounds what an OS crash can lose (pebblestore). Zero means
 	// the store's default.
 	SyncInterval time.Duration `yaml:"sync_interval,omitempty"`
+}
+
+// InspectConfig is the read-only server that shows what the store holds --
+// sessions, trees, the relay queue, meters, submissions -- the way the redis
+// subcommands do in high-availability mode. No other process can open the
+// store while this one runs, so it is the only way in.
+type InspectConfig struct {
+	// Enabled starts the server. Off by default.
+	Enabled bool `yaml:"enabled"`
+	// Addr is a loopback host:port; any other host is refused.
+	Addr string `yaml:"addr,omitempty"`
 }
 
 // commonSections are given whole to both sides.
@@ -53,6 +70,9 @@ type Config struct {
 
 	// Storage is the embedded store.
 	Storage StorageConfig
+
+	// Inspect is the read-only inspect server.
+	Inspect InspectConfig
 
 	// Metrics and PProf configure the process's one observability server.
 	Metrics config.MetricsConfig
@@ -76,6 +96,7 @@ type probe struct {
 	Metrics    config.MetricsConfig    `yaml:"metrics"`
 	PProf      config.PprofConfig      `yaml:"pprof"`
 	Storage    StorageConfig           `yaml:"storage"`
+	Inspect    InspectConfig           `yaml:"inspect"`
 	Relayer    relayer.Config          `yaml:"relayer"`
 	Miner      miner.Config            `yaml:"miner"`
 }
@@ -103,6 +124,7 @@ func ParseConfig(data []byte) (*Config, error) {
 	top := doc.Content[0]
 
 	var storage StorageConfig
+	var inspect InspectConfig
 	sides := map[string]*yaml.Node{}
 	common := map[string]*yaml.Node{}
 	for i := 0; i+1 < len(top.Content); i += 2 {
@@ -123,6 +145,10 @@ func ParseConfig(data []byte) (*Config, error) {
 			if err := value.Decode(&storage); err != nil {
 				return nil, fmt.Errorf("line %d: storage: %w", key.Line, err)
 			}
+		case key.Value == sectionInspect:
+			if err := value.Decode(&inspect); err != nil {
+				return nil, fmt.Errorf("line %d: inspect: %w", key.Line, err)
+			}
 		default:
 			return nil, fmt.Errorf("line %d: %q is not a section of a standalone config: "+
 				"put a key only one side reads under that side's section (relayer or miner)",
@@ -136,6 +162,14 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if storage.Path == "" {
 		return nil, fmt.Errorf("storage.path is required: the directory the embedded store lives in")
+	}
+	if inspect.Enabled {
+		if inspect.Addr == "" {
+			inspect.Addr = DefaultInspectAddr
+		}
+		if err := requireLoopback(inspect.Addr); err != nil {
+			return nil, fmt.Errorf("inspect.addr: %w", err)
+		}
 	}
 
 	relayerDoc, err := sideDocument(sectionRelayer, sides[sectionRelayer], common)
@@ -165,11 +199,28 @@ func ParseConfig(data []byte) (*Config, error) {
 		Relayer:     relayerCfg,
 		Miner:       minerCfg,
 		Storage:     storage,
+		Inspect:     inspect,
 		Metrics:     minerCfg.Metrics,
 		PProf:       minerCfg.PProf,
 		Logging:     minerCfg.Logging,
 		unknownKeys: config.UnknownKeys(data, &probe{}),
 	}, nil
+}
+
+// requireLoopback refuses an address another host could reach: the inspect
+// server shows the supplier's sessions and submissions, and has no auth.
+func requireLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%q is not host:port: %w", addr, err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("%q is not a loopback address: the inspect server listens on 127.0.0.1, ::1 or localhost only", addr)
 }
 
 // sideDocument is the side's section with the common sections added, as the

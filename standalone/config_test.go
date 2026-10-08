@@ -190,3 +190,27 @@ func TestParseConfig_TheShippedExampleIsClean(t *testing.T) {
 	require.Equal(t, ":9092", got.Metrics.Addr)
 	require.True(t, got.Logging.Async, "a logging section without async keeps the default")
 }
+
+// The inspect server is off unless asked for, listens on loopback by default
+// when it is, and refuses any address another host could reach.
+func TestParseConfig_InspectIsOffByDefaultAndLoopbackOnly(t *testing.T) {
+	cfg, err := ParseConfig([]byte(standaloneYAML()))
+	require.NoError(t, err)
+	require.False(t, cfg.Inspect.Enabled)
+
+	cfg, err = ParseConfig([]byte(standaloneYAML() + "inspect:\n  enabled: true\n"))
+	require.NoError(t, err)
+	require.Equal(t, InspectConfig{Enabled: true, Addr: DefaultInspectAddr}, cfg.Inspect)
+
+	for _, addr := range []string{"127.0.0.1:9094", "[::1]:9094", "localhost:9094"} {
+		cfg, err := ParseConfig([]byte(standaloneYAML() + "inspect:\n  enabled: true\n  addr: \"" + addr + "\"\n"))
+		require.NoError(t, err, addr)
+		require.Equal(t, addr, cfg.Inspect.Addr)
+	}
+	for _, addr := range []string{"0.0.0.0:9094", ":9094", "10.0.0.5:9094", "example.com:9094", "9094"} {
+		_, err := ParseConfig([]byte(standaloneYAML() + "inspect:\n  enabled: true\n  addr: \"" + addr + "\"\n"))
+		require.Error(t, err, addr)
+		require.Contains(t, err.Error(), "inspect.addr", addr)
+	}
+	require.Empty(t, cfg.Warnings(), "inspect is a known section")
+}

@@ -144,8 +144,9 @@ ports are **not** the container ports.
 > `:9190/metrics` and `:9092/metrics` respectively.
 
 > **Standalone mode forwards the same host ports** to its one pod: relay
-> `:8180`, health `:8280`, metrics (both sides) `:9092`, pprof `:6065`. There is
-> no `:9190` and no `:6060`. Prometheus scrapes it once, as job `standalone`.
+> `:8180`, health `:8280`, metrics (both sides) `:9092`, pprof `:6065`, and its
+> read-only inspect server `:9094`. There is no `:9190` and no `:6060`.
+> Prometheus scrapes it once, as job `standalone`.
 
 > **Single-pod forwards.** `relayer` and `miner` are each one Deployment with
 > a single port-forward set, so with `count: 2`, `localhost:8180` and
@@ -290,6 +291,16 @@ use the built-in `redis` subcommand — full reference in
 pocket-relay-miner redis leader
 pocket-relay-miner redis keys --pattern "ha:*" --stats
 pocket-relay-miner redis submissions --supplier pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj
+```
+
+In standalone mode the same reads go through the process's inspect server, which
+Tilt enables and forwards to `localhost:9094`
+([../STANDALONE.md](../STANDALONE.md#inspecting-the-store)):
+
+```bash
+pocket-relay-miner standalone inspect sessions --supplier pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj
+pocket-relay-miner standalone inspect streams
+pocket-relay-miner standalone inspect submissions --failed-only
 ```
 
 ## 7. Sending relays

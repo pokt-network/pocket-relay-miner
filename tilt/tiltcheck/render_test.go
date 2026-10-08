@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // The Tiltfile renders of both modes, from the repository's tracked files. Each
@@ -243,6 +245,31 @@ func requireStandalone(t *testing.T, res *Result, tree string) {
 	requireLocalnetConfigMaps(t, res)
 	validate(t, res, "standalone-config", "standalone")
 	requireConfigCheck(t, res, tree, "standalone", "standalone-config", "standalone")
+	requireInspect(t, res)
+}
+
+// requireInspect: the standalone process serves its inspect server on loopback,
+// and Tilt forwards that port, so the live gate reads the session states.
+func requireInspect(t *testing.T, res *Result) {
+	t.Helper()
+	text, _ := dig(objects(res, "ConfigMap")["standalone-config"], "data", "config.yaml").(string)
+	var cfg map[string]any
+	if err := yaml.Unmarshal([]byte(text), &cfg); err != nil {
+		t.Fatalf("standalone-config: %v", err)
+	}
+	inspect, _ := cfg["inspect"].(map[string]any)
+	if inspect["enabled"] != true || inspect["addr"] != "127.0.0.1:9094" {
+		t.Fatalf("standalone inspect = %v, want enabled on 127.0.0.1:9094: the live gate reads session states through it", inspect)
+	}
+	for _, r := range res.Resources {
+		if r.Name == "standalone" {
+			if !contains(r.Kwargs["port_forwards"], "9094:9094") {
+				t.Fatalf("standalone port_forwards %v: want 9094:9094", r.Kwargs["port_forwards"])
+			}
+			return
+		}
+	}
+	t.Fatal("no k8s_resource standalone")
 }
 
 // requireConfigCheck: the Deployment waits on a local resource that validates,

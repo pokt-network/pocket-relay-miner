@@ -64,8 +64,13 @@ mode it names, so level 3 for both modes is two runs, one per
 |---|---|---|
 | Deployments that must be settled and Running | `relayer`, `miner` | `standalone` |
 | Rendered config (services, `block_time_seconds`) | ConfigMaps `relayer-config`, `miner-config` | ConfigMap `standalone-config`, sections `relayer:` and `miner:` |
-| Staked suppliers | the registry in Redis (`redis supplier --list`, `active`) | `ha_miner_supplier_stake_upokt > 0` in Prometheus: set only for a supplier whose key the process holds and the chain reports staked, first 30s after start |
-| The miner's session states (corroboration) | `redis sessions --json` | not read, reported as a skip: the process holds its store's lock, and no counter covers every failure state |
+| Staked suppliers | the registry in Redis (`redis supplier --list`, `active`) | the same registry, through the process's inspect server (`standalone inspect supplier --list`, `active`) |
+| The miner's session states (corroboration) | `redis sessions --json` | `standalone inspect sessions --json`, the same fields |
+
+No other process can open the store while the standalone process runs, so the
+gate reads it through the process's read-only inspect server, which Tilt
+forwards to `127.0.0.1:9094` (`STANDALONE_INSPECT_ADDR` overrides it). A server
+that does not answer fails the gate.
 
 Everything else, the load, the on-chain settlement and every assertion on it,
 is the same code in both modes.

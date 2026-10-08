@@ -81,7 +81,7 @@ func (b *Broker) Consumer(cfg transport.ConsumerConfig) (*Consumer, error) {
 		releaseDelay = defaultReleaseDelay
 	}
 	stopCtx, stop := context.WithCancel(context.Background())
-	return &Consumer{
+	c := &Consumer{
 		b:            b,
 		st:           st,
 		supplier:     cfg.SupplierOperatorAddress,
@@ -92,7 +92,11 @@ func (b *Broker) Consumer(cfg transport.ConsumerConfig) (*Consumer, error) {
 		pending:      make(map[string]struct{}),
 		stopCtx:      stopCtx,
 		stop:         stop,
-	}, nil
+	}
+	b.mu.Lock()
+	b.consumers[name] = c
+	b.mu.Unlock()
+	return c, nil
 }
 
 // Consume starts delivery. Called at most once.

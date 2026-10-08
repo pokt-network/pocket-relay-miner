@@ -48,6 +48,12 @@ storage:
   path: "/data/pocket-relay-miner"
   sync_interval: "1s"
 
+# A read-only server for `pocket-relay-miner standalone inspect`: no other
+# process can open the store while this one runs. Loopback only.
+inspect:
+  enabled: false
+  addr: "127.0.0.1:9094"
+
 relayer:
   listen_addr: "0.0.0.0:8080"
   health_check:

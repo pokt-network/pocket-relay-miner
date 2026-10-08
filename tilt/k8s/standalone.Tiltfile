@@ -2,6 +2,7 @@
 # their state in an embedded store on a volume, and no Redis.
 
 load("./utils.Tiltfile", "config_hash", "config_check", "keyring_init_containers", "deep_merge")
+load("./ports.Tiltfile", "get_port")
 load("./miner.Tiltfile", "generate_miner_config")
 load("./relayer.Tiltfile", "generate_relayer_config")
 
@@ -67,6 +68,10 @@ def generate_standalone_config(config):
     # On the volume mounted at /data: a pod restart keeps the relays not yet
     # claimed and the trees of sessions not yet proved.
     out["storage"] = {"path": "/data/store"}
+    # The read-only inspect server: the live gate and `standalone inspect`
+    # read the store through it, as they read Redis in high-availability mode.
+    # Loopback in the pod; reached through the port forward below.
+    out["inspect"] = {"enabled": True, "addr": "127.0.0.1:{}".format(get_port("standalone_inspect"))}
     out["relayer"] = relayer_side
     out["miner"] = miner_side
     return out
@@ -259,5 +264,6 @@ spec:
             "{}:8081".format(config["relayer"]["health_base_port"]),
             "{}:9092".format(config["miner"]["metrics_base_port"]),
             "{}:6065".format(config["miner"]["pprof_port"]),
+            "{0}:{0}".format(get_port("standalone_inspect")),
         ],
     )

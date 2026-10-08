@@ -223,6 +223,12 @@ pocket-relay-miner redis submissions --supplier pokt1abc... [--failed-only]
 pocket-relay-miner redis flush --pattern "ha:test:*"   # destructive, asks first
 ```
 
+In standalone mode nothing can open the Pebble store beside the running
+process, so the same reads go through its read-only inspect server
+(`inspect.enabled`, loopback only): `pocket-relay-miner standalone inspect
+sessions|supplier|streams|smst|dedup|meter|submissions`
+([docs/STANDALONE.md](docs/STANDALONE.md#inspecting-the-store)).
+
 ## Tests
 
 Every change passes `make fmt lint test` before it is done. A feature that spans

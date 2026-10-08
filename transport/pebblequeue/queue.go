@@ -56,7 +56,10 @@ type Broker struct {
 	// publish rewrites are read and written by one writer at a time.
 	mu      sync.Mutex
 	streams map[string]*stream
-	ledger  *redistransport.ChargeLedger
+	// consumers is the latest consumer of each stream, by stream name, for
+	// Stats: what is pending lives only in the consumer.
+	consumers map[string]*Consumer
+	ledger    *redistransport.ChargeLedger
 	// counters is where the meter counters live; its lock is held while a
 	// counter is read and rewritten, so the meter's Del of a counter cannot
 	// land in between. Nil when no charges are written.
@@ -85,6 +88,7 @@ func NewBroker(logger logging.Logger, store *pebblestore.Store, counters *kv.Peb
 		streamPrefix: streamPrefix,
 		logger:       logging.ForComponent(logger, "pebble_queue"),
 		streams:      make(map[string]*stream),
+		consumers:    make(map[string]*Consumer),
 	}
 }
 

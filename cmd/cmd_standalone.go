@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -17,6 +18,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/pokt-network/pocket-relay-miner/standalone"
+	"github.com/pokt-network/pocket-relay-miner/standalone/inspect"
 	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	"github.com/pokt-network/pocket-relay-miner/storage/pebblestore"
 	"github.com/pokt-network/pocket-relay-miner/transport/pebblequeue"
@@ -54,7 +56,7 @@ Example:
 	}
 	cmd.Flags().String(flagStandaloneConfig, "", "Path to standalone config YAML file (required)")
 	cmd.Flags().Bool(flagStrictConfig, false, "Refuse to start when the config carries keys this binary does not understand (default: warn and start)")
-	cmd.AddCommand(standaloneValidateCmd())
+	cmd.AddCommand(standaloneValidateCmd(), standaloneInspectCmd())
 	return cmd
 }
 
@@ -220,8 +222,31 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 	store := kv.NewPebble(logger, db, keyBuilder)
 	defer func() { _ = store.Close() }()
 	broker := pebblequeue.NewBroker(logger, db, store, keyBuilder.StreamPrefix())
+	// The miner builds its backend once it has its config; the inspect server
+	// reads the miner's state through the latest one.
+	var builtBackend atomic.Pointer[miner.PebbleStoreBackend]
 	minerBackend := func(config miner.SupplierManagerConfig) miner.StoreBackend {
-		return miner.NewPebbleStoreBackend(logger, db, broker, config)
+		backend := miner.NewPebbleStoreBackend(logger, db, broker, config)
+		builtBackend.Store(backend)
+		return backend
+	}
+	if cfg.Inspect.Enabled {
+		server := inspect.New(logger, cfg.Inspect.Addr, inspect.Sources{
+			Miner: func() inspect.Miner {
+				if backend := builtBackend.Load(); backend != nil {
+					return backend
+				}
+				return nil
+			},
+			Queues: broker,
+			KV:     store,
+		})
+		if err := server.Start(); err != nil {
+			return err
+		}
+		// Deferred after the store's close, so it runs before it: a request
+		// never reads a closed store.
+		defer server.Stop()
 	}
 	// Each side's store: the embedded kv store, and a health gate over the
 	// disk it lives on, so a filling disk stops new work before writes fail.
