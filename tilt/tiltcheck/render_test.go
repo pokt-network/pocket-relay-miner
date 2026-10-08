@@ -194,9 +194,13 @@ func requireLocalnetConfigMaps(t *testing.T, res *Result) {
 }
 
 // redisDeployed reports whether the render deploys Redis: a Redis or
-// RedisCluster object, or the k8s_resource that groups it.
+// RedisCluster object, the operator's namespace, or the k8s_resource that
+// groups them.
 func redisDeployed(res *Result) bool {
 	if len(objects(res, "Redis")) > 0 || len(objects(res, "RedisCluster")) > 0 {
+		return true
+	}
+	if _, ok := objects(res, "Namespace")["redis-operator"]; ok {
 		return true
 	}
 	for _, r := range res.Resources {
