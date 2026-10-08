@@ -251,7 +251,7 @@ fi
 gate_step "Tiltfile renders (both modes)"
 render_bin_dir="$(mktemp -d)"
 if build_out="$(go build -o "$render_bin_dir/pocket-relay-miner" . 2>&1)"; then
-    render_out="$(cd tilt/tiltcheck && PRM_BIN="$render_bin_dir/pocket-relay-miner" go test -count=1 -v ./... 2>&1)"
+    render_out="$(cd tilt/tiltcheck && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE PRM_BIN="$render_bin_dir/pocket-relay-miner" go test -count=1 -v ./... 2>&1)"
     render_rc=$?
     renders="$(printf '%s\n' "$render_out" | grep -c -- '^--- PASS: TestRender_' || true)"
     skips="$(printf '%s\n' "$render_out" | grep -c -- '--- SKIP' || true)"
