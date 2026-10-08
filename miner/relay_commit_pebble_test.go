@@ -117,33 +117,55 @@ func (h *pebbleCommitHarness) refusing(id string) relayCommitter {
 	return h.stores.commit
 }
 
-// The commit reads the session's TTL once and writes it once: after new marks
-// it expires one dedup TTL after the commit, and a commit that marks nothing
-// leaves it as it was.
-func TestPebbleCommitter_TheSessionTTLIsSlidOnlyByNewMarks(t *testing.T) {
+// Every commit slides the session's TTL to one dedup TTL after it, as the
+// Redis script's EXPIRE does: a commit whose relays were all marked already
+// too, so the marks outlive the redeliveries still to come. An empty batch
+// writes nothing.
+func TestPebbleCommitter_EveryCommitSlidesTheSessionTTL(t *testing.T) {
 	h := newPebbleCommitHarness(t, "pokt1commit_ttl")
 	const sessionID = "sess-commit-ttl"
 	h.createSession(sessionID, SessionStateActive)
 	ttl := h.backend.dedupCf.ttl()
+	expiryOf := func() int64 {
+		t.Helper()
+		stored, ok, err := h.backend.get(dedupTTLKey(sessionID))
+		require.NoError(t, err)
+		require.True(t, ok, "the session's TTL is stored")
+		require.Len(t, stored, 8)
+		return int64(binary.BigEndian.Uint64(stored))
+	}
 
 	before := time.Now()
 	_, err := h.commit().CommitSession(context.Background(), sessionID, relaysFor(h.publish(3), "h-0", "h-1", "h-2"))
 	require.NoError(t, err)
-	after := time.Now()
-	stored, ok, err := h.backend.get(dedupTTLKey(sessionID))
-	require.NoError(t, err)
-	require.True(t, ok, "new marks write the session's TTL")
-	require.Len(t, stored, 8)
-	expiry := int64(binary.BigEndian.Uint64(stored))
-	require.GreaterOrEqual(t, expiry, before.Add(ttl).UnixMilli())
-	require.LessOrEqual(t, expiry, after.Add(ttl).UnixMilli())
+	require.GreaterOrEqual(t, expiryOf(), before.Add(ttl).UnixMilli(), "new marks slide the TTL")
+	require.LessOrEqual(t, expiryOf(), time.Now().Add(ttl).UnixMilli())
 
+	// Live but close to running out, so a slide is visible whatever the clock.
+	near := make([]byte, 8)
+	binary.BigEndian.PutUint64(near, uint64(time.Now().Add(time.Minute).UnixMilli()))
+	b := h.store.DB().NewBatch()
+	require.NoError(t, b.Set(dedupTTLKey(sessionID), near, nil))
+	require.NoError(t, h.store.Commit(b))
+
+	before = time.Now()
 	res, err := h.commit().CommitSession(context.Background(), sessionID, relaysFor(h.publish(3), "h-0", "h-1", "h-2"))
 	require.NoError(t, err)
 	require.Zero(t, res.newRelays, "premise: every relay was marked already")
-	again, _, err := h.backend.get(dedupTTLKey(sessionID))
+	require.GreaterOrEqual(t, expiryOf(), before.Add(ttl).UnixMilli(), "an all-duplicate commit slides the TTL too")
+}
+
+func TestPebbleCommitter_AnEmptyCommitWritesNoTTL(t *testing.T) {
+	h := newPebbleCommitHarness(t, "pokt1commit_empty")
+	const sessionID = "sess-commit-empty"
+	h.createSession(sessionID, SessionStateActive)
+
+	_, err := h.commit().CommitSession(context.Background(), sessionID, nil)
+
 	require.NoError(t, err)
-	require.Equal(t, stored, again, "a commit that marks nothing does not touch the TTL")
+	_, ok, err := h.backend.get(dedupTTLKey(sessionID))
+	require.NoError(t, err)
+	require.False(t, ok, "nothing to slide in an empty commit")
 }
 
 // Marks whose session TTL has run out are not marks: the relays count as new.

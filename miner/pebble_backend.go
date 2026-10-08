@@ -666,8 +666,13 @@ func (c *pebbleRelayCommitter) CommitSession(_ context.Context, sessionID string
 		res.newRelays++
 		res.newComputeUnits += int64(r.computeUnits)
 	}
-	// The TTL every mark above would have slid, written once.
-	if res.newRelays > 0 {
+	// Every commit slides the session's TTL once, as the Redis script's EXPIRE
+	// does: also one whose relays were all marked already, which is what a
+	// redelivery after a lost answer is, so its marks outlive the copies still
+	// to come. With the TTL run out every relay is new, so a non-empty batch
+	// always has live marks to slide; an empty one writes nothing, as Redis
+	// refuses it.
+	if len(relays) > 0 {
 		c.b.dedup.slideTTLLocked(batch, sessionID, now)
 	}
 
