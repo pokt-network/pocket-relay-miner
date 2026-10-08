@@ -2,6 +2,7 @@ package pebblequeue
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -278,11 +279,18 @@ func (c *Consumer) dropUndecodable(id string, cause error) {
 }
 
 func (c *Consumer) key(id string) ([]byte, error) {
+	return c.appendKey(make([]byte, 0, len(c.prefix)+idLen), id)
+}
+
+// appendKey writes the entry key of id into dst, reusing its array.
+func (c *Consumer) appendKey(dst []byte, id string) ([]byte, error) {
 	ms, seq, err := parseID(id)
 	if err != nil {
 		return nil, err
 	}
-	return append(append([]byte(nil), c.prefix...), encodeID(ms, seq)...), nil
+	dst = append(dst[:0], c.prefix...)
+	dst = binary.BigEndian.AppendUint64(dst, ms)
+	return binary.BigEndian.AppendUint64(dst, seq), nil
 }
 
 // MarkDelivered is a no-op: the delivery channel is bounded by count, which
@@ -338,10 +346,16 @@ func (c *Consumer) ReleaseMessage(_ context.Context, msg transport.StreamMessage
 // AckInBatch adds to b the deletes that acknowledge ids, for a commit that
 // writes them together with other state. Acked must follow the commit.
 func (c *Consumer) AckInBatch(b *pebble.Batch, ids []string) {
+	// One key buffer, local to the call (AckRejected calls this outside the
+	// committer's lock): the batch copies the key it is given.
+	var key []byte
 	for _, id := range ids {
-		if key, err := c.key(id); err == nil {
-			_ = b.Delete(key, nil)
+		k, err := c.appendKey(key, id)
+		if err != nil {
+			continue
 		}
+		_ = b.Delete(k, nil)
+		key = k
 	}
 }
 

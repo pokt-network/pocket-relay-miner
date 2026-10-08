@@ -134,6 +134,18 @@ func (b *PebbleStoreBackend) get(key []byte) ([]byte, bool, error) {
 	return out, true, nil
 }
 
+// has reports whether the key is stored, without copying its value.
+func (b *PebbleStoreBackend) has(key []byte) (bool, error) {
+	_, closer, err := b.store.DB().Get(key)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, closer.Close()
+}
+
 // --- sessions ---------------------------------------------------------------
 
 type pebbleSessionStore struct {
@@ -483,6 +495,12 @@ func dedupKey(sessionID string, relayHash []byte) []byte {
 
 func dedupTTLKey(sessionID string) []byte { return []byte(pebbleDedupTTLPrefix + sessionID) }
 
+// appendDedupKey writes the mark key of relayHash into dst, reusing its array:
+// the session's mark prefix (dedupSessionPrefix) followed by the hash.
+func appendDedupKey(dst, sessionPrefix, relayHash []byte) []byte {
+	return append(append(dst[:0], sessionPrefix...), relayHash...)
+}
+
 // liveLocked reports whether the session's marks are still within their TTL.
 func (d *pebbleDeduplicator) liveLocked(sessionID string, now time.Time) (bool, error) {
 	value, ok, err := d.b.get(dedupTTLKey(sessionID))
@@ -505,6 +523,12 @@ func (d *pebbleDeduplicator) markedLocked(sessionID string, relayHash []byte, no
 // markLocked adds the mark and slides the session's TTL, in batch.
 func (d *pebbleDeduplicator) markLocked(batch *pebble.Batch, sessionID string, relayHash []byte, now time.Time) {
 	_ = batch.Set(dedupKey(sessionID, relayHash), nil, nil)
+	d.slideTTLLocked(batch, sessionID, now)
+}
+
+// slideTTLLocked sets the session's marks to expire one dedup TTL after now,
+// in batch.
+func (d *pebbleDeduplicator) slideTTLLocked(batch *pebble.Batch, sessionID string, now time.Time) {
 	expiry := make([]byte, 8)
 	binary.BigEndian.PutUint64(expiry, uint64(now.Add(d.b.dedupCf.ttl()).UnixMilli()))
 	_ = batch.Set(dedupTTLKey(sessionID), expiry, nil)
@@ -597,6 +621,18 @@ func (c *pebbleRelayCommitter) CommitSession(_ context.Context, sessionID string
 		res.status = 2
 	}
 
+	// One read of the session's TTL for the whole commit: every read below is
+	// of the store, which the batch does not reach until it commits, and `now`
+	// is fixed, so it is the answer each relay would read.
+	live, err := c.b.dedup.liveLocked(sessionID, now)
+	if err != nil {
+		return relayBatchResult{}, err
+	}
+	// One key buffer for every mark: the batch copies the key it is given, and
+	// a read does not keep it.
+	prefix := dedupSessionPrefix(sessionID)
+	var key []byte
+
 	batch := c.b.store.DB().NewBatch()
 	seen := make(map[string]struct{}, len(relays))
 	ids := make([]string, 0, len(relays))
@@ -604,8 +640,9 @@ func (c *pebbleRelayCommitter) CommitSession(_ context.Context, sessionID string
 		ids = append(ids, r.id)
 		_, inBatch := seen[string(r.hash)]
 		marked := inBatch
-		if !marked {
-			if marked, err = c.b.dedup.markedLocked(sessionID, r.hash, now); err != nil {
+		if !marked && live {
+			key = appendDedupKey(key, prefix, r.hash)
+			if marked, err = c.b.has(key); err != nil {
 				_ = batch.Close()
 				return relayBatchResult{}, err
 			}
@@ -624,9 +661,14 @@ func (c *pebbleRelayCommitter) CommitSession(_ context.Context, sessionID string
 			continue
 		}
 		seen[string(r.hash)] = struct{}{}
-		c.b.dedup.markLocked(batch, sessionID, r.hash, now)
+		key = appendDedupKey(key, prefix, r.hash)
+		_ = batch.Set(key, nil, nil)
 		res.newRelays++
 		res.newComputeUnits += int64(r.computeUnits)
+	}
+	// The TTL every mark above would have slid, written once.
+	if res.newRelays > 0 {
+		c.b.dedup.slideTTLLocked(batch, sessionID, now)
 	}
 
 	if res.status == 0 && res.newRelays > 0 {
