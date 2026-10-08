@@ -180,7 +180,7 @@ done
 [ "$gate_failed" -ne 0 ] && gate_verdict "live"
 
 for app in $relay_miner_deployments validator; do
-    running="$(printf '%s\n' "$pods" | awk -v a="$app" '$1 ~ a && $3 == "Running" {n++} END {print n+0}')"
+    running="$(printf '%s\n' "$pods" | awk -v a="$app" 'index($1, a "-") == 1 && $3 == "Running" {n++} END {print n+0}')"
     if [ "$running" -gt 0 ]; then
         gate_pass "$app: $running pod(s) Running"
     else
@@ -1134,13 +1134,16 @@ fail_states_file="${BIN_DIR}/miner_session_states.txt"
 if [ "$relay_miner_mode" = standalone ]; then
     states_read=0
     for supplier in $suppliers; do
-        if listing="$("$BIN" standalone inspect sessions --supplier "$supplier" --json --addr "$STANDALONE_INSPECT_ADDR" 2>&1)" &&
+        # stdout only: the binary logs to stderr at startup (maxprocs), which
+        # would make the JSON unparseable; stderr is shown when the read fails.
+        if listing="$("$BIN" standalone inspect sessions --supplier "$supplier" --json --addr "$STANDALONE_INSPECT_ADDR" 2>"${BIN_DIR}/inspect.stderr")" &&
             printf '%s\n' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1; then
             printf '%s\n' "$listing" | jq -r '.[] | .state // empty' >>"$fail_states_file"
             states_read=$((states_read + 1))
         else
             gate_fail "miner session states of ${supplier} not read from the standalone inspect server:"
-            gate_detail "$listing"
+            gate_detail "$(cat "${BIN_DIR}/inspect.stderr")${listing:+
+$listing}"
         fi
     done
     gate_exercised coverage session_state_listings "$states_read"
