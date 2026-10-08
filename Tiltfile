@@ -8,12 +8,6 @@ allow_k8s_contexts('kind-kind')
 
 # Load Tilt extensions
 load("ext://restart_process", "docker_build_with_restart")
-k8s_yaml(blob("""
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: redis-operator
-"""))
 
 load("ext://secret", "secret_create_generic")
 

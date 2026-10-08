@@ -12,6 +12,15 @@ def deploy_redis(config):
     redis_config = config["redis"]
     mode = redis_config["mode"]
 
+    # The operator's namespace, grouped with the Redis resource below. Created
+    # here, not at the top of the Tiltfile, so standalone mode renders none.
+    k8s_yaml(blob("""
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-operator
+"""))
+
     # Install Redis Operator (once)
     install_redis_operator()
 
