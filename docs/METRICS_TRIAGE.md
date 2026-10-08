@@ -103,6 +103,12 @@ curl -s "localhost:26657/block_results?height=$H" | jq '
   deferral is doing its job. Both rising together means the window ran out.
   It counts **attempts, not sessions** — one session deferred for four blocks
   increments it four times — so it is not a denominator for anything.
+- **`sessions_failed_total{reason="claim_missing"}`**: a session whose claim the
+  chain did not hold at proof time. If the chain is later seen to hold it after
+  all, the session comes back to `claimed` and is taken back in
+  `sessions_reinstated_total`, its money in `upokt_reinstated_total{from}`: the
+  net is the failed count minus the reinstated one. Counters never go down, so
+  every reader subtracts.
 - **`sessions_failed_total{reason="proof_window_closed"}`**: includes sessions
   whose proof was already on chain before the process restarted.
 - **`proofs_submitted_total`** does not count a proof that landed on a rebroadcast,
@@ -133,7 +139,7 @@ Two things about HOW to read it, both measured on 2026-09-18:
 
 | Identity | Series |
 |---|---|
-| Nothing vanished and nothing was counted twice | `upokt_claimed_total` == `upokt_proved_total` + `upokt_lost_total` + (`upokt_unresolved_opened_total` − `upokt_unresolved_resolved_total`) |
+| Nothing vanished and nothing was counted twice | `upokt_claimed_total` == `upokt_proved_total` + (`upokt_lost_total` − `upokt_reinstated_total{from="lost"}`) + (`upokt_unresolved_opened_total` − `upokt_unresolved_resolved_total`) |
 
 `unresolved` is a session that left through a retryable submission failure and has
 not been answered yet. It is a real series rather than an absence on purpose: a

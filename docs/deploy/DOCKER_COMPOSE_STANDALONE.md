@@ -276,8 +276,9 @@ $C --profile observability up -d
 
 Prometheus scrapes the one process once, as job `standalone`; see
 [examples/observability/README.md](../../examples/observability/README.md).
-The Redis panels stay empty: there is no Redis. **Not verified**: the
-dashboards on a standalone process. To stop everything,
+The Redis panels stay empty: there is no Redis; dashboard 8 (Standalone
+store) shows the embedded store and the relay queue instead. **Not verified**:
+the dashboards on a standalone process. To stop everything,
 `$C --profile observability down -v`.
 
 ## Step 9: switch to your own keys

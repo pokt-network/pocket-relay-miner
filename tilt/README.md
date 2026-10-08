@@ -64,7 +64,7 @@ These are localnet values: the keys are public and fund nothing outside it.
 
 ## Grafana dashboards
 
-Tilt provisions the 7 dashboards of
+Tilt provisions the 8 dashboards of
 [examples/observability/](../examples/observability/README.md), the same files
 the compose example runs; they are generated from the metrics the code defines
 by `scripts/dashboards/generate.py`.

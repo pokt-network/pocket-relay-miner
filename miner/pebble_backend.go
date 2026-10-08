@@ -376,6 +376,14 @@ func (s *pebbleSessionStore) Delete(_ context.Context, sessionID string) error {
 }
 
 func (s *pebbleSessionStore) UpdateState(_ context.Context, sessionID string, newState SessionState) error {
+	return s.updateState(sessionID, newState, "")
+}
+
+func (s *pebbleSessionStore) MarkClaimMissing(_ context.Context, sessionID string, verdict string) error {
+	return s.updateState(sessionID, SessionStateClaimMissing, verdict)
+}
+
+func (s *pebbleSessionStore) updateState(sessionID string, newState SessionState, verdict string) error {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 	snap, err := s.getLocked(sessionID)
@@ -392,6 +400,9 @@ func (s *pebbleSessionStore) UpdateState(_ context.Context, sessionID string, ne
 		return nil
 	}
 	snap.State = newState
+	if verdict != "" {
+		snap.ClaimMissingVerdict = verdict
+	}
 	snap.LastUpdatedAt = time.Now()
 	_, err = s.writeLocked(snap, snap) // the state only: no tx hash changes
 	return err
@@ -420,6 +431,7 @@ func (s *pebbleSessionStore) reactivateClaimedLocked(sessionID string, claimedRo
 	}
 	prev := *snap
 	snap.State = SessionStateClaimed
+	snap.ClaimMissingVerdict = ""
 	snap.ClaimedRootHash = claimedRootHash
 	if claimTxHash != "" {
 		snap.ClaimTxHash = claimTxHash

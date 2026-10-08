@@ -121,7 +121,7 @@ services:
     restart: unless-stopped
 
   # --- Observability (optional) ------------------------------------------------
-  # Prometheus, Grafana with the 7 dashboards in examples/observability/, and a
+  # Prometheus, Grafana with the 8 dashboards in examples/observability/, and a
   # Redis exporter. They belong to the "observability" profile, so a plain `up`
   # does not start them; add `--profile observability` to start them too (see
   # examples/observability/README.md). Both ports are bound to loopback: use an

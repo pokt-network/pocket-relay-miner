@@ -448,3 +448,99 @@ func TestOnClaimMissing_ASettledSessionIsNotCounted(t *testing.T) {
 	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-settled"))
 	require.Equal(t, before, readLedger("pokt1test", service, "claim_missing", ""))
 }
+
+// reinstatedProbe reads what a reinstatement reversed.
+func reinstatedProbe(supplier, service, from string) (sessions, upokt float64) {
+	return testutil.ToFloat64(sessionsReinstatedTotal.WithLabelValues(supplier, service, "claim_missing")),
+		testutil.ToFloat64(upoktReinstatedTotal.WithLabelValues(supplier, service, "claim_missing", from))
+}
+
+// claimMissingStores runs a case on both stores the miner keeps sessions in.
+func claimMissingStores(t *testing.T, run func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string)) {
+	t.Run("redis", func(t *testing.T) {
+		coord, store, _ := setupTestCoordinator(t)
+		run(t, coord, store, t.Name())
+	})
+	t.Run("pebble", func(t *testing.T) {
+		h := newPebbleCommitHarness(t, "pokt1test")
+		coord := NewSessionCoordinator(logging.NewLoggerFromConfig(logging.DefaultConfig()), h.stores.sessions,
+			SMSTRecoveryConfig{SupplierAddress: "pokt1test"})
+		run(t, coord, h.stores.sessions, t.Name())
+	})
+}
+
+func seedForClaimMissing(t *testing.T, store SessionStore, id, service string, state SessionState) {
+	t.Helper()
+	created, err := store.CreateIfAbsent(context.Background(), &SessionSnapshot{
+		SessionID: id, SupplierOperatorAddress: "pokt1test", ServiceID: service,
+		SessionStartHeight: 100, SessionEndHeight: 110, State: state, ClaimTxHash: "deadbeef",
+		RelayCount: 3, TotalComputeUnits: 3_000_000,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+}
+
+// A claim_missing session the chain is later seen to hold the claim of comes
+// back to claimed: what claim_missing counted is reversed, once, so the net
+// failed sessions and the net lost money are back to where they were.
+func TestClaimMissing_AReinstatedSessionIsTakenBackOnce(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		seedForClaimMissing(t, store, "sess-back", service, SessionStateClaimed)
+		before := readLedger("pokt1test", service, "claim_missing", "")
+		backBefore, backLostBefore := reinstatedProbe("pokt1test", service, ClaimMissingLost)
+
+		require.NoError(t, coord.OnClaimMissing(ctx, "sess-back"))
+		marked, err := store.Get(ctx, "sess-back")
+		require.NoError(t, err)
+		require.Equal(t, ClaimMissingLost, marked.ClaimMissingVerdict, "the verdict is kept with the state")
+
+		root := make([]byte, SMSTRootLen)
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-back", root, "deadbeef"))
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-back", root, "deadbeef"))
+
+		after := readLedger("pokt1test", service, "claim_missing", "")
+		back, backLost := reinstatedProbe("pokt1test", service, ClaimMissingLost)
+		require.Equal(t, before.sessions+1, after.sessions, "claim_missing counted it once")
+		require.Equal(t, backBefore+1, back, "and the reinstatement took it back once")
+		require.InDelta(t, after.lost-before.lost, backLost-backLostBefore, 1e-9, "net lost money is back to zero")
+		require.InDelta(t, 3, backLost-backLostBefore, 1e-9)
+
+		got, err := store.Get(ctx, "sess-back")
+		require.NoError(t, err)
+		require.Equal(t, SessionStateClaimed, got.State)
+		require.Empty(t, got.ClaimMissingVerdict, "the flip clears the verdict: nothing is reversed twice")
+	})
+}
+
+// A session that never held a claim had its money counted forgone: that is
+// what its reinstatement takes back.
+func TestClaimMissing_AReinstatedForgoneSessionIsTakenBackFromForgone(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		seedForClaimMissing(t, store, "sess-back-forgone", service, SessionStateActive)
+		before := readLedger("pokt1test", service, "claim_missing", "")
+		_, backForgoneBefore := reinstatedProbe("pokt1test", service, ClaimMissingForgone)
+
+		require.NoError(t, coord.OnClaimMissing(ctx, "sess-back-forgone"))
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-back-forgone", make([]byte, SMSTRootLen), "deadbeef"))
+
+		after := readLedger("pokt1test", service, "claim_missing", "")
+		_, backForgone := reinstatedProbe("pokt1test", service, ClaimMissingForgone)
+		require.InDelta(t, after.forgone-before.forgone, backForgone-backForgoneBefore, 1e-9)
+		require.InDelta(t, 3, backForgone-backForgoneBefore, 1e-9)
+	})
+}
+
+// A reactivation of a session that was never counted claim_missing reverses
+// nothing.
+func TestClaimMissing_AReactivationOfAnotherStateReversesNothing(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		seedForClaimMissing(t, store, "sess-window", service, SessionStateClaimWindowClosed)
+		back, _ := reinstatedProbe("pokt1test", service, ClaimMissingLost)
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-window", make([]byte, SMSTRootLen), "deadbeef"))
+		again, _ := reinstatedProbe("pokt1test", service, ClaimMissingLost)
+		require.Equal(t, back, again)
+	})
+}

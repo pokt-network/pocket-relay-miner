@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/pokt-network/pocket-relay-miner/transport"
 )
@@ -93,4 +95,70 @@ func (b *Broker) stats(name, supplier string) (QueueStats, error) {
 		c.mu.Unlock()
 	}
 	return out, nil
+}
+
+// Collector exports each supplier's queue: the entries stored and the entries
+// delivered and not yet acknowledged, labelled by supplier (bounded by the
+// suppliers ever published to). It reads AllStats at scrape time rather than
+// keeping a cached value: no goroutine, nothing added to publish or
+// acknowledgement, and right after a restart without a recount. The cost is
+// one pass over the stored entries per scrape; the queue holds what the miner
+// has not consumed yet, normally seconds of traffic, and a scrape that takes
+// longer because the miner is far behind is itself the signal.
+func (b *Broker) Collector() prometheus.Collector {
+	return &queueCollector{
+		broker: b,
+		length: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "ha",
+			Subsystem: "standalone",
+			Name:      "queue_length",
+			Help:      "Relays stored in the supplier's queue of a standalone process, delivered and not yet acknowledged ones included, as XLEN counts a stream",
+		}, []string{"supplier"}),
+		pending: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "ha",
+			Subsystem: "standalone",
+			Name:      "queue_pending",
+			Help:      "Relays of the supplier's queue delivered to the miner and not yet acknowledged, in a standalone process",
+		}, []string{"supplier"}),
+	}
+}
+
+// queueCollector rebuilds its gauges on every scrape, under mu, so a queue
+// that is gone is gone from the scrape too.
+type queueCollector struct {
+	broker  *Broker
+	mu      sync.Mutex
+	length  *prometheus.GaugeVec
+	pending *prometheus.GaugeVec
+}
+
+func (c *queueCollector) Describe(ch chan<- *prometheus.Desc) {
+	c.length.Describe(ch)
+	c.pending.Describe(ch)
+}
+
+func (c *queueCollector) Collect(ch chan<- prometheus.Metric) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.length.Reset()
+	c.pending.Reset()
+	var (
+		all []QueueStats
+		err error
+	)
+	if !c.broker.store.IfOpen(func() { all, err = c.broker.AllStats() }) {
+		return
+	}
+	if err != nil {
+		// Once per scrape, and a read of the store failing is a state, not a
+		// relay: Warn.
+		c.broker.logger.Warn().Err(err).Msg("queue metrics: failed to read the queues")
+		return
+	}
+	for _, st := range all {
+		c.length.WithLabelValues(st.Supplier).Set(float64(st.Length))
+		c.pending.WithLabelValues(st.Supplier).Set(float64(st.Pending))
+	}
+	c.length.Collect(ch)
+	c.pending.Collect(ch)
 }

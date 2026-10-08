@@ -176,6 +176,11 @@ type SessionSnapshot struct {
 	// ProofTxHash is the transaction hash of the submitted proof (for deduplication).
 	ProofTxHash string `json:"proof_tx_hash,omitempty"`
 
+	// ClaimMissingVerdict is where marking the session claim_missing counted
+	// its money (ClaimMissingLost or ClaimMissingForgone), written with that
+	// state; a later reactivation reverses exactly that and clears it.
+	ClaimMissingVerdict string `json:"claim_missing_verdict,omitempty"`
+
 	// LastUpdatedAt is when the snapshot was last updated.
 	LastUpdatedAt time.Time `json:"last_updated_at"`
 
@@ -214,6 +219,10 @@ type SessionStore interface {
 
 	// UpdateState atomically updates the state of a session.
 	UpdateState(ctx context.Context, sessionID string, newState SessionState) error
+
+	// MarkClaimMissing is UpdateState to SessionStateClaimMissing that also
+	// records, in the same write, where its money was counted (verdict).
+	MarkClaimMissing(ctx context.Context, sessionID string, verdict string) error
 
 	// ReactivateClaimed atomically returns a session to SessionStateClaimed
 	// after the chain was observed to hold its claim, filling the claimed root
@@ -290,20 +299,21 @@ func (s *RedisSessionStore) stateIndexKey(state SessionState) string {
 // Hash layout. Keep in sync with the Lua script and the debug CLI decoder
 // in cmd/redis/sessions.go.
 const (
-	hfSessionID          = "session_id"
-	hfSupplierOperator   = "supplier_operator_address"
-	hfServiceID          = "service_id"
-	hfApplicationAddress = "application_address"
-	hfSessionStartHeight = "session_start_height"
-	hfSessionEndHeight   = "session_end_height"
-	hfState              = "state"
-	hfRelayCount         = "relay_count"
-	hfTotalComputeUnits  = "total_compute_units"
-	hfClaimedRootHash    = "claimed_root_hash"
-	hfClaimTxHash        = "claim_tx_hash"
-	hfProofTxHash        = "proof_tx_hash"
-	hfCreatedAt          = "created_at"
-	hfLastUpdatedAt      = "last_updated_at"
+	hfSessionID           = "session_id"
+	hfSupplierOperator    = "supplier_operator_address"
+	hfServiceID           = "service_id"
+	hfApplicationAddress  = "application_address"
+	hfSessionStartHeight  = "session_start_height"
+	hfSessionEndHeight    = "session_end_height"
+	hfState               = "state"
+	hfRelayCount          = "relay_count"
+	hfTotalComputeUnits   = "total_compute_units"
+	hfClaimedRootHash     = "claimed_root_hash"
+	hfClaimTxHash         = "claim_tx_hash"
+	hfClaimMissingVerdict = "claim_missing_verdict"
+	hfProofTxHash         = "proof_tx_hash"
+	hfCreatedAt           = "created_at"
+	hfLastUpdatedAt       = "last_updated_at"
 )
 
 // encodeSnapshot flattens a SessionSnapshot into a slice of alternating
@@ -344,6 +354,9 @@ func encodeSnapshotMetadata(snap *SessionSnapshot) []any {
 	if snap.ProofTxHash != "" {
 		pairs = append(pairs, hfProofTxHash, snap.ProofTxHash)
 	}
+	if snap.ClaimMissingVerdict != "" {
+		pairs = append(pairs, hfClaimMissingVerdict, snap.ClaimMissingVerdict)
+	}
 	return pairs
 }
 
@@ -361,6 +374,7 @@ func decodeSnapshot(fields map[string]string) (*SessionSnapshot, error) {
 		ApplicationAddress:      fields[hfApplicationAddress],
 		State:                   SessionState(fields[hfState]),
 		ClaimTxHash:             fields[hfClaimTxHash],
+		ClaimMissingVerdict:     fields[hfClaimMissingVerdict],
 		ProofTxHash:             fields[hfProofTxHash],
 	}
 
@@ -503,6 +517,9 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 		}
 		if snapshot.ProofTxHash == "" {
 			staleFields = append(staleFields, hfProofTxHash)
+		}
+		if snapshot.ClaimMissingVerdict == "" {
+			staleFields = append(staleFields, hfClaimMissingVerdict)
 		}
 		if len(staleFields) > 0 {
 			pipe.HDel(ctx, key, staleFields...)
@@ -773,6 +790,15 @@ func (s *RedisSessionStore) Delete(ctx context.Context, sessionID string) error 
 // write goes through the same DEL+HSET+index transaction, which also
 // migrates any legacy JSON keys seen during a rolling upgrade.
 func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, newState SessionState) error {
+	return s.updateState(ctx, sessionID, newState, "")
+}
+
+// MarkClaimMissing implements SessionStore.
+func (s *RedisSessionStore) MarkClaimMissing(ctx context.Context, sessionID string, verdict string) error {
+	return s.updateState(ctx, sessionID, SessionStateClaimMissing, verdict)
+}
+
+func (s *RedisSessionStore) updateState(ctx context.Context, sessionID string, newState SessionState, verdict string) error {
 	key := s.sessionKey(sessionID)
 	now := time.Now().Format(time.RFC3339Nano)
 
@@ -786,6 +812,7 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		string(newState),
 		now,
 		int64(s.config.SessionTTL.Seconds()),
+		verdict,
 	).Text()
 	if err != nil {
 		errMsg := err.Error()
@@ -811,6 +838,9 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 				return err
 			}
 			snapshot.State = newState
+			if verdict != "" {
+				snapshot.ClaimMissingVerdict = verdict
+			}
 			return s.Save(ctx, snapshot)
 		}
 		return fmt.Errorf("failed to update session state: %w", err)
@@ -977,6 +1007,9 @@ if ARGV[1] == 'claimed' then
 	end
 end
 redis.call('HSET', KEYS[1], 'state', ARGV[1], 'last_updated_at', ARGV[2])
+if ARGV[4] and ARGV[4] ~= '' then
+	redis.call('HSET', KEYS[1], 'claim_missing_verdict', ARGV[4])
+end
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 return old_state
 `)
@@ -1021,6 +1054,7 @@ if old_state ~= 'active' and old_state ~= 'claiming'
 end
 redis.call('HSET', KEYS[1], 'state', 'claimed',
 	'claimed_root_hash', ARGV[1], 'last_updated_at', ARGV[3])
+redis.call('HDEL', KEYS[1], 'claim_missing_verdict')
 if ARGV[2] ~= '' then
 	redis.call('HSET', KEYS[1], 'claim_tx_hash', ARGV[2])
 end

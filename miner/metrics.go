@@ -517,6 +517,48 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
+	// ====== REINSTATED: A VERDICT THE CHAIN TOOK BACK ======
+	// A session counted claim_missing comes back to claimed when the chain is
+	// later seen to hold its claim. A counter cannot go down, so what was
+	// counted is reversed here, and every reader subtracts it: the session
+	// from sessions_failed_total, its money from the series `from` names.
+	sessionsReinstatedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "sessions_reinstated_total",
+			Help:      "Failed sessions taken back because the chain was later seen to hold their claim, by the reason they had been counted under (claim_missing). Subtract from sessions_failed_total for the net count",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+	relaysReinstatedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_reinstated_total",
+			Help:      "Relays taken back from relays_lost_total or relays_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing). Subtract from the series from names",
+		},
+		[]string{"supplier", "service_id", "reason", "from"},
+	)
+	computeUnitsReinstatedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "compute_units_reinstated_total",
+			Help:      "Compute units taken back from compute_units_lost_total or compute_units_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing). Subtract from the series from names",
+		},
+		[]string{"supplier", "service_id", "reason", "from"},
+	)
+	upoktReinstatedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_reinstated_total",
+			Help:      "uPOKT taken back from upokt_lost_total or upokt_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing). Subtract from the series from names: upokt_claimed_total = upokt_proved_total + (upokt_lost_total - this{from=lost}) + (upokt_unresolved_opened_total - upokt_unresolved_resolved_total)",
+		},
+		[]string{"supplier", "service_id", "reason", "from"},
+	)
+
 	// ====== THE THIRD DOOR: UNRESOLVED ======
 	//
 	// Money that entered the book leaves it through exactly one door, so the
@@ -1811,18 +1853,45 @@ func RecordClaimWindowClosed(supplier, serviceID, claimTxHash string, relays, co
 	recordSessionLoss(supplier, serviceID, "claim_window_closed", relays, computeUnits)
 }
 
+// Where a claim_missing session's money was counted, kept on the session
+// (SessionSnapshot.ClaimMissingVerdict) so a reinstatement reverses that.
+const (
+	ClaimMissingLost    = "lost"
+	ClaimMissingForgone = "forgone"
+)
+
+// ClaimMissingVerdictFor is where a session's money goes when it is marked
+// claim_missing: a session in a state that holds a claim on chain had its money
+// counted in `claimed` (every way into claimed counts it: the broadcast, or the
+// reconciler finding the claim), so it is lost; one that never got there was
+// never in the book, so it is forgone.
+func ClaimMissingVerdictFor(state SessionState) string {
+	if state.HoldsClaimOnChain() {
+		return ClaimMissingLost
+	}
+	return ClaimMissingForgone
+}
+
 // RecordClaimMissing records a session whose claim the chain does not hold at
-// proof time, although this miner had it as claimed: the proof is skipped and
-// the session ends. heldClaim is whether the session was in a state that holds
-// a claim on chain -- every way into claimed counted its money in `claimed`
-// (the broadcast, or the reconciler finding the claim), so that money is lost.
-// A session that never got there was never in the book: forgone.
-func RecordClaimMissing(supplier, serviceID string, heldClaim bool, relays, computeUnits int64) {
-	if !heldClaim {
+// proof time, although this miner had it: the proof is skipped and the session
+// ends, its money in the series verdict names.
+func RecordClaimMissing(supplier, serviceID, verdict string, relays, computeUnits int64) {
+	if verdict == ClaimMissingForgone {
 		recordSessionForgone(supplier, serviceID, "claim_missing", relays, computeUnits)
 		return
 	}
 	recordSessionLoss(supplier, serviceID, "claim_missing", relays, computeUnits)
+}
+
+// RecordClaimMissingReinstated reverses RecordClaimMissing for a session the
+// chain was later seen to hold the claim of: it comes back to claimed and is
+// proved like any other, so it must not stay a failed session with lost money.
+func RecordClaimMissingReinstated(supplier, serviceID, verdict string, relays, computeUnits int64) {
+	cu := float64(computeUnits)
+	sessionsReinstatedTotal.WithLabelValues(supplier, serviceID, "claim_missing").Inc()
+	relaysReinstatedTotal.WithLabelValues(supplier, serviceID, "claim_missing", verdict).Add(float64(relays))
+	computeUnitsReinstatedTotal.WithLabelValues(supplier, serviceID, "claim_missing", verdict).Add(cu)
+	upoktReinstatedTotal.WithLabelValues(supplier, serviceID, "claim_missing", verdict).Add(cu / 1e6)
 }
 
 // RecordClaimEjectedUnrecoverable records a claim the chain named inside a batch

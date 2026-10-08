@@ -1,9 +1,9 @@
 """Panel definitions for scripts/dashboards/generate.py.
 
-Seven dashboards, in the order an operator who is paid by this software opens
+Eight dashboards, in the order an operator who is paid by this software opens
 them: money, then the claims and proofs that bring it, the relays behind them,
-the relayer's quality, storage and memory, suppliers and the chain, and the
-process internals. Every metric the Go code defines is on a panel or listed in
+the relayer's quality, storage and memory, suppliers and the chain, the
+process internals, and standalone mode's embedded store. Every metric the Go code defines is on a panel or listed in
 NOT_CHARTED with a reason; generate.py --check enforces it.
 
 Two conventions hold everywhere:
@@ -38,6 +38,11 @@ def specs(g):
     def unres(prefix):
         return "(%s - %s)" % (T(prefix + "_unresolved_opened_total"), T(prefix + "_unresolved_resolved_total"))
 
+    # Lost and forgone net of what a reinstatement took back: a claim_missing
+    # session the chain later held comes back, and counters never go down.
+    def net(prefix, book):
+        return "(%s - %s)" % (T("%s_%s_total" % (prefix, book)), T(prefix + "_reinstated_total", 'from="%s"' % book))
+
     money = {
         "file": "01-money.json", "uid": "prm-money", "title": "Relay Miner / 1 Money", "tags": ["money"],
         "desc": "Of what I served, how much is proved and paid, how much waits for the chain, how much is lost, and why.",
@@ -47,11 +52,11 @@ def specs(g):
                 stat("Proved", [T("ha_miner_upokt_proved_total")], POKT, [(None, GREEN)], "POKT whose session ended proved: the money that is paid.", w=5),
                 stat("Waiting for the chain", [unres("ha_miner_upokt")], POKT, [(None, GREEN), (1e-9, YELLOW)],
                      "Claimed, and the chain has not answered yet (unresolved opened - resolved). It returns to 0 once every proof window closes.", w=5),
-                stat("Lost", [T("ha_miner_upokt_lost_total")], POKT, ZG, "Claimed and will not be paid. Any value above 0 has a reason in the panels below.", w=5),
-                stat("Forgone", [T("ha_miner_upokt_forgone_total")], POKT, ZG, "Served but never claimed: it never entered the book.", w=4),
+                stat("Lost", [net("ha_miner_upokt", "lost")], POKT, ZG, "Claimed and will not be paid, net of what a reinstatement took back. Any value above 0 has a reason in the panels below.", w=5),
+                stat("Forgone", [net("ha_miner_upokt", "forgone")], POKT, ZG, "Served but never claimed: it never entered the book. Net of what a reinstatement took back.", w=4),
                 ),
             row("Does the ledger close?",
-                stat("Claimed - proved - lost - waiting", ["%s - %s - %s - %s" % (T("ha_miner_upokt_claimed_total"), T("ha_miner_upokt_proved_total"), T("ha_miner_upokt_lost_total"), unres("ha_miner_upokt"))],
+                stat("Claimed - proved - lost - waiting", ["%s - %s - %s - %s" % (T("ha_miner_upokt_claimed_total"), T("ha_miner_upokt_proved_total"), net("ha_miner_upokt", "lost"), unres("ha_miner_upokt"))],
                      POKT, ZGA, IDENT + " A session leaves the book through exactly one door, so the doors sum to what was claimed.", w=8, decimals=6),
                 stat("Proved share of claimed", ["%s / %s" % (T("ha_miner_upokt_proved_total"), T("ha_miner_upokt_claimed_total"))], "percentunit",
                      [(None, RED), (0.95, YELLOW), (0.999, GREEN)], "At run end every claimed POKT should be proved.", w=8, nodata="-"),
@@ -62,8 +67,16 @@ def specs(g):
                 ts("Forgone by reason (POKT/s)", [(R("ha_miner_upokt_forgone_total", "reason"), "{{reason}}")], "short", "Served work that never reached a claim.", w=8, stack=True),
                 bar("Claims skipped by reason", [(INC("ha_miner_claims_skipped_total", "reason"), "{{reason}}")], "short",
                     "A skipped claim is a session whose tree was empty or whose reward would not pay its fee.", w=8),
-                table("Sessions failed, by supplier, service and reason", [(INC("ha_miner_sessions_failed_total", "supplier,service_id,reason"), "sessions")], "short",
-                      "DECOY for loss: proof_tx_error here is a failed ATTEMPT that a retry usually lands. The inclusion outcomes on the Claims and proofs dashboard say what the chain has.", w=24, h=7),
+                table("Sessions failed, by supplier, service and reason", [(INC("ha_miner_sessions_failed_total", "supplier,service_id,reason"), "sessions"),
+                    (INC("ha_miner_sessions_reinstated_total", "supplier,service_id,reason"), "reinstated")], "short",
+                      "DECOY for loss: proof_tx_error here is a failed ATTEMPT that a retry usually lands. The inclusion outcomes on the Claims and proofs dashboard say what the chain has. Reinstated: counted claim_missing, then the chain was seen to hold the claim; subtract it.", w=24, h=7),
+                ),
+            row("Taken back: a claim the chain held after all",
+                stat("Sessions reinstated", [T("ha_miner_sessions_reinstated_total")], "short", [(None, GREEN), (1, YELLOW)],
+                     "Sessions counted claim_missing that came back to claimed when the chain was seen to hold their claim. Above 0 means the pre-proof claim check was answered wrong.", w=6),
+                ts("Taken back by book (POKT/s)", [(R("ha_miner_upokt_reinstated_total", "from"), "{{from}}")], "short", "Subtracted from the Lost and Forgone stats above.", w=6),
+                ts("Relays taken back", [(R("ha_miner_relays_reinstated_total", "from"), "{{from}}")], "short", "relays/s", w=6),
+                ts("Compute units taken back", [(R("ha_miner_compute_units_reinstated_total", "from"), "{{from}}")], "short", "compute units/s", w=6),
                 ),
             row("The volume behind the money",
                 ts("Relays: claimed / proved / lost / forgone", [(R("ha_miner_relays_claimed_total"), "claimed"), (R("ha_miner_relays_proved_total"), "proved"),
@@ -276,13 +289,15 @@ def specs(g):
 
     storage = {
         "file": "05-storage-and-memory.json", "uid": "prm-storage", "title": "Relay Miner / 5 Storage and memory", "tags": ["redis", "memory"],
-        "desc": "Is Redis or process memory what is throttling me?",
+        "desc": "Is Redis or process memory what is throttling me? In standalone mode the Redis rows stay empty: its embedded store is on dashboard 8 (Standalone store).",
         "rows": [
             row("Admission gates",
                 stat("Every gate open", [G("ha_transport_store_operable", "min")], "short", [(None, RED), (1, GREEN)],
-                     "0 means a gate is closed: the relayer refuses new work, or the miner pauses ingestion, until Redis has room again.", w=6),
-                stat("Redis free (lowest seen by a process)", [G("ha_transport_store_free_bytes", "min")], "bytes", [(None, RED), (1073741824, YELLOW), (1610612736, GREEN)],
-                     "Gates close below 1 GiB free (or 1/8 of maxmemory if smaller) and reopen 512 MiB / 1 GiB above that.", w=6),
+                     "0 means a gate is closed: the relayer refuses new work, or the miner pauses ingestion, until the store has room again.", w=6),
+                stat("Store free (lowest seen by a process)", [G("ha_transport_store_free_bytes", "min")], "bytes", [(None, RED), (1073741824, YELLOW), (1610612736, GREEN)],
+                     "Redis maxmemory minus used memory in high-availability mode; free space on the disk of the embedded store in standalone mode. "
+                     "Gates close below 1 GiB free, or below 1/8 of maxmemory (in standalone mode 1/8 of the disk) when that is smaller, "
+                     "and reopen half that line (ingestion) or all of it (admission) above it: 512 MiB / 1 GiB at the full 1 GiB.", w=6),
                 state("Gate state", [(G("ha_transport_store_operable", "min", "component,gate"), "{{component}} {{gate}}")], w=12, h=4),
                 ts("Seconds closed by gate and reason", [("%s / count by (component,gate,reason)(%s)" % (INC("ha_transport_store_closed_seconds_total", "component,gate,reason"), q("ha_transport_store_closed_seconds_total")),
                     "{{component}} {{gate}} {{reason}}")], "s", "Divided by the number of series of each gate: each process reports its own.", w=12),
@@ -419,4 +434,45 @@ def specs(g):
                 ),
         ],
     }
-    return [money, pipeline, flow, relayer, storage, chain, internals]
+    sa = 'job="standalone"'
+    standalone = {
+        "file": "08-standalone-store.json", "uid": "prm-standalone-store", "title": "Relay Miner / 8 Standalone store", "tags": ["standalone", "storage"],
+        "desc": "Standalone mode only: is the embedded store (its disk, write-ahead log and LSM) or the relay queue what is throttling me? Empty in high-availability mode, where dashboard 5 shows Redis.",
+        "rows": [
+            row("Disk",
+                stat("Store disk free (lowest seen)", [G("ha_transport_store_free_bytes", "min", extra=sa)], "bytes", [(None, RED), (1073741824, YELLOW), (1610612736, GREEN)],
+                     "Free space on the disk the store lives on. New work stops below 1 GiB free, or below 1/8 of the disk when that is smaller.", w=6),
+                stat("Store files on disk", [G("ha_standalone_store_disk_used_bytes", "max")], "bytes", [(None, "blue")],
+                     "Logs, sstables, obsolete files not yet deleted and compactions in progress.", w=6),
+                ts("Disk free vs store files", [(G("ha_transport_store_free_bytes", "min", extra=sa), "disk free"), (G("ha_standalone_store_disk_used_bytes", "max"), "store files")], "bytes",
+                   "Store files that grow while traffic is flat mean claimed sessions are not being cleaned, or compaction is behind (see LSM health).", w=12),
+                ),
+            row("Write-ahead log sync",
+                ts("WAL sync duration", [(P("ha_standalone_wal_sync_duration_seconds", 0.95), "p95"), (P("ha_standalone_wal_sync_duration_seconds", 0.99), "p99")], "s",
+                   "One fsync of the log, every storage.sync_interval while there were writes, and at shutdown. A slow disk shows here first.", w=12),
+                ts("WAL syncs and failures", [(R("ha_standalone_wal_sync_duration_seconds_count"), "syncs/s"), (R("ha_standalone_wal_sync_failures_total"), "failures/s")], "short", w=8),
+                stat("WAL sync failures (range)", [T("ha_standalone_wal_sync_failures_total")], "short", ZG,
+                     "Stays at 0. Until a sync succeeds, an OS crash or a power loss can lose every batch committed since the last good one.", w=4, h=8),
+                ),
+            row("LSM health",
+                ts("L0 files / read amplification", [(G("ha_standalone_store_l0_files", "max"), "L0 files"), (G("ha_standalone_store_read_amplification", "max"), "read amplification")], "short",
+                   "Pebble compacts L0 from 4 files and stops writes at 12 L0 sublevels (its defaults, which the store keeps). Read amplification is the L0 sublevels plus the non-empty levels below; one that keeps climbing means compaction is behind.", w=12),
+                ts("Compaction debt", [(G("ha_standalone_store_compaction_debt_bytes", "max"), "debt")], "bytes", "Pebble's estimate of what is left to compact. It rises with writes and falls back; one that only rises is compaction falling behind.", w=12),
+                ts("Memtable", [(G("ha_standalone_store_memtable_bytes", "max"), "memtable")], "bytes", "Writes not yet flushed to sstables. Part of the process's resident memory.", w=12),
+                ts("Flushes and compactions", [(R("ha_standalone_store_flushes_total"), "flushes/s"), (R("ha_standalone_store_compactions_total"), "compactions/s")], "short", w=12),
+                ),
+            row("Relay queue",
+                ts("Queue length by supplier", [(G("ha_standalone_queue_length", "max", "supplier"), "{{supplier}}")], "short",
+                   "Relays stored and not yet acknowledged by the miner. A length that keeps growing means the miner does not keep up with the relayer.", w=12),
+                ts("Pending by supplier", [(G("ha_standalone_queue_pending", "max", "supplier"), "{{supplier}}")], "short",
+                   "Relays delivered to the miner and not yet acknowledged.", w=12),
+                ),
+            row("Standalone process",
+                ts("Resident memory", [('max by (instance)(process_resident_memory_bytes{%s,%s})' % (sa, inst), "{{instance}}")], "bytes",
+                   "One process holds the relayer, the miner and the store's memtables and block cache. Compare it with the container or unit limit.", w=8),
+                ts("Heap in use", [(G("ha_runtime_heap_inuse_bytes", "max", "instance", sa + "," + inst), "{{instance}}")], "bytes", w=8),
+                ts("CPU", [('sum by (instance)(rate(process_cpu_seconds_total{%s,%s}[$__rate_interval]))' % (sa, inst), "{{instance}}")], "short", "Cores used.", w=8),
+                ),
+        ],
+    }
+    return [money, pipeline, flow, relayer, storage, chain, internals, standalone]

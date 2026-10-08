@@ -222,6 +222,19 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 	store := kv.NewPebble(logger, db, keyBuilder)
 	defer func() { _ = store.Close() }()
 	broker := pebblequeue.NewBroker(logger, db, store, keyBuilder.StreamPrefix())
+	// The store's and the queue's metrics, read at scrape time, on the shared
+	// registry standaloneGatherer serves. Unregistered before the store closes
+	// (deferred after its close, so run before it); a scrape already running
+	// then is answered by the collectors' own closed-store check.
+	storeMetrics, queueMetrics := db.Collector(), broker.Collector()
+	if err := observability.SharedRegistry.Register(storeMetrics); err != nil {
+		return fmt.Errorf("failed to register the embedded store metrics: %w", err)
+	}
+	defer observability.SharedRegistry.Unregister(storeMetrics)
+	if err := observability.SharedRegistry.Register(queueMetrics); err != nil {
+		return fmt.Errorf("failed to register the relay queue metrics: %w", err)
+	}
+	defer observability.SharedRegistry.Unregister(queueMetrics)
 	// The miner builds its backend once it has its config; the inspect server
 	// reads the miner's state through the latest one.
 	var builtBackend atomic.Pointer[miner.PebbleStoreBackend]

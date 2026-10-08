@@ -54,9 +54,20 @@ and submits them to the chain. It runs in 1 of 2 modes:
   a release ships it; not yet run on beta.
 
 [docs/deploy/README.md, "Choose a mode"](docs/deploy/README.md#choose-a-mode)
-compares them. **Choosing the mode is the human's decision**: when they have
-not said, start with high-availability mode (the verified one) and tell them
-standalone mode exists, in 1 line.
+compares them. **Choosing the mode is the human's decision.** When they have not
+said, ask these 3 questions, in 1 message, and recommend from the answers:
+
+1. Must serving and claiming survive a host or process dying (more than one
+   host, replicas, failover)? Yes: high-availability mode.
+2. Will it run on 1 host, and would they rather not operate Redis? Yes to both:
+   standalone mode.
+3. Do they need a released image today? Yes: high-availability mode until a
+   release ships standalone mode; otherwise standalone mode is built from source.
+
+Say why in 1 line ("1 host, no Redis: standalone mode"), name the runbook, and
+let them confirm. If they do not answer, start with high-availability mode (the
+released one) and tell them standalone mode exists, in 1 line. Moving between
+the modes later is a fresh start: their state lives in different stores.
 
 ## Where to go
 
@@ -72,11 +83,11 @@ standalone mode exists, in 1 line.
   [docs/deploy/README.md](docs/deploy/README.md#words-you-will-meet).
 - **The human has nothing yet** (no key, no POKT, no stake): the usual case,
   and not a blocker. In this order:
-  1. Start now: the Docker Compose runbook of the mode they chose (high
-     availability when they have not chosen) on beta with the public example
-     key, steps 0 to 8, with the dashboards if they want graphs. It starts
-     as shipped, with the example's `my-service`: nothing about their
-     services, keys or service ids is needed to start.
+  1. Start now: the Docker Compose runbook of the mode they chose (the 3
+     questions above; high availability when they do not answer) on beta
+     with the public example key, steps 0 to 8, with the dashboards if they
+     want graphs. It starts as shipped, with the example's `my-service`:
+     nothing about their services, keys or service ids is needed to start.
   2. Find the service each of their nodes serves by asking the node, not by
      its name: [docs/deploy/README.md, "Services"](docs/deploy/README.md#services-what-you-serve-and-how-to-find-yours)
      lists each service's card (its transports and a health request) and
@@ -118,7 +129,8 @@ standalone mode exists, in 1 line.
      that network (the query below): beta registers its own services, and
      one missing there cannot be staked on beta.
   4. When they are staked, step 9 switches the key and step 11 checks it.
-- **Dashboards** (optional): Prometheus and Grafana with 7 dashboards, started
+- **Dashboards** (optional): Prometheus and Grafana with 8 dashboards (the 8th
+  for standalone mode's embedded store), started
   with the compose example's `observability` profile:
   [examples/observability/](examples/observability/README.md).
 - **Anything else** -- configuring, operating, testing, understanding the

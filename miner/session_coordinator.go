@@ -421,9 +421,21 @@ func (c *SessionCoordinator) OnClaimObservedOnChain(
 		)
 	}
 
+	// Read before the flip: a session counted claim_missing carries the verdict
+	// the flip clears. claim_missing is terminal, so only this flip can change
+	// it, and the flip lets one caller through.
+	before, beforeErr := c.sessionStore.Get(ctx, sessionID)
 	reactivated, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
 	if err != nil {
 		return fmt.Errorf("failed to reactivate session %s: %w", sessionID, err)
+	}
+	if reactivated && beforeErr == nil && before != nil &&
+		before.State == SessionStateClaimMissing && before.ClaimMissingVerdict != "" {
+		RecordClaimMissingReinstated(before.SupplierOperatorAddress, before.ServiceID, before.ClaimMissingVerdict,
+			before.RelayCount, int64(before.TotalComputeUnits))
+	} else if reactivated && beforeErr != nil {
+		c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
+			Msg("session reactivated but its state before could not be read: a claim_missing verdict, if any, stays counted")
 	}
 	if !reactivated {
 		// Already at or past claimed. Not an error and not a no-op worth
@@ -659,16 +671,22 @@ func (c *SessionCoordinator) OnClaimMissing(ctx context.Context, sessionID strin
 		return nil
 	}
 
-	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimMissing); err != nil {
+	// The verdict is written with the state, so a later reinstatement reverses
+	// exactly what this counts. Without the snapshot (its read failed above)
+	// there is no supplier, service or weight: nothing is counted or recorded.
+	verdict := ""
+	if current != nil {
+		verdict = ClaimMissingVerdictFor(current.State)
+	}
+	if err := c.sessionStore.MarkClaimMissing(ctx, sessionID, verdict); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_missing")
 		return err
 	}
 
-	// Counted once, on the transition. Without the snapshot (its read failed
-	// above) there is no supplier, service or weight to count it under.
+	// Counted once, on the transition.
 	if current != nil {
-		RecordClaimMissing(current.SupplierOperatorAddress, current.ServiceID, current.State.HoldsClaimOnChain(),
+		RecordClaimMissing(current.SupplierOperatorAddress, current.ServiceID, verdict,
 			current.RelayCount, int64(current.TotalComputeUnits))
 	} else {
 		c.logger.Warn().Str(logging.FieldSessionID, sessionID).

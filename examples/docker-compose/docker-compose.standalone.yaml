@@ -68,7 +68,7 @@ services:
     restart: unless-stopped
 
   # --- Observability (optional) ------------------------------------------------
-  # Prometheus and Grafana with the 7 dashboards in examples/observability/.
+  # Prometheus and Grafana with the 8 dashboards in examples/observability/.
   # They belong to the "observability" profile, so a plain `up` does not start
   # them; add `--profile observability` to start them too. Both ports are bound
   # to loopback: use an SSH tunnel to reach them from another machine. There is
