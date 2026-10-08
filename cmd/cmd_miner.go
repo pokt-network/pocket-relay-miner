@@ -179,9 +179,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	}
 	if len(unknownConfigKeys) > 0 {
 		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
-			return fmt.Errorf(
-				"--strict-config: refusing to start, %d key(s) this miner does not understand (listed above)",
-				len(unknownConfigKeys))
+			return strictConfigError("this miner", unknownConfigKeys)
 		}
 	}
 

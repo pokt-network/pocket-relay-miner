@@ -452,9 +452,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	}
 	if len(unknown) > 0 {
 		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
-			return fmt.Errorf(
-				"--strict-config: refusing to start, %d key(s) this relayer does not understand (listed above)",
-				len(unknown))
+			return strictConfigError("this relayer", unknown)
 		}
 	}
 

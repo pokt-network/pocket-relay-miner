@@ -150,7 +150,7 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 	}
 	if len(unknown) > 0 {
 		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
-			return fmt.Errorf("--strict-config: refusing to start, %d key(s) standalone does not understand (listed above)", len(unknown))
+			return strictConfigError("standalone", unknown)
 		}
 	}
 
