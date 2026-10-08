@@ -191,7 +191,7 @@ func requireLocalnetConfigMaps(t *testing.T, res *Result) {
 	}
 }
 
-func requireHA(t *testing.T, res *Result) {
+func requireHA(t *testing.T, res *Result, tree string) {
 	t.Helper()
 	deps := objects(res, "Deployment")
 	for _, side := range []string{"relayer", "miner"} {
@@ -207,9 +207,11 @@ func requireHA(t *testing.T, res *Result) {
 	requireLocalnetConfigMaps(t, res)
 	validate(t, res, "relayer-config", "relayer")
 	validate(t, res, "miner-config", "miner")
+	requireConfigCheck(t, res, tree, "relayer", "relayer-config", "relayer")
+	requireConfigCheck(t, res, tree, "miner", "miner-config", "miner")
 }
 
-func requireStandalone(t *testing.T, res *Result) {
+func requireStandalone(t *testing.T, res *Result, tree string) {
 	t.Helper()
 	deps := objects(res, "Deployment")
 	for _, side := range []string{"relayer", "miner"} {
@@ -240,6 +242,48 @@ func requireStandalone(t *testing.T, res *Result) {
 	}
 	requireLocalnetConfigMaps(t, res)
 	validate(t, res, "standalone-config", "standalone")
+	requireConfigCheck(t, res, tree, "standalone", "standalone-config", "standalone")
+}
+
+// requireConfigCheck: the Deployment waits on a local resource that validates,
+// with this tree's binary, the very YAML its ConfigMap carries.
+func requireConfigCheck(t *testing.T, res *Result, tree, deployment, configMap, mode string) {
+	t.Helper()
+	name := configMap + "-check"
+	path := ".tilt-tmp/" + configMap + ".yaml"
+	var check *Resource
+	for i := range res.LocalResources {
+		if res.LocalResources[i].Name == name {
+			check = &res.LocalResources[i]
+		}
+	}
+	if check == nil {
+		t.Fatalf("no local_resource %s: the %s config is never checked before its pod deploys", name, configMap)
+	}
+	if want := "make build && ./bin/pocket-relay-miner " + mode + " validate --config " + path; check.Kwargs["cmd"] != want {
+		t.Fatalf("%s cmd = %v, want %q", name, check.Kwargs["cmd"], want)
+	}
+	if !contains(check.Kwargs["deps"], path) {
+		t.Fatalf("%s deps %v: want %s, so a config edit re-runs the check", name, check.Kwargs["deps"], path)
+	}
+	written, err := os.ReadFile(filepath.Join(tree, path))
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	mounted, _ := dig(objects(res, "ConfigMap")[configMap], "data", "config.yaml").(string)
+	if strings.TrimSpace(string(written)) != strings.TrimSpace(mounted) {
+		t.Fatalf("%s checks a config other than the one ConfigMap %s mounts", name, configMap)
+	}
+	for _, r := range res.Resources {
+		if r.Name == deployment {
+			if !contains(r.Kwargs["resource_deps"], name) {
+				t.Fatalf("k8s_resource %s resource_deps %v: want %s, or the pod deploys before its config is checked",
+					deployment, r.Kwargs["resource_deps"], name)
+			}
+			return
+		}
+	}
+	t.Fatalf("no k8s_resource %s", deployment)
 }
 
 // A first run: no tilt_config.yaml, so the Tiltfile generates one, in the copy.
@@ -254,22 +298,54 @@ func TestRender_HighAvailability_FirstRun(t *testing.T) {
 	if (beforeErr == nil) != (afterErr == nil) || !bytes.Equal(before, after) {
 		t.Fatal("the render changed the checkout's tilt_config.yaml")
 	}
-	requireHA(t, res)
+	requireHA(t, res, tree)
 }
 
 func TestRender_HighAvailability_Example(t *testing.T) {
-	res, _ := render(t, exampleConfig(t, "ha"))
-	requireHA(t, res)
+	res, tree := render(t, exampleConfig(t, "ha"))
+	requireHA(t, res, tree)
 }
 
 func TestRender_Standalone_Minimal(t *testing.T) {
-	res, _ := render(t, "relay_miner_mode: standalone\n")
-	requireStandalone(t, res)
+	res, tree := render(t, "relay_miner_mode: standalone\n")
+	requireStandalone(t, res, tree)
 }
 
 func TestRender_Standalone_Example(t *testing.T) {
-	res, _ := render(t, exampleConfig(t, "standalone"))
-	requireStandalone(t, res)
+	res, tree := render(t, exampleConfig(t, "standalone"))
+	requireStandalone(t, res, tree)
+}
+
+// A tilt_config.yaml carrying a retired key, as a stale local copy did on
+// 2026-10-08, turns each mode's config check red and names the key, though the
+// relayer and the miner only warn about it at runtime.
+func TestRender_ConfigCheckRefusesARetiredKey(t *testing.T) {
+	bin := os.Getenv("PRM_BIN")
+	if bin == "" {
+		t.Skip("PRM_BIN is not set: scripts/gates/static.sh builds the binary and sets it")
+	}
+	for _, c := range []struct{ mode, configMap, binMode string }{
+		{"ha", "relayer-config", "relayer"},
+		{"standalone", "standalone-config", "standalone"},
+	} {
+		t.Run(c.mode, func(t *testing.T) {
+			const anchor = "\n    relay_meter:\n      cache_ttl: 2h\n"
+			doc := exampleConfig(t, c.mode)
+			if strings.Count(doc, anchor) != 1 {
+				t.Fatalf("premise: tilt_config.example.yaml has %q once", anchor)
+			}
+			doc = strings.Replace(doc, anchor, anchor+"      enabled: true\n", 1)
+			_, tree := render(t, doc)
+			out, err := exec.Command(bin, c.binMode, "validate", "--config",
+				filepath.Join(tree, ".tilt-tmp", c.configMap+".yaml")).CombinedOutput()
+			if err == nil {
+				t.Fatalf("%s check passed a config with a retired key:\n%s", c.configMap, out)
+			}
+			if !strings.Contains(string(out), "field enabled not found") {
+				t.Fatalf("%s check failed without naming the key:\n%s", c.configMap, out)
+			}
+		})
+	}
 }
 
 // A value the relayer and the miner configs set differently is refused, and

@@ -1,7 +1,7 @@
 # standalone.tilt - Standalone mode: the relayer and the miner in one process,
 # their state in an embedded store on a volume, and no Redis.
 
-load("./utils.Tiltfile", "config_hash", "keyring_init_containers", "deep_merge")
+load("./utils.Tiltfile", "config_hash", "config_check", "keyring_init_containers", "deep_merge")
 load("./miner.Tiltfile", "generate_miner_config")
 load("./relayer.Tiltfile", "generate_relayer_config")
 
@@ -28,7 +28,8 @@ data:
   config.yaml: |
     {}
 """.format(standalone_config_yaml.replace("\n", "\n    "))))
-    deploy_standalone_deployment(config, config_hash(standalone_config_yaml))
+    check = config_check("standalone-config", "standalone", standalone_config_yaml)
+    deploy_standalone_deployment(config, config_hash(standalone_config_yaml), check)
 
 def generate_standalone_config(config):
     """One standalone config from the relayer and miner configs the HA mode
@@ -83,7 +84,7 @@ def check_no_conflict(section, r, m, path=""):
             fail("standalone: {} is {!r} in the relayer config and {!r} in the miner config; ".format(where, rv, mv) +
                  "a standalone config holds it once: make them equal in tilt_config.yaml")
 
-def deploy_standalone_deployment(config, standalone_config_hash):
+def deploy_standalone_deployment(config, standalone_config_hash, config_check_resource):
     cores = config["relayer"]["cpu_cores"] + config["miner"]["cpu_cores"]
     k8s_yaml(blob("""
 apiVersion: v1
@@ -250,7 +251,7 @@ spec:
         "standalone",
         labels=["relay-miner"],
         objects=["standalone-config:configmap", "standalone-store:persistentvolumeclaim", "supplier-keys:secret"],
-        resource_deps=["validator", "account-init"],
+        resource_deps=["validator", "account-init", config_check_resource],
         port_forwards=[
             # The same local ports high-availability mode uses, so every
             # client, load test and the live gate reach it unchanged.

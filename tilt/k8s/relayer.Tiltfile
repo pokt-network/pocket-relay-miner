@@ -1,7 +1,7 @@
 # relayer.tilt - Relayer deployment (stateless, waits for miners)
 
 load("./ports.Tiltfile", "get_relayer_ports")
-load("./utils.Tiltfile", "deep_merge", "read_relayer_example_config", "get_redis_host", "apply_k8s_overrides_relayer", "config_hash", "keyring_init_containers")
+load("./utils.Tiltfile", "deep_merge", "read_relayer_example_config", "get_redis_host", "apply_k8s_overrides_relayer", "config_hash", "config_check", "keyring_init_containers")
 
 def deploy_relayers(config):
     """Deploy relayer as a Deployment with N replicas"""
@@ -19,7 +19,8 @@ def deploy_relayers(config):
     create_relayer_configmap(relayer_config_yaml)
 
     # Deploy single relayer Deployment with replicas
-    deploy_relayer_deployment(config, config_hash(relayer_config_yaml))
+    check = config_check("relayer-config", "relayer", relayer_config_yaml)
+    deploy_relayer_deployment(config, config_hash(relayer_config_yaml), check)
 
 def create_relayer_configmap(relayer_config_yaml):
     """Create ConfigMap with relayer configuration"""
@@ -37,7 +38,7 @@ data:
 
     k8s_yaml(blob(relayer_configmap))
 
-def deploy_relayer_deployment(config, relayer_config_hash):
+def deploy_relayer_deployment(config, relayer_config_hash, config_check_resource):
     """Deploy relayer as a single Deployment with N replicas"""
 
     # Relayer Deployment with replicas + Service
@@ -203,7 +204,7 @@ spec:
         "relayer",
         labels=["relay-miner"],
         objects=["relayer-config:configmap"],
-        resource_deps=["redis", "validator", "miner"],
+        resource_deps=["redis", "validator", "miner", config_check_resource],
         port_forwards=[
             "{}:8080".format(config["relayer"]["base_port"]),
             "{}:9090".format(config["relayer"]["metrics_base_port"]),

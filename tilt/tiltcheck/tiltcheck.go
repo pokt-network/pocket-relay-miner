@@ -39,6 +39,8 @@ type Result struct {
 	Objects []map[string]any
 	// Resources are the k8s_resource calls, in order.
 	Resources []Resource
+	// LocalResources are the local_resource calls, in order.
+	LocalResources []Resource
 	// Output is what the Tiltfile printed.
 	Output string
 }
@@ -152,6 +154,7 @@ func (r *renderer) predeclared() starlark.StringDict {
 		"allow_k8s_contexts": starlark.NewBuiltin("allow_k8s_contexts", r.allowK8sContexts),
 		"docker_build":       r.recorder("docker_build", []string{"ref", "context", "build_args", "dockerfile", "dockerfile_contents", "live_update", "match_in_env_vars", "ignore", "only", "entrypoint", "target", "ssh", "network", "secret", "extra_tag", "container_args", "cache_from", "pull", "platform", "extra_hosts"}),
 		"k8s_resource":       starlark.NewBuiltin("k8s_resource", r.k8sResource),
+		"local_resource":     starlark.NewBuiltin("local_resource", r.localResource),
 		"k8s_yaml":           starlark.NewBuiltin("k8s_yaml", r.k8sYAML),
 		"blob":               starlark.NewBuiltin("blob", r.blob),
 		"read_file":          starlark.NewBuiltin("read_file", r.readFile),
@@ -197,6 +200,32 @@ func (r *renderer) k8sResource(_ *starlark.Thread, b *starlark.Builtin, args sta
 		rec.Kwargs[string(pair[0].(starlark.String))] = toGo(pair[1])
 	}
 	r.result.Resources = append(r.result.Resources, rec)
+	return starlark.None, nil
+}
+
+// localResource records a local_resource call; its command is not run. The
+// keywords are Tilt's.
+func (r *renderer) localResource(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kw []starlark.Tuple) (starlark.Value, error) {
+	var (
+		name, cmd, serveCmd, cmdBat, serveCmdBat, dir, serveDir string
+		allowParallel, autoInit                                 bool
+		deps, triggerMode, resourceDeps, ignore, links, tags    starlark.Value
+		env, serveEnv, readiness, labels                        starlark.Value
+	)
+	if err := starlark.UnpackArgs(b.Name(), args, kw,
+		"name", &name, "cmd?", &cmd, "deps?", &deps, "trigger_mode?", &triggerMode,
+		"resource_deps?", &resourceDeps, "ignore?", &ignore, "auto_init?", &autoInit,
+		"serve_cmd?", &serveCmd, "cmd_bat?", &cmdBat, "serve_cmd_bat?", &serveCmdBat,
+		"allow_parallel?", &allowParallel, "links?", &links, "tags?", &tags, "env?", &env,
+		"serve_env?", &serveEnv, "readiness_probe?", &readiness, "dir?", &dir,
+		"serve_dir?", &serveDir, "labels?", &labels); err != nil {
+		return nil, err
+	}
+	rec := Resource{Name: name, Kwargs: map[string]any{}}
+	for _, pair := range kw {
+		rec.Kwargs[string(pair[0].(starlark.String))] = toGo(pair[1])
+	}
+	r.result.LocalResources = append(r.result.LocalResources, rec)
 	return starlark.None, nil
 }
 
@@ -348,8 +377,13 @@ func (r *renderer) exists(_ *starlark.Thread, b *starlark.Builtin, args starlark
 }
 
 // localCommands are the command prefixes the Tiltfiles run: writing the
-// generated tilt_config.yaml, and hashing a rendered config.
-var localCommands = []string{"cat > tilt_config.yaml << 'EOF'\n", "cat << 'PRM_CFG_EOF' | sha256sum | cut -c1-16\n"}
+// generated tilt_config.yaml, hashing a rendered config, and writing a rendered
+// config for its check.
+var localCommands = []string{
+	"cat > tilt_config.yaml << 'EOF'\n",
+	"cat << 'PRM_CFG_EOF' | sha256sum | cut -c1-16\n",
+	"mkdir -p .tilt-tmp && cat > .tilt-tmp/",
+}
 
 func (r *renderer) local(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kw []starlark.Tuple) (starlark.Value, error) {
 	var (

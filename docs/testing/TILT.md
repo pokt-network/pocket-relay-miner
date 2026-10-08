@@ -51,6 +51,15 @@ One key in `tilt_config.yaml` picks what runs as the relay miner:
 | `ha` (the default) | the `relayer` and `miner` Deployments (`relayer.count`, `miner.count`), sharing Redis: high-availability mode | Redis |
 | `standalone` | one `standalone` Deployment, 1 replica, the relayer and the miner in one process: standalone mode. `relayer.count` and `miner.count` are ignored; the `relayer.config` and `miner.config` sections become its `relayer:` and `miner:` sections | PVC `standalone-store`, mounted at `/data` |
 
+Before a relay-miner pod deploys, in either mode, Tilt checks its config: a
+local resource named `<config>-check` (`relayer-config-check`,
+`miner-config-check`, `standalone-config-check`) runs `make build` and the
+binary's `validate` on the exact YAML the ConfigMap mounts, and the Deployment
+waits on it. A key the binary does not understand -- a retired one left in an
+older `tilt_config.yaml` -- turns that resource red with every key named, and
+the pod does not deploy; remove the key from `tilt_config.yaml` and the check
+re-runs. It needs Go on the host, as `make build` does.
+
 To switch: `make tilt-down-k8s`, change the key, `make tilt-up-k8s`. The live
 gate reads the mode from the cluster, so both modes are validated with the same
 `scripts/gates/live.sh`, one run each ([scripts/gates/README.md](../../scripts/gates/README.md)).

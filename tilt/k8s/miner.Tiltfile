@@ -1,7 +1,7 @@
 # miner.tilt - Miner deployment (HA mode with leader election)
 
 load("./ports.Tiltfile", "get_miner_ports")
-load("./utils.Tiltfile", "deep_merge", "read_miner_example_config", "get_redis_host", "apply_k8s_overrides_miner", "config_hash", "keyring_init_containers")
+load("./utils.Tiltfile", "deep_merge", "read_miner_example_config", "get_redis_host", "apply_k8s_overrides_miner", "config_hash", "config_check", "keyring_init_containers")
 
 def deploy_miners(config):
     """Deploy miner as a Deployment with N replicas"""
@@ -16,7 +16,8 @@ def deploy_miners(config):
     miner_config_yaml = create_miner_configmap(config)
 
     # Deploy single miner Deployment with replicas
-    deploy_miner_deployment(config, config_hash(miner_config_yaml))
+    check = config_check("miner-config", "miner", miner_config_yaml)
+    deploy_miner_deployment(config, config_hash(miner_config_yaml), check)
 
 def create_miner_configmap(config):
     """Create ConfigMap with miner configuration. Returns the rendered YAML."""
@@ -43,7 +44,7 @@ data:
 
     return miner_config_yaml
 
-def deploy_miner_deployment(config, miner_config_hash):
+def deploy_miner_deployment(config, miner_config_hash, config_check_resource):
     """Deploy miner as a single Deployment with N replicas"""
 
     # Miner Deployment with replicas + Service
@@ -163,7 +164,7 @@ spec:
     k8s_resource(
         "miner",
         labels=["relay-miner"],
-        resource_deps=["redis", "validator", "account-init"],
+        resource_deps=["redis", "validator", "account-init", config_check_resource],
         objects=["miner-config:configmap", "supplier-keys:secret"],
         port_forwards=[
             "{}:9092".format(config["miner"]["metrics_base_port"]),

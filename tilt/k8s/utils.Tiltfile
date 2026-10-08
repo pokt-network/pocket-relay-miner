@@ -360,6 +360,31 @@ def config_hash(config_yaml):
         echo_off=True,
     )).strip()
 
+def config_check(name, mode, config_yaml):
+    """Validate a rendered config with this tree's binary before its pod deploys.
+
+    Writes the exact YAML the ConfigMap carries to .tilt-tmp/<name>.yaml and adds
+    a local resource that builds the binary and runs `<mode> validate` on it. The
+    Deployment lists the returned resource in resource_deps, so a key the binary
+    does not understand (a stale tilt_config.yaml) shows as that resource going
+    red, with every key named, before any pod starts -- in both modes, although
+    the relayer and the miner only warn about such keys at runtime.
+    """
+    path = ".tilt-tmp/{}.yaml".format(name)
+    local(
+        "mkdir -p .tilt-tmp && cat > {} << 'PRM_CFG_EOF'\n{}\nPRM_CFG_EOF".format(path, config_yaml),
+        quiet=True,
+        echo_off=True,
+    )
+    resource = name + "-check"
+    local_resource(
+        resource,
+        cmd="make build && ./bin/pocket-relay-miner {} validate --config {}".format(mode, path),
+        deps=[path],
+        labels=["relay-miner"],
+    )
+    return resource
+
 def dict_get(d, key, default=None):
     """Safe dictionary get with default value"""
     return d.get(key, default) if d else default
