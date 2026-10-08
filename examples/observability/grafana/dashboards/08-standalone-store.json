@@ -454,7 +454,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_standalone_wal_sync_failures_total[$__range])) or vector(0))",
+          "expr": "(sum(((last_over_time(ha_standalone_wal_sync_failures_total[$__range]) - last_over_time(ha_standalone_wal_sync_failures_total[$__range] offset $__range)) >= 0 and resets(ha_standalone_wal_sync_failures_total[$__range]) == 0) or last_over_time(ha_standalone_wal_sync_failures_total[$__range])) or vector(0))",
           "instant": true,
           "legendFormat": "",
           "range": false,

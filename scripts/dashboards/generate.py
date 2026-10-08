@@ -94,13 +94,23 @@ def q(name, extra=""):
 
 
 def T(name, extra="", by=""):
-    """Run total over the dashboard range: last_over_time, which sees counters born inside it.
+    """Run total over the dashboard range: the work each series did inside it.
 
-    Ungrouped, a counter that never fired has no series; "or vector(0)" makes it
-    0, so an identity that subtracts it still has a value."""
+    Per series: its last value minus its last value before the range, when it
+    was alive before the range and did not reset; otherwise its last value (a
+    series born inside the range, or restarted in it). A plain
+    last_over_time would add a pod's whole lifetime, work done before the
+    range included, so a range spanning a restart doubled; increase() would
+    miss series born inside the range. Ungrouped, a counter that never fired
+    has no series; "or vector(0)" makes it 0, so an identity that subtracts it
+    still has a value."""
+    sel = q(name, extra)
+    last = "last_over_time(%s[$__range])" % sel
+    before = "last_over_time(%s[$__range] offset $__range)" % sel
+    inner = "((%s - %s) >= 0 and resets(%s[$__range]) == 0) or %s" % (last, before, sel, last)
     if by:
-        return "sum by (%s)(last_over_time(%s[$__range]))" % (by, q(name, extra))
-    return "(sum(last_over_time(%s[$__range])) or vector(0))" % q(name, extra)
+        return "sum by (%s)(%s)" % (by, inner)
+    return "(sum(%s) or vector(0))" % inner
 
 
 def R(name, by="", extra=""):

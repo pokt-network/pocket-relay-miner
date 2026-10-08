@@ -18,7 +18,10 @@ failover, rollout, OOM). So a run total is
 `sum(last_over_time(<metric>[<run length>]))` evaluated at the END of the run,
 never `increase()`: a counter born inside the window is invisible to `increase()`.
 Keep the window inside ONE run — a window that reaches into the previous run adds
-its numbers silently.
+its numbers silently. The Grafana dashboards do not need that rule: each run total
+there subtracts a series' value before the range, so a range across a restart
+counts only the work inside it (`T()` in `scripts/dashboards/generate.py`, tested
+on promtool by `scripts/dashboards/test_totals.py`).
 
 ---
 

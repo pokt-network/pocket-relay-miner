@@ -81,4 +81,16 @@ else
 fi
 rm -f "$json_out"
 
+# The dashboards' run totals, evaluated by promtool on restart-shaped series.
+# Whole tree only: a run narrowed to one Go package is not about them.
+if [ "$pkg" = "./..." ]; then
+    gate_step "dashboard run totals"
+    if totals_out="$(python3 scripts/dashboards/test_totals.py 2>&1)"; then
+        gate_pass "$totals_out"
+    else
+        gate_fail "dashboard run totals are wrong (python3 scripts/dashboards/test_totals.py):"
+        gate_detail "$totals_out" 20
+    fi
+fi
+
 gate_verdict "tests"

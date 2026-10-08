@@ -7,8 +7,9 @@ process internals, and standalone mode's embedded store. Every metric the Go cod
 NOT_CHARTED with a reason; generate.py --check enforces it.
 
 Two conventions hold everywhere:
-- A run total is sum(last_over_time(counter[$__range])), not increase(): a
-  counter born inside the window is invisible to increase() (docs/METRICS_TRIAGE.md).
+- A run total is T(): the work each series did inside the range, its last value
+  minus its value before the range; not increase(), to which a counter born
+  inside the range is invisible (docs/METRICS_TRIAGE.md).
 - ha_miner_upokt_* are recorded in POKT (the code divides compute units by 1e6),
   so they are shown as POKT and never divided again.
 """
