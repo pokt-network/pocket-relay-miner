@@ -63,8 +63,10 @@ func (f *fakeSide) side() side {
 		if f.startErr != nil {
 			return f.startErr
 		}
-		stop := hooks.started()
+		// Logged before started is signalled: runSides starts the other side
+		// on that signal, so logging after it would race that side's events.
 		f.log.add(f.name + ":serving")
+		stop := hooks.started()
 		close(f.served)
 		select {
 		case <-stop:
