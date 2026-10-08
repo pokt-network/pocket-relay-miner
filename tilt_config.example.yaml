@@ -110,12 +110,6 @@ observability:
   prometheus:
     port: 9091
     scrape_interval: 2s
-path:
-  enabled: true
-  image: ghcr.io/pokt-network/path
-  metrics_port: 9096
-  port: 3069
-  tag: feat-unified-qos
 redis:
   cluster:
     redisFollower: 3
