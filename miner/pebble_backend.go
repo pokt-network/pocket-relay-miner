@@ -82,7 +82,7 @@ func (b *PebbleStoreBackend) rebroadcastStore() RebroadcastStorage {
 }
 
 func (b *PebbleStoreBackend) sessionStore(supplier string) SessionStore {
-	return &pebbleSessionStore{b: b, supplier: supplier, ttl: sessionTTL(b.config.SessionTTL)}
+	return &pebbleSessionStore{b: b, supplier: supplier, ttl: sessionTTL(b.config.SessionTTL), syncWAL: b.store.Sync}
 }
 
 func (b *PebbleStoreBackend) forSupplier(supplier string, dedup Deduplicator) (supplierStores, error) {
@@ -153,6 +153,8 @@ type pebbleSessionStore struct {
 	supplier string
 	ttl      time.Duration
 	closed   bool
+	// syncWAL fsyncs the store; a test replaces it before the store is used.
+	syncWAL func() error
 }
 
 func (s *pebbleSessionStore) prefix() []byte {
@@ -197,22 +199,32 @@ func (s *pebbleSessionStore) putLocked(batch *pebble.Batch, snap *SessionSnapsho
 }
 
 // writeLocked writes snap over prev, the stored session (nil when there is
-// none). A write that records a claim or proof tx hash is fsynced before it
-// returns: losing it to an OS crash after the broadcast would leave the session
-// as if nothing had been sent.
-func (s *pebbleSessionStore) writeLocked(prev, snap *SessionSnapshot) error {
+// none), and reports whether the write records a claim or proof tx hash. Such a
+// write must be fsynced before the caller returns (syncTx): losing it to an OS
+// crash after the broadcast would leave the session as if nothing had been
+// sent. The fsync runs after b.mu is released, as the SMST store's does, so the
+// relay commits of every supplier do not wait on it; a reader may meanwhile see
+// the hash before it is durable, which nothing acts on before the caller returns.
+func (s *pebbleSessionStore) writeLocked(prev, snap *SessionSnapshot) (needSync bool, err error) {
 	batch := s.b.store.DB().NewBatch()
 	if err := s.putLocked(batch, snap); err != nil {
 		_ = batch.Close()
-		return err
+		return false, err
 	}
 	if err := s.b.store.Commit(batch); err != nil {
-		return err
+		return false, err
 	}
-	if recordsTx(prev, snap) {
-		if err := s.b.store.Sync(); err != nil {
-			return fmt.Errorf("failed to sync session %s: %w", snap.SessionID, err)
-		}
+	return recordsTx(prev, snap), nil
+}
+
+// syncTx fsyncs a write writeLocked reported as recording a tx hash. Called
+// without b.mu.
+func (s *pebbleSessionStore) syncTx(needSync bool, sessionID string) error {
+	if !needSync {
+		return nil
+	}
+	if err := s.syncWAL(); err != nil {
+		return fmt.Errorf("failed to sync session %s: %w", sessionID, err)
 	}
 	return nil
 }
@@ -228,14 +240,22 @@ func recordsTx(prev, snap *SessionSnapshot) bool {
 // counters, as Redis does: they belong to IncrementRelayCount and the relay
 // commit, which may have counted relays since the caller read its snapshot.
 func (s *pebbleSessionStore) Save(_ context.Context, snapshot *SessionSnapshot) error {
+	needSync, err := s.saveLocked(snapshot)
+	if err != nil {
+		return err
+	}
+	return s.syncTx(needSync, snapshot.SessionID)
+}
+
+func (s *pebbleSessionStore) saveLocked(snapshot *SessionSnapshot) (bool, error) {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 	if s.closed {
-		return fmt.Errorf("session store is closed")
+		return false, fmt.Errorf("session store is closed")
 	}
 	prev, err := s.getLocked(snapshot.SessionID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	snapshot.LastUpdatedAt = time.Now()
 	if snapshot.CreatedAt.IsZero() {
@@ -252,26 +272,32 @@ func (s *pebbleSessionStore) Save(_ context.Context, snapshot *SessionSnapshot) 
 }
 
 func (s *pebbleSessionStore) CreateIfAbsent(_ context.Context, snapshot *SessionSnapshot) (bool, error) {
+	created, needSync, err := s.createIfAbsentLocked(snapshot)
+	if err != nil || !created {
+		return false, err
+	}
+	return true, s.syncTx(needSync, snapshot.SessionID)
+}
+
+func (s *pebbleSessionStore) createIfAbsentLocked(snapshot *SessionSnapshot) (created, needSync bool, err error) {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 	if s.closed {
-		return false, fmt.Errorf("session store is closed")
+		return false, false, fmt.Errorf("session store is closed")
 	}
 	existing, err := s.getLocked(snapshot.SessionID)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if existing != nil {
-		return false, nil
+		return false, false, nil
 	}
 	snapshot.LastUpdatedAt = time.Now()
 	if snapshot.CreatedAt.IsZero() {
 		snapshot.CreatedAt = snapshot.LastUpdatedAt
 	}
-	if err := s.writeLocked(nil, snapshot); err != nil {
-		return false, err
-	}
-	return true, nil
+	needSync, err = s.writeLocked(nil, snapshot)
+	return err == nil, needSync, err
 }
 
 func (s *pebbleSessionStore) Get(_ context.Context, sessionID string) (*SessionSnapshot, error) {
@@ -367,21 +393,30 @@ func (s *pebbleSessionStore) UpdateState(_ context.Context, sessionID string, ne
 	}
 	snap.State = newState
 	snap.LastUpdatedAt = time.Now()
-	return s.writeLocked(snap, snap) // the state only: no tx hash changes
+	_, err = s.writeLocked(snap, snap) // the state only: no tx hash changes
+	return err
 }
 
 func (s *pebbleSessionStore) ReactivateClaimed(_ context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (bool, error) {
+	done, needSync, err := s.reactivateClaimedLocked(sessionID, claimedRootHash, claimTxHash)
+	if err != nil || !done {
+		return false, err
+	}
+	return true, s.syncTx(needSync, sessionID)
+}
+
+func (s *pebbleSessionStore) reactivateClaimedLocked(sessionID string, claimedRootHash []byte, claimTxHash string) (done, needSync bool, err error) {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 	snap, err := s.getLocked(sessionID)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if snap == nil {
-		return false, fmt.Errorf("session not found: %s", sessionID)
+		return false, false, fmt.Errorf("session not found: %s", sessionID)
 	}
 	if !canReactivateClaimed(snap.State) {
-		return false, nil
+		return false, false, nil
 	}
 	prev := *snap
 	snap.State = SessionStateClaimed
@@ -390,10 +425,8 @@ func (s *pebbleSessionStore) ReactivateClaimed(_ context.Context, sessionID stri
 		snap.ClaimTxHash = claimTxHash
 	}
 	snap.LastUpdatedAt = time.Now()
-	if err := s.writeLocked(&prev, snap); err != nil {
-		return false, err
-	}
-	return true, nil
+	needSync, err = s.writeLocked(&prev, snap)
+	return err == nil, needSync, err
 }
 
 func (s *pebbleSessionStore) IncrementRelayCount(_ context.Context, sessionID string, computeUnits uint64) error {
@@ -412,7 +445,8 @@ func (s *pebbleSessionStore) IncrementRelayCount(_ context.Context, sessionID st
 	snap.RelayCount++
 	snap.TotalComputeUnits += computeUnits
 	snap.LastUpdatedAt = time.Now()
-	return s.writeLocked(snap, snap) // the counters only: no tx hash changes
+	_, err = s.writeLocked(snap, snap) // the counters only: no tx hash changes
+	return err
 }
 
 func (s *pebbleSessionStore) Close() error {
@@ -503,11 +537,21 @@ func appendDedupKey(dst, sessionPrefix, relayHash []byte) []byte {
 
 // liveLocked reports whether the session's marks are still within their TTL.
 func (d *pebbleDeduplicator) liveLocked(sessionID string, now time.Time) (bool, error) {
+	live, _, err := d.ttlStateLocked(sessionID, now)
+	return live, err
+}
+
+// ttlStateLocked reports whether the session's marks are live, and whether they
+// expired: marks whose TTL ran out may still be on disk until the sweep, and a
+// new mark must not bring them back, as a Redis set that expired is gone. A
+// session with no TTL at all has no marks to drop.
+func (d *pebbleDeduplicator) ttlStateLocked(sessionID string, now time.Time) (live, expired bool, err error) {
 	value, ok, err := d.b.get(dedupTTLKey(sessionID))
 	if err != nil || !ok || len(value) != 8 {
-		return false, err
+		return false, false, err
 	}
-	return int64(binary.BigEndian.Uint64(value)) > now.UnixMilli(), nil
+	live = int64(binary.BigEndian.Uint64(value)) > now.UnixMilli()
+	return live, !live, nil
 }
 
 // markedLocked reports whether the relay is marked for the session.
@@ -561,12 +605,21 @@ func (d *pebbleDeduplicator) MarkProcessed(_ context.Context, relayHash []byte, 
 	d.b.mu.Lock()
 	defer d.b.mu.Unlock()
 	now := time.Now()
+	_, expired, err := d.ttlStateLocked(sessionID, now)
+	if err != nil {
+		dedupErrors.WithLabelValues("store_mark").Inc()
+		return false, fmt.Errorf("failed to mark processed: %w", err)
+	}
 	marked, err := d.markedLocked(sessionID, relayHash, now)
 	if err != nil {
 		dedupErrors.WithLabelValues("store_mark").Inc()
 		return false, fmt.Errorf("failed to mark processed: %w", err)
 	}
 	batch := d.b.store.DB().NewBatch()
+	if expired {
+		// Before the new mark: a batch applies in order, so it survives.
+		d.deleteSessionLocked(batch, sessionID)
+	}
 	d.markLocked(batch, sessionID, relayHash, now)
 	if err := d.b.store.Commit(batch); err != nil {
 		dedupErrors.WithLabelValues("store_mark").Inc()
@@ -624,7 +677,7 @@ func (c *pebbleRelayCommitter) CommitSession(_ context.Context, sessionID string
 	// One read of the session's TTL for the whole commit: every read below is
 	// of the store, which the batch does not reach until it commits, and `now`
 	// is fixed, so it is the answer each relay would read.
-	live, err := c.b.dedup.liveLocked(sessionID, now)
+	live, expired, err := c.b.dedup.ttlStateLocked(sessionID, now)
 	if err != nil {
 		return relayBatchResult{}, err
 	}
@@ -634,6 +687,11 @@ func (c *pebbleRelayCommitter) CommitSession(_ context.Context, sessionID string
 	var key []byte
 
 	batch := c.b.store.DB().NewBatch()
+	if expired && len(relays) > 0 {
+		// The marks the TTL let go, dropped before this commit's marks and
+		// slide: a batch applies in order, so those survive.
+		c.b.dedup.deleteSessionLocked(batch, sessionID)
+	}
 	seen := make(map[string]struct{}, len(relays))
 	ids := make([]string, 0, len(relays))
 	for _, r := range relays {

@@ -112,7 +112,8 @@ func TestPebbleSessionStore_AnExpiredSessionIsGoneWithItsMarks(t *testing.T) {
 	require.NoError(t, err)
 	old.LastUpdatedAt = time.Now().Add(-sessions.ttl - time.Minute)
 	h.backend.mu.Lock()
-	require.NoError(t, sessions.writeLocked(old, old))
+	_, err = sessions.writeLocked(old, old)
+	require.NoError(t, err)
 	h.backend.mu.Unlock()
 
 	all, err := s.GetBySupplier(ctx)
@@ -263,7 +264,8 @@ func TestPebbleBackend_AScanSweepsWhatNoSupplierScanReaches(t *testing.T) {
 	old := time.Now().Add(-gone.ttl - time.Minute)
 	h.backend.mu.Lock()
 	expired := &SessionSnapshot{SessionID: "stale", State: SessionStateActive, LastUpdatedAt: old}
-	require.NoError(t, gone.writeLocked(expired, expired))
+	_, werr := gone.writeLocked(expired, expired)
+	require.NoError(t, werr)
 	batch := h.store.DB().NewBatch()
 	h.backend.dedup.markLocked(batch, "stale", []byte("h1"), old)
 	h.backend.dedup.markLocked(batch, "orphan", []byte("h2"), old.Add(-h.backend.dedupCf.ttl()))

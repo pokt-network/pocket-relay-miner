@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -47,6 +48,15 @@ func newPebbleCommitHarnessSyncing(t testing.TB, supplier string, syncInterval t
 	require.NoError(t, err)
 	require.NotNil(t, stores.commit, "premise: the store's own deduplicator gets a committer")
 	return &pebbleCommitHarness{t: t, supplier: supplier, store: store, broker: broker, backend: backend, stores: stores}
+}
+
+// newPebbleCommitHarnessOn is a harness for another supplier on h's backend:
+// the two share its store and its lock.
+func newPebbleCommitHarnessOn(t testing.TB, h *pebbleCommitHarness, supplier string) *pebbleCommitHarness {
+	t.Helper()
+	stores, err := h.backend.forSupplier(supplier, h.backend.deduplicator())
+	require.NoError(t, err)
+	return &pebbleCommitHarness{t: t, supplier: supplier, store: h.store, broker: h.broker, backend: h.backend, stores: stores}
 }
 
 func (h *pebbleCommitHarness) commit() relayCommitter { return h.stores.commit }
@@ -273,3 +283,117 @@ func TestPebbleCommitter_ACommitStaysWithinItsAllocationBudget(t *testing.T) {
 
 // pebbleCommitAllocCeiling: see TestPebbleCommitter_ACommitStaysWithinItsAllocationBudget.
 const pebbleCommitAllocCeiling = 300
+
+// A session write that records a tx hash is fsynced after the backend lock is
+// released: while that fsync runs, the relay commits of the other suppliers go
+// on, and the write itself does not return before its fsync.
+func TestPebbleSessionStore_ATxHashFsyncDoesNotHoldTheBackendLock(t *testing.T) {
+	h := newPebbleCommitHarness(t, "pokt1commit_fsync")
+	other := newPebbleCommitHarnessOn(t, h, "pokt1commit_fsync_other")
+	const sessionID = "sess-fsync"
+	h.createSession(sessionID, SessionStateActive)
+	other.createSession("sess-fsync-other", SessionStateActive)
+
+	sessions := h.stores.sessions.(*pebbleSessionStore)
+	inSync := make(chan struct{})
+	release := make(chan struct{})
+	sessions.syncWAL = func() error {
+		close(inSync)
+		<-release
+		return nil
+	}
+	snap := h.snapshot(sessionID)
+	snap.ClaimTxHash = "tx-claim"
+	saved := make(chan error, 1)
+	go func() { saved <- sessions.Save(context.Background(), snap) }()
+	<-inSync
+
+	committed := make(chan error, 1)
+	go func() {
+		_, err := other.commit().CommitSession(context.Background(), "sess-fsync-other", relaysFor(other.publish(1), "h-0"))
+		committed <- err
+	}()
+	select {
+	case err := <-committed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("a relay commit waited on another supplier's session fsync")
+	}
+	select {
+	case <-saved:
+		t.Fatal("Save returned before its fsync completed")
+	default:
+	}
+	close(release)
+	require.NoError(t, <-saved)
+}
+
+// Marks whose TTL ran out are gone, as an expired Redis set is: a new mark of
+// the session, by a commit or by MarkProcessed, must not bring them back, and
+// the new mark itself is kept.
+func TestPebbleDedup_ANewMarkDoesNotReviveExpiredMarks(t *testing.T) {
+	for _, via := range []string{"commit", "mark"} {
+		t.Run(via, func(t *testing.T) {
+			h := newPebbleCommitHarness(t, "pokt1dedup_revive_"+via)
+			sessionID := "sess-revive-" + via
+			h.createSession(sessionID, SessionStateActive)
+			h.markDone(sessionID, []byte("old"))
+			past := make([]byte, 8)
+			binary.BigEndian.PutUint64(past, uint64(time.Now().Add(-time.Minute).UnixMilli()))
+			b := h.store.DB().NewBatch()
+			require.NoError(t, b.Set(dedupTTLKey(sessionID), past, nil))
+			require.NoError(t, h.store.Commit(b))
+
+			if via == "commit" {
+				res, err := h.commit().CommitSession(context.Background(), sessionID, relaysFor(h.publish(1), "new"))
+				require.NoError(t, err)
+				require.Equal(t, int64(1), res.newRelays)
+			} else {
+				h.markDone(sessionID, []byte("new"))
+			}
+
+			dedup := h.backend.deduplicator()
+			dup, err := dedup.IsDuplicate(context.Background(), []byte("old"), sessionID)
+			require.NoError(t, err)
+			require.False(t, dup, "a mark that expired came back with the new one")
+			dup, err = dedup.IsDuplicate(context.Background(), []byte("new"), sessionID)
+			require.NoError(t, err)
+			require.True(t, dup, "the new mark is kept")
+		})
+	}
+}
+
+// The header of a leaves blob is read without copying the blob: a cold rebuild
+// sizes itself from it before its admission lets the blob into memory.
+func TestPebbleSMSTStore_HeadCopiesOnlyTheHeader(t *testing.T) {
+	h := newPebbleCommitHarness(t, "pokt1smst_head")
+	store := h.backend.smstStore("pokt1smst_head")
+	ctx := context.Background()
+	blob := make([]byte, 4<<20)
+	for i := range blob {
+		blob[i] = byte(i)
+	}
+	require.NoError(t, store.set(ctx, smstLeaves, "s1", blob, 0))
+
+	got, err := store.head(ctx, smstLeaves, "s1", 64)
+	require.NoError(t, err)
+	require.Equal(t, blob[:64], got)
+	require.LessOrEqual(t, cap(got), 64, "the result does not keep the blob alive")
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range 5 {
+		if _, err := store.head(ctx, smstLeaves, "s1", 64); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	require.Less(t, allocated, uint64(len(blob)), "five header reads allocated %d bytes: the blob was copied", allocated)
+
+	none, err := store.head(ctx, smstLeaves, "absent", 64)
+	require.NoError(t, err)
+	require.Nil(t, none)
+}

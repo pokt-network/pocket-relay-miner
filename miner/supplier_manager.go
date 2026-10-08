@@ -1841,8 +1841,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	return nil
 }
 
-// storeBackend is the manager's backend; a manager built without
-// NewSupplierManager (tests) gets the Redis one over its config.
 // leaseOwner is who holds the supplier's lease: through the claimer, or the
 // backend's lease store for a manager whose claimer never started.
 func (m *SupplierManager) leaseOwner(ctx context.Context, supplier string) (string, error) {
@@ -1860,6 +1858,8 @@ func (m *SupplierManager) kvStore() kv.Store {
 	return kv.NewRedis(m.logger, m.config.RedisClient)
 }
 
+// storeBackend is the manager's backend; a manager built without
+// NewSupplierManager (tests) gets the Redis one over its config.
 func (m *SupplierManager) storeBackend() StoreBackend {
 	if m.backend != nil {
 		return m.backend

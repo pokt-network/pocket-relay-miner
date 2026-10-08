@@ -115,18 +115,30 @@ func (s *pebbleSMSTStore) get(_ context.Context, rec smstRecord, sessionID strin
 	return value, nil
 }
 
-func (s *pebbleSMSTStore) head(ctx context.Context, rec smstRecord, sessionID string, n int) ([]byte, error) {
-	value, err := s.get(ctx, rec, sessionID)
-	if errors.Is(err, errSMSTRecordAbsent) {
+// head reads at most n bytes from the start of a record, copying only those:
+// a cold rebuild sizes itself from the header of a leaves blob that can be
+// gigabytes, before its admission lets it into memory.
+func (s *pebbleSMSTStore) head(_ context.Context, rec smstRecord, sessionID string, n int) ([]byte, error) {
+	raw, closer, err := s.b.store.DB().Get(s.recordKey(rec, sessionID))
+	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = closer.Close() }()
+	value, _, expired, err := kv.DecodeValue(raw, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("smst record %d of %s: %w", rec, sessionID, err)
+	}
+	if expired {
+		return nil, nil
+	}
 	if len(value) > n {
 		value = value[:n]
 	}
-	return value, nil
+	// A copy: raw belongs to pebble once the closer runs.
+	return append([]byte(nil), value...), nil
 }
 
 // set writes a record. The claimed root is fsynced before set returns: the
