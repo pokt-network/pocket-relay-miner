@@ -278,3 +278,41 @@ func TestAdapter_TwoDeliverersNeverSendALowerHeightAfterAHigherOne(t *testing.T)
 	require.Equal(t, []int64{101, 103}, []int64{first.Height(), second.Height()},
 		"deliveries must reach consumers in the order their heights were taken")
 }
+
+// roundTrips counts the commands sent alone and the pipelines sent to Redis.
+type roundTrips struct{ single, pipelines atomic.Int64 }
+
+func (r *roundTrips) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (r *roundTrips) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		r.single.Add(1)
+		return next(ctx, cmd)
+	}
+}
+
+func (r *roundTrips) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		r.pipelines.Add(1)
+		return next(ctx, cmds)
+	}
+}
+
+// TestPublishBlockEvent_IsOneRoundTripOnRedis: the record, the latest height
+// and the event go to Redis in one pipeline, on every block.
+func TestPublishBlockEvent_IsOneRoundTripOnRedis(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	redisClient, counted := newTestRedisPair(t)
+	trips := &roundTrips{}
+	counted.AddHook(trips)
+	pub := NewRedisBlockPublisher(testLogger(), kv.NewRedis(zerolog.Nop(), counted))
+
+	require.NoError(t, pub.PublishBlockHeight(ctx, BlockEvent{Height: 900, Hash: []byte{0x09}}))
+
+	require.Equal(t, int64(1), trips.pipelines.Load(), "one pipeline")
+	require.Zero(t, trips.single.Load(), "no command sent on its own")
+	_, found, err := readBlockRecord(ctx, kv.NewRedis(zerolog.Nop(), redisClient), 900)
+	require.NoError(t, err)
+	require.True(t, found, "the record was written")
+}

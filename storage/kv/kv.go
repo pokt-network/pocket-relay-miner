@@ -79,6 +79,14 @@ type Entry struct {
 	TTL   time.Duration
 }
 
+// PipelinedPublisher is a Store that sends writes and a publish in one round
+// trip. Each command stands alone, as if sent by itself: a refused write does
+// not stop the others or the publish. A caller uses it when the Store has it,
+// and the plain Set and Publish otherwise.
+type PipelinedPublisher interface {
+	SetEachAndPublish(ctx context.Context, entries []Entry, channel string, payload []byte) (setErrs []error, publishErr error)
+}
+
 // Message is one published payload.
 type Message struct {
 	Channel string

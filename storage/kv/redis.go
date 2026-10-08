@@ -72,6 +72,28 @@ func (r *Redis) SetAll(ctx context.Context, entries ...Entry) error {
 	return err
 }
 
+// SetEachAndPublish sends the SETs and the PUBLISH in one pipeline, not a
+// MULTI: under maxmemory with noeviction a MULTI holding a SET is aborted
+// whole, and the publish must go out even then.
+func (r *Redis) SetEachAndPublish(ctx context.Context, entries []Entry, channel string, payload []byte) ([]error, error) {
+	sets := make([]*redis.StatusCmd, len(entries))
+	var publish *redis.IntCmd
+	_, _ = r.client.Pipelined(ctx, func(pipe redis.Pipeliner) error { //nolint:errcheck // each command's error is read below
+		for i, e := range entries {
+			sets[i] = pipe.Set(ctx, e.Key, e.Value, e.TTL)
+		}
+		publish = pipe.Publish(ctx, channel, payload)
+		return nil
+	})
+	setErrs := make([]error, len(sets))
+	for i, cmd := range sets {
+		setErrs[i] = cmd.Err()
+	}
+	return setErrs, publish.Err()
+}
+
+var _ PipelinedPublisher = (*Redis)(nil)
+
 func (r *Redis) SetKeepTTL(ctx context.Context, key string, value []byte) error {
 	return r.client.Set(ctx, key, value, redis.KeepTTL).Err()
 }

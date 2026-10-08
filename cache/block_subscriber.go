@@ -308,12 +308,24 @@ func publishBlockEvent(
 	// noeviction a MULTI holding a SET is aborted whole, and the event must go
 	// out even then -- it is what moves claims and proofs, which free the
 	// memory. A consumer that finds no record reads the hash from its own node.
-	recordErr := store.Set(ctx, kb.BlockHashAtHeightKey(event.Height), data, blockRecordTTL)
-	latestErr := store.Set(ctx, kb.BlockLatestHeightKey(), []byte(strconv.FormatInt(event.Height, 10)), blockRecordTTL)
-	if err = store.Publish(ctx, kb.BlockEventChannel(), data); err != nil {
+	// On Redis the three go in one round trip (a pipeline), on every block.
+	entries := []kv.Entry{
+		{Key: kb.BlockHashAtHeightKey(event.Height), Value: data, TTL: blockRecordTTL},
+		{Key: kb.BlockLatestHeightKey(), Value: []byte(strconv.FormatInt(event.Height, 10)), TTL: blockRecordTTL},
+	}
+	var writeErrs []error
+	if pipelined, ok := store.(kv.PipelinedPublisher); ok {
+		writeErrs, err = pipelined.SetEachAndPublish(ctx, entries, kb.BlockEventChannel(), data)
+	} else {
+		for _, e := range entries {
+			writeErrs = append(writeErrs, store.Set(ctx, e.Key, e.Value, e.TTL))
+		}
+		err = store.Publish(ctx, kb.BlockEventChannel(), data)
+	}
+	if err != nil {
 		return fmt.Errorf("failed to publish block event: %w", err)
 	}
-	for _, writeErr := range []error{recordErr, latestErr} {
+	for _, writeErr := range writeErrs {
 		if writeErr != nil {
 			logger.Warn().Err(writeErr).Int64("height", event.Height).
 				Msg("failed to record the published block; consumers will read its hash from their own node")
