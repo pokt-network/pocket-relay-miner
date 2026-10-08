@@ -2,8 +2,10 @@ package pebblequeue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -436,4 +438,30 @@ func TestQueue_AClearedCounterDoesNotComeBack(t *testing.T) {
 
 	_, err := counters.Get(ctx, "meter:s1:sup")
 	require.ErrorIs(t, err, kv.ErrNotFound, "the Del ran after the rewrite, so nothing is left")
+}
+
+// A read of the queue that fails is tried again on its own: the entries it
+// left unread may have no later publish to wake delivery.
+func TestQueue_AFailedReadIsRetriedWithoutANewPublish(t *testing.T) {
+	var reads atomic.Int32
+	f := openWith(t, t.TempDir(), func(c *Consumer) {
+		require.NoError(t, c.b.Publisher(0).Publish(context.Background(), relay("s1", 0)))
+		// The publish's own wake-up is spent here: what is left to wake
+		// delivery after the failed read is the retry alone.
+		select {
+		case <-c.st.notify:
+		default:
+		}
+		c.failRead = func() error {
+			if reads.Add(1) == 1 {
+				return errors.New("injected read failure")
+			}
+			return nil
+		}
+	})
+
+	got := f.receive(1)
+
+	require.Len(t, got, 1)
+	require.GreaterOrEqual(t, reads.Load(), int32(2), "premise: the first read failed")
 }

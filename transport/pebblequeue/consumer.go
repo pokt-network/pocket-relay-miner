@@ -50,6 +50,10 @@ type Consumer struct {
 	health redistransport.OperableSignal
 	pause  redistransport.IngestionPause
 
+	// failRead, when set, is called before each read of the queue and fails it
+	// with its error; a test sets it before Consume.
+	failRead func() error
+
 	stopCtx context.Context
 	stop    context.CancelFunc
 	wg      sync.WaitGroup
@@ -119,15 +123,25 @@ func (c *Consumer) SetIngestionPause(pause redistransport.IngestionPause) {
 	c.pause = pause
 }
 
+// readRetryDelay is how soon a failed read of the queue is tried again when
+// nothing else wakes the loop first: the entries it left unread may have no
+// later publish to wake it.
+const readRetryDelay = time.Second
+
 func (c *Consumer) deliverLoop(ctx context.Context, out chan<- transport.StreamMessage) {
+	failing := false
 	for {
 		if redistransport.WaitOperable(ctx, c.health, c.pause) != nil {
 			return
 		}
 		msgs, nextDue, err := c.nextBatch(time.Now())
-		if err != nil {
-			c.logger.Warn().Err(err).Msg("reading the relay queue failed; retrying on the next wake")
+		switch {
+		case err != nil && !failing:
+			c.logger.Warn().Err(err).Msg("reading the relay queue failed; retrying")
+		case err == nil && failing:
+			c.logger.Info().Msg("reading the relay queue works again")
 		}
+		failing = err != nil
 		for i, msg := range msgs {
 			select {
 			case out <- msg:
@@ -141,8 +155,15 @@ func (c *Consumer) deliverLoop(ctx context.Context, out chan<- transport.StreamM
 		}
 		var due <-chan time.Time
 		var timer *time.Timer
+		wait, waits := time.Duration(0), false
 		if !nextDue.IsZero() {
-			timer = time.NewTimer(time.Until(nextDue))
+			wait, waits = time.Until(nextDue), true
+		}
+		if err != nil && (!waits || wait > readRetryDelay) {
+			wait, waits = readRetryDelay, true
+		}
+		if waits {
+			timer = time.NewTimer(wait)
 			due = timer.C
 		}
 		select {
@@ -177,6 +198,11 @@ func (c *Consumer) putBack(msgs []transport.StreamMessage) {
 func (c *Consumer) nextBatch(now time.Time) (out []transport.StreamMessage, nextDue time.Time, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failRead != nil {
+		if err := c.failRead(); err != nil {
+			return nil, time.Time{}, err
+		}
+	}
 
 	released := c.released
 	c.released = nil
