@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Evaluates the dashboards' run totals, T() in generate.py, on a real Prometheus.
+"""Evaluates the run totals of the dashboards (T() in generate.py) and of
+scripts/observability/triage.sh on a real Prometheus.
 
 promtool runs the very expressions T() writes into the dashboards, over series
 shaped as the relay miner exports them, and checks each total counts only the
@@ -13,6 +14,7 @@ promtool comes from PROMTOOL when set, else from the image the examples ship.
 """
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -60,6 +62,15 @@ def case(expr, samples):
     return lines
 
 
+def triage_total(selector):
+    """The run total triage.sh sends, from its RUN_TOTAL template."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "observability", "triage.sh")).read()
+    m = re.search(r"^RUN_TOTAL='([^']+)'$", src, re.M)
+    if not m:
+        raise SystemExit("triage.sh has no RUN_TOTAL template")
+    return "sum(%s)" % m.group(1).replace("@M@", selector).replace("@W@", "60m")
+
+
 def test_file():
     by_supplier = {}
     for _, supplier, _, work in SERIES:
@@ -73,6 +84,7 @@ def test_file():
     out += case(generate.T(METRIC, by="supplier"),
                 [('{supplier="%s"}' % s, v) for s, v in sorted(by_supplier.items())])
     out += case(generate.T(NEVER_FIRED), [("{}", 0)])
+    out += case(triage_total(METRIC), [("{}", sum(w for _, _, _, w in SERIES))])
     return "\n".join(out) + "\n"
 
 
@@ -92,7 +104,7 @@ def main():
     if run.returncode != 0:
         sys.stdout.write(run.stdout + run.stderr)
         return 1
-    print("run totals: %d series, 3 expressions, exact on promtool" % len(SERIES))
+    print("run totals: %d series, 4 expressions (dashboards and triage.sh), exact on promtool" % len(SERIES))
     return 0
 
 

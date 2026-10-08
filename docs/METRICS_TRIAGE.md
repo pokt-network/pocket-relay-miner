@@ -14,14 +14,22 @@ Two rules before any series:
    `upokt_claimed_total` = 6742.81 — 45% of the value "lost", none of it real.
 
 All counters are per process and reset on restart, and a restart is normal (HA
-failover, rollout, OOM). So a run total is
-`sum(last_over_time(<metric>[<run length>]))` evaluated at the END of the run,
-never `increase()`: a counter born inside the window is invisible to `increase()`.
-Keep the window inside ONE run — a window that reaches into the previous run adds
-its numbers silently. The Grafana dashboards do not need that rule: each run total
-there subtracts a series' value before the range, so a range across a restart
-counts only the work inside it (`T()` in `scripts/dashboards/generate.py`, tested
-on promtool by `scripts/dashboards/test_totals.py`).
+failover, rollout, OOM). So a run total is, per series, its last value minus its
+last value before the window, or its last value when it was born or restarted
+inside the window, summed and evaluated at the END of the run:
+
+```
+sum(((last_over_time(m[W]) - last_over_time(m[W] offset W)) >= 0 and resets(m[W]) == 0)
+    or last_over_time(m[W]))
+```
+
+Never `increase()`: a counter born inside the window is invisible to it. A plain
+`last_over_time` adds a pod's whole lifetime, work done before the window
+included. The dashboards' `T()` (`scripts/dashboards/generate.py`) and
+`scripts/observability/triage.sh` use this expression, and
+`scripts/dashboards/test_totals.py` evaluates both on promtool. Keep the window
+inside ONE run: one that reaches into the previous run adds that run's work
+inside the window.
 
 ---
 

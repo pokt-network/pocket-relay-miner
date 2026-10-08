@@ -16,10 +16,10 @@
 # (see triage.conf.example), then the defaults below, which target a local
 # Tilt/localnet.
 #
-# Why last_over_time and not increase(): counters are per process and reset on
-# restart, and a restart is normal (HA failover, rollout, OOM). increase() cannot
-# see a counter born inside the window. The window must also stay INSIDE one run —
-# one that reaches into the previous run adds its numbers silently.
+# Why not increase(): counters are per process and reset on restart, and a
+# restart is normal (HA failover, rollout, OOM). increase() cannot see a counter
+# born inside the window; RUN_TOTAL below can. The window must still stay INSIDE
+# one run: one that reaches into the previous run adds that run's work inside it.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -74,7 +74,19 @@ declared() { # <full metric name> -> 0 when the source declares it
   grep -rqs --include='*.go' "Name: *\"$short\"\|Name: *\"${short%_total}\"" "$SCRIPTS/.." 2>/dev/null
 }
 
-# v <metric> [selector] -> the summed last value of every series in the window
+# The run total of one series over the window, as the dashboards' T() computes
+# it: its last value minus its last value before the window, unless it was born
+# or restarted inside the window, then its last value. A pod that died inside
+# the window adds only what it did inside it. scripts/dashboards/test_totals.py
+# evaluates this template on promtool; @M@ is the selector, @W@ the window.
+RUN_TOTAL='((last_over_time(@M@[@W@]) - last_over_time(@M@[@W@] offset @W@)) >= 0 and resets(@M@[@W@]) == 0) or last_over_time(@M@[@W@])'
+
+run_total() { # <selector> -> sum of the run totals of its series over $W
+  local e=${RUN_TOTAL//@M@/$1}
+  printf 'sum(%s)' "${e//@W@/$W}"
+}
+
+# v <metric> [selector] -> the work every series did inside the window
 v() {
   local m=$1 sel=${2:-} r
   if ! grep -qx -- "$m" <<<"$NAMES"; then
@@ -82,7 +94,7 @@ v() {
     return
   fi
   r=$(curl -s -G "$PROM_URL/api/v1/query" \
-        --data-urlencode "query=sum(last_over_time(${m}${sel}[$W]))" \
+        --data-urlencode "query=$(run_total "${m}${sel}")" \
         --data-urlencode "time=$T" 2>/dev/null | jq -r '.data.result[0].value[1] // "EMPTY"')
   [ "$r" = "EMPTY" ] && { echo 0; return; }
   printf '%.0f' "$r" 2>/dev/null || echo BAD-NAME
@@ -102,7 +114,7 @@ vu() {
     return
   fi
   r=$(curl -s -G "$PROM_URL/api/v1/query" \
-        --data-urlencode "query=sum(last_over_time(${m}${sel}[$W])) * 1000000" \
+        --data-urlencode "query=$(run_total "${m}${sel}") * 1000000" \
         --data-urlencode "time=$T" 2>/dev/null | jq -r '.data.result[0].value[1] // "EMPTY"')
   [ "$r" = "EMPTY" ] && { echo 0; return; }
   printf '%.0f' "$r" 2>/dev/null || echo BAD-NAME
