@@ -455,7 +455,7 @@ data:
         relabel_configs:
           # Filter to only collect logs from our apps FIRST
           - source_labels: [__meta_kubernetes_pod_label_app]
-            regex: (miner|relayer|standalone|validator|path|backend|redis.*)
+            regex: (miner|relayer|standalone|validator|backend|redis.*)
             action: keep
           # Drop init containers
           - source_labels: [__meta_kubernetes_pod_container_init]

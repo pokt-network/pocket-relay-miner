@@ -120,20 +120,4 @@ def get_defaults():
 
             },
         },
-        # PATH gateway (optional - for testing full relay flow with gateway signing)
-        # When enabled, deploys PATH with localnet gateway and apps configured.
-        # This allows testing the complete relay signing flow where:
-        #   - Apps delegate to gateway1
-        #   - PATH signs relays with gateway1's key on behalf of apps
-        #   - RelayMiner verifies ring signatures
-        "path": {
-            "enabled": True,  # Disabled by default
-            "image": "ghcr.io/pokt-network/path",
-            "tag": "feat-unified-qos",  # Configurable for speed
-            "port": 3069,  # PATH HTTP port
-            "metrics_port": 9096,
-            # Load and e2e go straight to the relayer, not through PATH, so it
-            # stays deployable but runs no pod unless a config asks for one.
-            "replicas": 0,
-        },
     }
