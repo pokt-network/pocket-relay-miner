@@ -76,6 +76,10 @@ between them is a fresh start: their state is in different stores.
 | Host (binary + systemd) | standalone | 1 VM or bare-metal host, no containers, no Redis | [HOST_STANDALONE.md](HOST_STANDALONE.md) | config and unit checked; not verified end to end under systemd |
 | Kubernetes | either | you already run Kubernetes | no example in v0.1.0 | not verified |
 
+Both modes pass level 3 on the Tilt setup: on a local chain, every relay sent
+to every transport was served, claimed, proved and settled (304 claims, 3,024
+relays per mode).
+
 v0.1.0 ships no Kubernetes example or runbook. The Tilt setup in `tilt/` runs
 the relayer, the miner and Redis on a local kind cluster for development: it is
 a starting point for your own manifests, not a production config. The

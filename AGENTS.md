@@ -51,7 +51,9 @@ and submits them to the chain. It runs in 1 of 2 modes:
   and its Docker Compose runbook was verified on beta.
 - **Standalone mode**: 1 process (`standalone`) that runs both, its state in an
   embedded store on local disk, no Redis, no replicas. Built from source until
-  a release ships it; not yet run on beta.
+  a release ships it. On a local chain (Tilt, level 3) it served, claimed,
+  proved and settled every relay, as high-availability mode did; not yet run
+  on beta.
 
 [docs/deploy/README.md, "Choose a mode"](docs/deploy/README.md#choose-a-mode)
 compares them. **Choosing the mode is the human's decision.** When they have not
