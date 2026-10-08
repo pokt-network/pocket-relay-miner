@@ -18,7 +18,7 @@ scripts/gates/race.sh    # or call one gate directly
 
 | level | gates | cost | what it proves |
 |---|---|---|---|
-| 1 | `static` | seconds | the tree compiles, is formatted, passes vet and lint, and tracks nothing local-only |
+| 1 | `static` | seconds | the tree compiles, is formatted, passes vet and lint, tracks nothing local-only, and the Tiltfiles of both modes render configs that validate |
 | 2 | `+ tests`, `race`, `coverage` | minutes | the suite passes, no data races, and it survives coverage instrumentation |
 | 3 | `+ live` | tens of minutes | relays are actually mined, claimed, proved and settled on-chain |
 
@@ -46,7 +46,7 @@ level 3 exercises the path that does.
 | script | what it runs |
 |---|---|
 | `lib.sh` | shared output helpers and the verdict. Sourced, not executed. |
-| `static.sh` | gofmt · go build · go vet (twice: plain and `-tags test`) · no stray Go files under `scripts/localonly` · tracked-file guard · no Spanish in any tracked file (words in `spanish-words.txt`) · golangci-lint · the gate self-tests · skill output contracts · unreachable functions (`deadcode`, production mains as roots), across **both** Go modules (root and `tilt/backend-server`). `--staged` judges formatting on staged files only — that is how the pre-commit hook calls it. |
+| `static.sh` | gofmt · go build · go vet (twice: plain and `-tags test`) · no stray Go files under `scripts/localonly` · tracked-file guard · no Spanish in any tracked file (words in `spanish-words.txt`) · golangci-lint · the gate self-tests · skill output contracts · unreachable functions (`deadcode`, production mains as roots), across the **three** Go modules (root, `tilt/backend-server`, `tilt/tiltcheck`) · the Tiltfile renders: `tilt/tiltcheck` executes the Tiltfile of each relay miner mode with Tilt's builtins stubbed, asserts what it would deploy, and validates every relay-miner config it renders with the binary just built (a skipped render test fails the step). `--staged` judges formatting on staged files only — that is how the pre-commit hook calls it. |
 | `tests.sh` | `go test -tags test`. The `test` tag is not optional: test-only helpers live behind it. |
 | `race.sh` | `go test -race -count=1`. `-count=1` defeats the result cache, which would otherwise satisfy the command with a PASS from a run without `-race`. |
 | `coverage.sh` | the coverage profile — what CI rejects on. |

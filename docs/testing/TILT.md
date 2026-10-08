@@ -60,9 +60,11 @@ In standalone mode, a value the two config sections set differently in
 config holds it once. The process runs with `--strict-config`, so a key it does
 not understand stops the pod rather than being ignored. Redis is still deployed
 when the gateway is enabled (it uses Redis); the standalone process never
-connects to it. **Not verified live**: the standalone mode's Tilt setup was
-checked by executing the Tiltfiles with Tilt's builtins stubbed and validating
-the rendered config with `standalone validate`, never on a cluster.
+connects to it. **Not verified live**: the standalone mode's Tilt setup has
+not run on a cluster. What runs instead, in the static gate, is
+`tilt/tiltcheck`: it executes the Tiltfiles of both modes with Tilt's builtins
+stubbed, asserts what they would deploy, and validates every rendered
+relay-miner config with the binary's own `validate`.
 
 ## 2. What you get (pods & replicas)
 

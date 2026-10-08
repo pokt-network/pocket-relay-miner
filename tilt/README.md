@@ -37,6 +37,7 @@ tilt/
 │   └── accounts.star       # Accounts account-init initializes, derived from the genesis
 ├── config/                 # Localnet chain files
 ├── backend-server/         # Demo backend server (its own Go module)
+├── tiltcheck/              # Renders the Tiltfiles with Tilt stubbed, in the static gate (its own Go module)
 ├── local-registry.sh       # Local image registry for kind
 └── README.md               # This file
 ```

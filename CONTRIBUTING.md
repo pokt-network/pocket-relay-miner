@@ -266,7 +266,7 @@ same implementation. They report and never fix.
 
 | level | command | covers |
 |---|---|---|
-| 1 | `make gate LEVEL=1` | gofmt, build, vet, golangci-lint, tracked files, Spanish, unreachable functions -- both Go modules |
+| 1 | `make gate LEVEL=1` | gofmt, build, vet, golangci-lint, tracked files, Spanish, unreachable functions -- the three Go modules -- and the Tiltfile renders of both modes |
 | 2 | `make gate LEVEL=2` (the default of `make gate`) | level 1 plus the test suite (including `internal/conventions`), the race detector and the coverage run |
 | 3 | `make gate LEVEL=3` | level 2 plus live validation on Tilt, claim and proof verified on chain |
 
