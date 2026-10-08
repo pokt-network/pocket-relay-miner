@@ -391,6 +391,7 @@ func TestPreProofGuard_APendingClaimGetsItsProof(t *testing.T) {
 // counts nothing.
 func TestOnClaimMissing_CountsTheSessionOnceAndItsMoneyAsLost(t *testing.T) {
 	coord, store, _ := setupTestCoordinator(t)
+	coord.SetPricer(perMillionPricer{})
 	ctx := context.Background()
 	const service = "svc-claim-missing-lost"
 	require.NoError(t, store.Save(ctx, &SessionSnapshot{
@@ -418,6 +419,7 @@ func TestOnClaimMissing_CountsTheSessionOnceAndItsMoneyAsLost(t *testing.T) {
 // is forgone, not lost.
 func TestOnClaimMissing_ASessionThatNeverHeldAClaimIsForgone(t *testing.T) {
 	coord, store, _ := setupTestCoordinator(t)
+	coord.SetPricer(perMillionPricer{})
 	ctx := context.Background()
 	const service = "svc-claim-missing-forgone"
 	require.NoError(t, store.Save(ctx, &SessionSnapshot{
@@ -459,12 +461,14 @@ func reinstatedProbe(supplier, service, from string) (sessions, upokt float64) {
 func claimMissingStores(t *testing.T, run func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string)) {
 	t.Run("redis", func(t *testing.T) {
 		coord, store, _ := setupTestCoordinator(t)
+		coord.SetPricer(perMillionPricer{})
 		run(t, coord, store, t.Name())
 	})
 	t.Run("pebble", func(t *testing.T) {
 		h := newPebbleCommitHarness(t, "pokt1test")
 		coord := NewSessionCoordinator(logging.NewLoggerFromConfig(logging.DefaultConfig()), h.stores.sessions,
 			SMSTRecoveryConfig{SupplierAddress: "pokt1test"})
+		coord.SetPricer(perMillionPricer{})
 		run(t, coord, h.stores.sessions, t.Name())
 	})
 }

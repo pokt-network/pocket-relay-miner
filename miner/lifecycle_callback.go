@@ -154,6 +154,9 @@ type LifecycleCallback struct {
 	// CUPR-mismatch guard. If nil, the guard is skipped.
 	serviceClient pocktclient.ServiceQueryClient
 
+	// pricer prices a session's money in uPOKT for the money metrics.
+	pricer SessionPricer
+
 	// submissionTracker tracks claim/proof submissions to Redis for debugging.
 	// If nil, submissions are not tracked.
 	submissionTracker *SubmissionTracker
@@ -221,6 +224,17 @@ func NewLifecycleCallback(
 
 // SetServiceClient sets the service query client used by the claim-build
 // CUPR-mismatch guard. Optional — if not set, the guard is skipped.
+// SetPricer sets what prices a session's money in uPOKT for the money metrics;
+// without one, every session counts as unpriced.
+func (lc *LifecycleCallback) SetPricer(pricer SessionPricer) {
+	lc.pricer = pricer
+}
+
+// price is the snapshot's money in uPOKT, as the chain settles it.
+func (lc *LifecycleCallback) price(ctx context.Context, snapshot *SessionSnapshot) Upokt {
+	return quote(ctx, lc.pricer, snapshot)
+}
+
 func (lc *LifecycleCallback) SetServiceClient(client pocktclient.ServiceQueryClient) {
 	lc.serviceClient = client
 }
@@ -678,6 +692,7 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 			recoverable,
 			snapshot.RelayCount,
 			int64(snapshot.TotalComputeUnits),
+			lc.price(ctx, snapshot),
 		)
 	} else {
 		RecordClaimEjectedUnrecoverable(
@@ -685,6 +700,7 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 			snapshot.ServiceID,
 			snapshot.RelayCount,
 			int64(snapshot.TotalComputeUnits),
+			lc.price(ctx, snapshot),
 		)
 	}
 
@@ -774,7 +790,7 @@ func (lc *LifecycleCallback) settleNotRequiredBatch(
 				Str(logging.FieldSessionID, snapshot.SessionID).
 				Int("batch_size", len(snapshots)).
 				Msg("proof not required: the chain named this session, settling it as probabilistically proved")
-			RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+			RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount, lc.price(ctx, snapshot))
 			if lc.sessionCoordinator != nil {
 				if err := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); err != nil {
 					logger.Warn().Err(err).Str(logging.FieldSessionID, snapshot.SessionID).
@@ -789,7 +805,7 @@ func (lc *LifecycleCallback) settleNotRequiredBatch(
 		// refused these proofs and resending the same bytes is doomed. With
 		// nothing that will ever answer, the money is lost now rather than
 		// waiting in `unresolved` for a resolver that does not exist.
-		RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, false, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+		RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, false, snapshot.RelayCount, int64(snapshot.TotalComputeUnits), lc.price(ctx, snapshot))
 		if lc.sessionCoordinator != nil {
 			if err := lc.sessionCoordinator.OnProofTxError(ctx, snapshot.SessionID); err != nil {
 				logger.Warn().Err(err).Str(logging.FieldSessionID, snapshot.SessionID).
@@ -1858,7 +1874,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				for _, snapshot := range validSnapshots {
 					RecordClaimSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount, lc.price(ctx, snapshot))
 
 					// Name the session as claimed. By ID, not by position: the
 					// root hash it just received is already on the snapshot
@@ -1969,7 +1985,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				if nodeHoldsTheBatch {
 					break
 				}
-				RecordClaimTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+				RecordClaimTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits), lc.price(ctx, snapshot))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				if lc.sessionCoordinator != nil {
@@ -2327,7 +2343,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					logger.Info().
 						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("proof NOT required for this claim - marking as probabilistically proved")
-					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount, lc.price(ctx, snapshot))
 
 					// CRITICAL: Transition session state to probabilistic_proved
 					if lc.sessionCoordinator != nil {
@@ -2471,7 +2487,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("proof not required (blockchain settled claim without proof)")
 
-					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount, lc.price(ctx, snapshot))
 
 					if lc.sessionCoordinator != nil {
 						if err := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); err != nil {
@@ -2858,7 +2874,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				for _, snapshot := range validProofSnapshots {
 					RecordProofSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordProofSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount, lc.price(ctx, snapshot))
 				}
 
 				// Track proof submissions to Redis for debugging. The index
@@ -2961,7 +2977,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				if nodeHoldsTheBatch {
 					break
 				}
-				RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+				RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits), lc.price(ctx, snapshot))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				if lc.sessionCoordinator != nil {
@@ -3244,6 +3260,7 @@ func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, 
 		snapshot.ClaimTxHash,
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
+		lc.price(ctx, snapshot),
 	)
 }
 
@@ -3342,6 +3359,7 @@ func (lc *LifecycleCallback) markAndCountProofWindowClosed(ctx context.Context, 
 		snapshot.ProofTxHash,
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
+		lc.price(ctx, snapshot),
 	)
 }
 
@@ -3377,6 +3395,7 @@ func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *
 		snapshot.ClaimTxHash,
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
+		lc.price(ctx, snapshot),
 	)
 
 	return nil
@@ -3409,6 +3428,7 @@ func (lc *LifecycleCallback) OnProofWindowClosed(ctx context.Context, snapshot *
 		snapshot.ProofTxHash,
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
+		lc.price(ctx, snapshot),
 	)
 
 	return nil

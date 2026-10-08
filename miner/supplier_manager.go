@@ -337,6 +337,10 @@ type SupplierManagerConfig struct {
 	// CUPR-mismatch guard. If nil, the guard is skipped.
 	ServiceClient client.ServiceQueryClient
 
+	// Pricer prices a session's money in uPOKT for the money metrics. Nil: the
+	// chain's own price, from SharedClient and ProofChecker's difficulty client.
+	Pricer SessionPricer
+
 	// SessionLifecycleConfig contains configuration for session lifecycle management.
 	SessionLifecycleConfig SessionLifecycleConfig
 
@@ -1643,6 +1647,8 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		if m.config.ServiceClient != nil {
 			lifecycleCallback.SetServiceClient(m.config.ServiceClient)
 		}
+		lifecycleCallback.SetPricer(m.pricer())
+		sessionCoordinator.SetPricer(m.pricer())
 		// Pre-proof GetClaim guard (WS-A): skips proof submission for sessions
 		// whose claim is not on-chain, preventing FailedPrecondition retry
 		// storms and wasted gas.
@@ -1856,6 +1862,18 @@ func (m *SupplierManager) kvStore() kv.Store {
 		return m.config.KV
 	}
 	return kv.NewRedis(m.logger, m.config.RedisClient)
+}
+
+// pricer prices a session's money in uPOKT, with the shared params and the
+// relay-mining difficulty at its start height; nil without both clients.
+func (m *SupplierManager) pricer() SessionPricer {
+	if m.config.Pricer != nil {
+		return m.config.Pricer
+	}
+	if m.config.ProofChecker == nil {
+		return nil
+	}
+	return NewChainPricer(m.config.SharedClient, m.config.ProofChecker.ServiceDifficultyClient())
 }
 
 // storeBackend is the manager's backend; a manager built without
@@ -3649,6 +3667,7 @@ func (m *SupplierManager) settleLedgerOutcome(
 
 	relays := snapshot.RelayCount
 	computeUnits := int64(snapshot.TotalComputeUnits)
+	upokt := quote(ctx, m.pricer(), snapshot)
 
 	switch phase {
 	case RebroadcastPhaseClaim:
@@ -3660,21 +3679,21 @@ func (m *SupplierManager) settleLedgerOutcome(
 			// This is the write the recovery path was missing: the submission
 			// never confirmed, so nothing counted it, and the session goes on to
 			// be proved -- crediting `proved` revenue that `claimed` never had.
-			RecordRevenueClaimed(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays)
+			RecordRevenueClaimed(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays, upokt)
 			return
 		}
-		RecordRevenueForgone(supplier, snapshot.ServiceID, outcome, relays, computeUnits)
+		RecordRevenueForgone(supplier, snapshot.ServiceID, outcome, relays, computeUnits, upokt)
 
 	case RebroadcastPhaseProof:
 		// This money IS in the book and is waiting in `unresolved`, opened by the
 		// same failure path that wrote this entry. Close that balance first, then
 		// name where it went.
-		RecordSessionUnresolvedResolved(supplier, snapshot.ServiceID, string(phase), relays, computeUnits)
+		RecordSessionUnresolvedResolved(supplier, snapshot.ServiceID, string(phase), relays, computeUnits, upokt)
 		if outcome == inclusionFound {
-			RecordRevenueProved(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays)
+			RecordRevenueProved(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays, upokt)
 			return
 		}
-		RecordRevenueLost(supplier, snapshot.ServiceID, outcome, relays, computeUnits)
+		RecordRevenueLost(supplier, snapshot.ServiceID, outcome, relays, computeUnits, upokt)
 	}
 }
 

@@ -100,13 +100,9 @@ v() {
   printf '%.0f' "$r" 2>/dev/null || echo BAD-NAME
 }
 
-# vu <metric> [selector] -> the same reading, in uPOKT instead of POKT.
-# The money series are recorded as POKT: miner/metrics.go does Add(cu / 1e6). So on
-# a small run every term lands below 1, printf '%.0f' turns it into 0, and the
-# ledger identity prints "OK 0" over 0 / 0 / 0 / 0 -- an identity closing because
-# every term rounded away, which is not a reading at all. Measured 2026-09-18 on a
-# 304-claim run: claimed was 0.384 POKT and the line said OK over zeros. Scaling to
-# uPOKT keeps the smallest run legible and costs the big run nothing.
+# vu <metric> [selector] -> a money reading in uPOKT. The money series are
+# recorded in uPOKT, each session priced as the chain settles it, so the reading
+# is an integer; v rounds the same way, and vu keeps the name that says the unit.
 vu() {
   local m=$1 sel=${2:-} r
   if ! grep -qx -- "$m" <<<"$NAMES"; then
@@ -114,7 +110,7 @@ vu() {
     return
   fi
   r=$(curl -s -G "$PROM_URL/api/v1/query" \
-        --data-urlencode "query=$(run_total "${m}${sel}") * 1000000" \
+        --data-urlencode "query=$(run_total "${m}${sel}")" \
         --data-urlencode "time=$T" 2>/dev/null | jq -r '.data.result[0].value[1] // "EMPTY"')
   [ "$r" = "EMPTY" ] && { echo 0; return; }
   printf '%.0f' "$r" 2>/dev/null || echo BAD-NAME
@@ -271,14 +267,16 @@ else
       printf '  %-52s NO-DENOM  nothing claimed in this window, so the\n' "claimed == proved + lost + unresolved"
       printf '  %-52s           identity closing says nothing\n' ""
     else
-      # Tolerance 0 on purpose. The terms accumulate one float division per
-      # session, so a residual of a handful of uPOKT over billions would be float
-      # accumulation and not a lost session -- but that has NOT been measured, so
-      # it stays red until it is, with the number written down right here.
+      # Tolerance 0 on purpose: every term adds whole uPOKT per session, exact
+      # in a float64 below 2^53 uPOKT (9e9 POKT), so a residual is a session
+      # counted through the wrong door, never rounding.
       identity "claimed == proved + lost + unresolved" "$cl" "$((pr+lo+un))"
     fi
   printf '  %-52s %s / %s / %s / %s  (uPOKT)\n' "  claimed / proved / lost / unresolved" "$cl" "$pr" "$lo" "$un"
 fi
+# A session the miner could not price is in no uPOKT series: above 0, the
+# books above are short by its work and the identity cannot be trusted.
+note "compute units left unpriced"           "$(v ha_miner_unpriced_compute_units_total)" 0
 
 echo
 echo "2. Was Redis the constraint, and did it cost anything?"

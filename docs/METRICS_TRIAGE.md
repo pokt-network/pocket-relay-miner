@@ -141,12 +141,17 @@ Two things about HOW to read it, both measured on 2026-09-18:
 - **It is a run-END reading.** Mid-run `claimed` is legitimately larger than the sum
   of the doors, because a session inside its proof window has been claimed and has
   not reached any door yet. Measured during a gate run: 304 claims on chain,
-  `claimed` = 384000 uPOKT, every door still 0. That is not the defect this identity
+  `claimed` above 0, every door still 0. That is not the defect this identity
   hunts.
-- **Read it in uPOKT, not POKT.** The series are recorded as POKT
-  (`Add(cu / 1e6)` in `miner/metrics.go`), so on a small run every term falls below
-  1 and an integer reading turns the whole identity into `0 == 0 + 0 + 0` — which
-  "closes" and means nothing. `triage.sh` scales by 1e6 for exactly this reason.
+- **The series are uPOKT, as the chain pays them.** Each session is priced with
+  the chain's own formula (`Claim.GetClaimeduPOKT`) under the shared params and
+  relay-mining difficulty at its start height, so `upokt_claimed_total` matches
+  what settles: on the localnet, 100 uPOKT per compute unit. Every term adds whole
+  uPOKT, so the identity closes exactly or names a session counted twice.
+- **`unpriced_compute_units_total` must be 0.** A session whose price could not be
+  read (the node did not answer for its start height) adds its compute units
+  there, under the book it is missing from, and nothing to the uPOKT series: no
+  guessed amount, and an identity that does not close says so.
 
 | Identity | Series |
 |---|---|

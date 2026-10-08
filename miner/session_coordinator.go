@@ -42,6 +42,9 @@ type SessionCoordinator struct {
 	// This allows in-memory state to be updated atomically with Redis.
 	onSessionTerminal SessionTerminalCallback
 
+	// pricer prices a session's money in uPOKT for the money metrics.
+	pricer SessionPricer
+
 	// claimWindowClosedFn reports whether the claim window for a session ending
 	// at the given height has already closed. Injected rather than built from a
 	// block and a params client so this type keeps its two dependencies; nil
@@ -71,6 +74,21 @@ func (c *SessionCoordinator) SetOnSessionCreatedCallback(callback SessionCreated
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onSessionCreated = callback
+}
+
+// SetPricer sets what prices a session's money in uPOKT for the money metrics;
+// without one, every session counts as unpriced.
+func (c *SessionCoordinator) SetPricer(pricer SessionPricer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pricer = pricer
+}
+
+func (c *SessionCoordinator) price(ctx context.Context, snap *SessionSnapshot) Upokt {
+	c.mu.Lock()
+	pricer := c.pricer
+	c.mu.Unlock()
+	return quote(ctx, pricer, snap)
 }
 
 // SetClaimWindowClosedFn installs the predicate behind ClaimWindowClosed.
@@ -432,7 +450,7 @@ func (c *SessionCoordinator) OnClaimObservedOnChain(
 	if reactivated && beforeErr == nil && before != nil &&
 		before.State == SessionStateClaimMissing && before.ClaimMissingVerdict != "" {
 		RecordClaimMissingReinstated(before.SupplierOperatorAddress, before.ServiceID, before.ClaimMissingVerdict,
-			before.RelayCount, int64(before.TotalComputeUnits))
+			before.RelayCount, int64(before.TotalComputeUnits), c.price(ctx, before))
 	} else if reactivated && beforeErr != nil {
 		c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
 			Msg("session reactivated but its state before could not be read: a claim_missing verdict, if any, stays counted")
@@ -687,7 +705,7 @@ func (c *SessionCoordinator) OnClaimMissing(ctx context.Context, sessionID strin
 	// Counted once, on the transition.
 	if current != nil {
 		RecordClaimMissing(current.SupplierOperatorAddress, current.ServiceID, verdict,
-			current.RelayCount, int64(current.TotalComputeUnits))
+			current.RelayCount, int64(current.TotalComputeUnits), c.price(ctx, current))
 	} else {
 		c.logger.Warn().Str(logging.FieldSessionID, sessionID).
 			Msg("claim_missing not counted in sessions_failed_total: the session could not be read to weigh it")

@@ -24,6 +24,7 @@ func ledgerSession(t *testing.T, f *handlerTestFixture, sessionID, service strin
 		RelayCount:              relays,
 		TotalComputeUnits:       cu,
 	}))
+	f.worker.supplierManager.config.Pricer = perMillionPricer{}
 	return f.worker.supplierManager
 }
 

@@ -10,8 +10,8 @@ Two conventions hold everywhere:
 - A run total is T(): the work each series did inside the range, its last value
   minus its value before the range; not increase(), to which a counter born
   inside the range is invisible (docs/METRICS_TRIAGE.md).
-- ha_miner_upokt_* are recorded in POKT (the code divides compute units by 1e6),
-  so they are shown as POKT and never divided again.
+- ha_miner_upokt_* are recorded in uPOKT, each session priced as the chain settles
+  it; the money dashboard shows them in POKT through pokt(), which divides by 1e6.
 """
 
 # Metrics deliberately left off every panel.
@@ -44,28 +44,34 @@ def specs(g):
     def net(prefix, book):
         return "(%s - %s)" % (T("%s_%s_total" % (prefix, book)), T(prefix + "_reinstated_total", 'from="%s"' % book))
 
+    # uPOKT as POKT, for display.
+    def pokt(expr):
+        return "(%s) / 1e6" % expr
+
     money = {
         "file": "01-money.json", "uid": "prm-money", "title": "Relay Miner / 1 Money", "tags": ["money"],
         "desc": "Of what I served, how much is proved and paid, how much waits for the chain, how much is lost, and why.",
         "rows": [
             row("Ledger for the selected range (POKT)",
-                stat("Claimed", [T("ha_miner_upokt_claimed_total")], POKT, [(None, "blue")], "POKT in the claims the miner built and sent.", w=5),
-                stat("Proved", [T("ha_miner_upokt_proved_total")], POKT, [(None, GREEN)], "POKT whose session ended proved: the money that is paid.", w=5),
-                stat("Waiting for the chain", [unres("ha_miner_upokt")], POKT, [(None, GREEN), (1e-9, YELLOW)],
+                stat("Claimed", [pokt(T("ha_miner_upokt_claimed_total"))], POKT, [(None, "blue")], "POKT in the claims the miner built and sent.", w=5),
+                stat("Proved", [pokt(T("ha_miner_upokt_proved_total"))], POKT, [(None, GREEN)], "POKT whose session ended proved: the money that is paid.", w=5),
+                stat("Waiting for the chain", [pokt(unres("ha_miner_upokt"))], POKT, [(None, GREEN), (1e-9, YELLOW)],
                      "Claimed, and the chain has not answered yet (unresolved opened - resolved). It returns to 0 once every proof window closes.", w=5),
-                stat("Lost", [net("ha_miner_upokt", "lost")], POKT, ZG, "Claimed and will not be paid, net of what a reinstatement took back. Any value above 0 has a reason in the panels below.", w=5),
-                stat("Forgone", [net("ha_miner_upokt", "forgone")], POKT, ZG, "Served but never claimed: it never entered the book. Net of what a reinstatement took back.", w=4),
+                stat("Lost", [pokt(net("ha_miner_upokt", "lost"))], POKT, ZG, "Claimed and will not be paid, net of what a reinstatement took back. Any value above 0 has a reason in the panels below.", w=5),
+                stat("Forgone", [pokt(net("ha_miner_upokt", "forgone"))], POKT, ZG, "Served but never claimed: it never entered the book. Net of what a reinstatement took back.", w=4),
                 ),
             row("Does the ledger close?",
-                stat("Claimed - proved - lost - waiting", ["%s - %s - %s - %s" % (T("ha_miner_upokt_claimed_total"), T("ha_miner_upokt_proved_total"), net("ha_miner_upokt", "lost"), unres("ha_miner_upokt"))],
-                     POKT, ZGA, IDENT + " A session leaves the book through exactly one door, so the doors sum to what was claimed.", w=8, decimals=6),
+                stat("Claimed - proved - lost - waiting", [pokt("%s - %s - %s - %s" % (T("ha_miner_upokt_claimed_total"), T("ha_miner_upokt_proved_total"), net("ha_miner_upokt", "lost"), unres("ha_miner_upokt")))],
+                     POKT, ZGA, IDENT + " A session leaves the book through exactly one door, so the doors sum to what was claimed.", w=6, decimals=6),
                 stat("Proved share of claimed", ["%s / %s" % (T("ha_miner_upokt_proved_total"), T("ha_miner_upokt_claimed_total"))], "percentunit",
-                     [(None, RED), (0.95, YELLOW), (0.999, GREEN)], "At run end every claimed POKT should be proved.", w=8, nodata="-"),
-                stat("Relays claimed / proved", [(T("ha_miner_relays_claimed_total"), "claimed"), (T("ha_miner_relays_proved_total"), "proved")], "short", [(None, "blue")], w=8),
+                     [(None, RED), (0.95, YELLOW), (0.999, GREEN)], "At run end every claimed POKT should be proved.", w=6, nodata="-"),
+                stat("Relays claimed / proved", [(T("ha_miner_relays_claimed_total"), "claimed"), (T("ha_miner_relays_proved_total"), "proved")], "short", [(None, "blue")], w=6),
+                stat("Unpriced compute units", [T("ha_miner_unpriced_compute_units_total")], "short", ZG,
+                     "Work whose session could not be priced in uPOKT (the chain's params or difficulty at its start height were not readable): the POKT above is short by it, and the identity does not close. 0 on a healthy run.", w=6),
                 ),
             row("Why money is lost or forgone",
-                ts("Lost by reason (POKT/s)", [(R("ha_miner_upokt_lost_total", "reason"), "{{reason}}")], "short", "Zero on a healthy run.", w=8, stack=True),
-                ts("Forgone by reason (POKT/s)", [(R("ha_miner_upokt_forgone_total", "reason"), "{{reason}}")], "short", "Served work that never reached a claim.", w=8, stack=True),
+                ts("Lost by reason (POKT/s)", [(pokt(R("ha_miner_upokt_lost_total", "reason")), "{{reason}}")], "short", "Zero on a healthy run.", w=8, stack=True),
+                ts("Forgone by reason (POKT/s)", [(pokt(R("ha_miner_upokt_forgone_total", "reason")), "{{reason}}")], "short", "Served work that never reached a claim.", w=8, stack=True),
                 bar("Claims skipped by reason", [(INC("ha_miner_claims_skipped_total", "reason"), "{{reason}}")], "short",
                     "A skipped claim is a session whose tree was empty or whose reward would not pay its fee.", w=8),
                 table("Sessions failed, by supplier, service and reason", [(INC("ha_miner_sessions_failed_total", "supplier,service_id,reason"), "sessions"),
@@ -75,7 +81,7 @@ def specs(g):
             row("Taken back: a claim the chain held after all",
                 stat("Sessions reinstated", [T("ha_miner_sessions_reinstated_total")], "short", [(None, GREEN), (1, YELLOW)],
                      "Sessions counted claim_missing that came back to claimed when the chain was seen to hold their claim. Above 0 means the pre-proof claim check was answered wrong.", w=6),
-                ts("Taken back by book (POKT/s)", [(R("ha_miner_upokt_reinstated_total", "from"), "{{from}}")], "short", "Subtracted from the Lost and Forgone stats above.", w=6),
+                ts("Taken back by book (POKT/s)", [(pokt(R("ha_miner_upokt_reinstated_total", "from")), "{{from}}")], "short", "Subtracted from the Lost and Forgone stats above.", w=6),
                 ts("Relays taken back", [(R("ha_miner_relays_reinstated_total", "from"), "{{from}}")], "short", "relays/s", w=6),
                 ts("Compute units taken back", [(R("ha_miner_compute_units_reinstated_total", "from"), "{{from}}")], "short", "compute units/s", w=6),
                 ),
