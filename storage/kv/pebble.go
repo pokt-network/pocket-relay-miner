@@ -46,6 +46,9 @@ type Pebble struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 	now      func() time.Time
+	// beforeExpiredDelete runs between the janitor's scan and its deletes; a
+	// test sets it before calling deleteExpired.
+	beforeExpiredDelete func()
 }
 
 // NewPebble returns the Store over store, with its keys built by kb, and
@@ -368,11 +371,30 @@ func (p *Pebble) SRem(_ context.Context, key string, members ...string) error {
 	if err != nil {
 		return err
 	}
-	left, err := p.members(key)
-	if err != nil || len(left) > 0 {
+	live, err := p.setLive(key)
+	if err != nil {
 		return err
 	}
+	if live {
+		empty, err := p.setEmpty(key)
+		if err != nil || !empty {
+			return err
+		}
+	}
 	return p.commit(func(b *pebble.Batch) { _ = b.Delete(setMetaKey(key), nil) })
+}
+
+// setEmpty reports whether the set has no member stored. It looks at the first
+// member only: SRem runs under the store's lock, and a set can hold one member
+// per active session.
+func (p *Pebble) setEmpty(key string) (bool, error) {
+	prefix := setMemberPrefix(key)
+	iter, err := p.store.DB().NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upperBound(prefix)})
+	if err != nil {
+		return false, err
+	}
+	empty := !iter.First()
+	return empty, errors.Join(iter.Error(), iter.Close())
 }
 
 func (p *Pebble) members(key string) ([]string, error) {
@@ -426,33 +448,83 @@ func (p *Pebble) Subscribe(_ context.Context, channels ...string) (Subscription,
 func (p *Pebble) Ping(context.Context) error { return nil }
 
 // deleteExpired deletes the strings and sets past their expiry.
+// expiredChunk is how many keys the janitor deletes per hold of the lock.
+const expiredChunk = 1000
+
+// deleteExpired deletes the strings and sets whose TTL ran out. It finds them
+// without the store's lock, which the relay publish path also takes, and holds
+// it only to delete, a chunk at a time, re-reading each key first: one written
+// again since the scan is kept.
 func (p *Pebble) deleteExpired() error {
+	now := p.now()
+	bases := []string{stringPrefix, setMetaPrefix}
+	candidates := make([][][]byte, len(bases))
+	found := 0
+	for i, base := range bases {
+		keys, err := p.expiredKeys(base, now)
+		if err != nil {
+			return err
+		}
+		candidates[i] = keys
+		found += len(keys)
+	}
+	if found > 0 && p.beforeExpiredDelete != nil {
+		p.beforeExpiredDelete()
+	}
+	for i, base := range bases {
+		keys := candidates[i]
+		for start := 0; start < len(keys); start += expiredChunk {
+			end := min(start+expiredChunk, len(keys))
+			if err := p.deleteIfExpired(base, keys[start:end], now); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// expiredKeys lists the keys under base whose TTL ran out at now. Called
+// without p.mu.
+func (p *Pebble) expiredKeys(base string, now time.Time) ([][]byte, error) {
+	lower := []byte(base)
+	iter, err := p.store.DB().NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upperBound(lower)})
+	if err != nil {
+		return nil, err
+	}
+	var out [][]byte
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if _, _, expired, err := DecodeValue(iter.Value(), now); err != nil || !expired {
+			continue
+		}
+		out = append(out, append([]byte(nil), iter.Key()...))
+	}
+	return out, errors.Join(iter.Error(), iter.Close())
+}
+
+// deleteIfExpired deletes the keys still expired at now, and a set's members
+// with its meta.
+func (p *Pebble) deleteIfExpired(base string, keys [][]byte, now time.Time) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := p.now()
 	b := p.store.DB().NewBatch()
 	found := 0
-	for _, base := range []string{stringPrefix, setMetaPrefix} {
-		lower := []byte(base)
-		iter, err := p.store.DB().NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upperBound(lower)})
+	for _, key := range keys {
+		raw, ok, err := p.raw(key)
 		if err != nil {
 			_ = b.Close()
 			return err
 		}
-		for valid := iter.First(); valid; valid = iter.Next() {
-			if _, _, expired, err := DecodeValue(iter.Value(), now); err != nil || !expired {
-				continue
-			}
-			found++
-			_ = b.Delete(append([]byte(nil), iter.Key()...), nil)
-			if base == setMetaPrefix {
-				prefix := setMemberPrefix(string(iter.Key()[len(base):]))
-				_ = b.DeleteRange(prefix, upperBound(prefix), nil)
-			}
+		if !ok {
+			continue
 		}
-		if err := errors.Join(iter.Error(), iter.Close()); err != nil {
-			_ = b.Close()
-			return err
+		if _, _, expired, err := DecodeValue(raw, now); err != nil || !expired {
+			continue
+		}
+		found++
+		_ = b.Delete(key, nil)
+		if base == setMetaPrefix {
+			prefix := setMemberPrefix(string(key[len(base):]))
+			_ = b.DeleteRange(prefix, upperBound(prefix), nil)
 		}
 	}
 	if found == 0 {

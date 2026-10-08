@@ -4,6 +4,7 @@ package kv
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -258,4 +259,84 @@ func TestStore_ASetEmptiedBySRemIsGone(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, keys)
 	})
+}
+
+func newTestPebble(t *testing.T) *Pebble {
+	t.Helper()
+	store, err := pebblestore.Open(zerolog.Nop(), pebblestore.Config{Path: t.TempDir(), SyncInterval: time.Hour})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	p := NewPebble(zerolog.Nop(), store, redisutil.NewKeyBuilder(config.RedisNamespaceConfig{}))
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
+
+// SRem decides whether the set is left empty from its first member, not by
+// listing them all: it runs under the store's lock, and the relay meter's set
+// of active sessions holds one member per session and supplier.
+func TestPebble_SRemDoesNotListTheSet(t *testing.T) {
+	p := newTestPebble(t)
+	ctx := context.Background()
+	members := make([]string, 20000)
+	for i := range members {
+		members[i] = fmt.Sprintf("m-%05d", i)
+	}
+	require.NoError(t, p.SAdd(ctx, "big", members...))
+
+	allocs := testing.AllocsPerRun(10, func() {
+		if err := p.SRem(ctx, "big", "m-00000"); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.SAdd(ctx, "big", "m-00000"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	require.Less(t, allocs, float64(len(members)/10), "SRem allocated per member of the set")
+
+	require.NoError(t, p.SRem(ctx, "big", members[1:]...))
+	n, err := p.SCard(ctx, "big")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "a set with a member left is kept")
+	require.NoError(t, p.SRem(ctx, "big", "m-00000"))
+	n, err = p.SCard(ctx, "big")
+	require.NoError(t, err)
+	require.Zero(t, n, "a set left empty is deleted")
+}
+
+// The janitor finds expired keys without the store's lock and deletes them
+// under it, re-reading each first: a key written again in between is kept.
+func TestPebble_TheJanitorKeepsAKeyWrittenAfterItsScan(t *testing.T) {
+	p := newTestPebble(t)
+	ctx := context.Background()
+	now := time.Now()
+	p.now = func() time.Time { return now }
+	require.NoError(t, p.Set(ctx, "rewritten", []byte("old"), time.Second))
+	require.NoError(t, p.Set(ctx, "expired", []byte("gone"), time.Second))
+	require.NoError(t, p.SAdd(ctx, "set-rewritten", "a"))
+	require.NoError(t, p.SAdd(ctx, "set-expired", "a"))
+	ok, err := p.Expire(ctx, "set-rewritten", time.Second)
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = p.Expire(ctx, "set-expired", time.Second)
+	require.NoError(t, err)
+	require.True(t, ok)
+	now = now.Add(time.Minute)
+
+	p.beforeExpiredDelete = func() {
+		require.NoError(t, p.Set(ctx, "rewritten", []byte("new"), 0))
+		require.NoError(t, p.SAdd(ctx, "set-rewritten", "b"))
+	}
+	require.NoError(t, p.deleteExpired())
+
+	got, err := p.Get(ctx, "rewritten")
+	require.NoError(t, err)
+	require.Equal(t, []byte("new"), got, "a key written after the scan was deleted")
+	_, err = p.Get(ctx, "expired")
+	require.ErrorIs(t, err, ErrNotFound)
+	members, err := p.SMembers(ctx, "set-rewritten")
+	require.NoError(t, err)
+	require.Equal(t, []string{"b"}, members, "a set revived after the scan keeps its new member")
+	n, err := p.SCard(ctx, "set-expired")
+	require.NoError(t, err)
+	require.Zero(t, n)
 }
