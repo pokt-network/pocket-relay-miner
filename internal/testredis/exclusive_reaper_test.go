@@ -46,7 +46,7 @@ func planted(t *testing.T, host, pid, start string) string {
 		"--label", labelHost+"="+host,
 		"--label", labelPID+"="+pid,
 		"--label", labelProcessStart+"="+start,
-		"redis:8.10.1-alpine")
+		exclusiveImage())
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", id).Run() })
 	return id
 }

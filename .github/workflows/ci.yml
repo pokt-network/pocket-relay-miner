@@ -40,6 +40,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
+# Docker Hub refuses pulls without credentials past its rate limit, and a run
+# went red on it before any test ran. The same image comes from Google's Docker
+# Hub mirror: the Redis services below and the tests' exclusive Redis
+# (internal/testredis) pull it from there.
+env:
+  REDIS_TEST_IMAGE: mirror.gcr.io/library/redis:8.10.1-alpine
+
 jobs:
   tracked-files:
     name: Tracked Files
@@ -105,7 +112,7 @@ jobs:
       # fake, which is exactly why nothing caught that bug: tests that assert on
       # blocking, PEL ageing or eviction have to run against the real server.
       redis:
-        image: redis:8.10.1-alpine
+        image: mirror.gcr.io/library/redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-
@@ -180,7 +187,7 @@ jobs:
       # fake, which is exactly why nothing caught that bug: tests that assert on
       # blocking, PEL ageing or eviction have to run against the real server.
       redis:
-        image: redis:8.10.1-alpine
+        image: mirror.gcr.io/library/redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-
