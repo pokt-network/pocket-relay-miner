@@ -1,7 +1,10 @@
-# syntax=docker/dockerfile:1
+# The base images come from Google's mirror of Docker Hub: Docker Hub's auth
+# service failing or its pull limit refused builds that had changed nothing.
+# No `# syntax=` line: the frontend BuildKit carries builds this file, and
+# fetching another one is a Docker Hub pull of its own.
 
 # Build stage
-FROM golang:1.26.5-alpine AS builder
+FROM mirror.gcr.io/library/golang:1.26.5-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -33,7 +36,7 @@ RUN CGO_ENABLED=0 go build \
     -o pocket-relay-miner .
 
 # Runtime stage
-FROM alpine:latest
+FROM mirror.gcr.io/library/alpine:latest
 
 # TARGETARCH is automatically set by buildx (amd64, arm64, etc.)
 ARG TARGETARCH
