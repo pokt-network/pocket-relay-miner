@@ -124,6 +124,18 @@ jobs:
           go-version: "1.26.5"
           cache: true
 
+      # The dashboards' run-totals test needs promtool. Pulling its image from
+      # Docker Hub without credentials hit the pull rate limit (a red run with
+      # every Go test green), so the binary comes from the release, checked.
+      - name: Install promtool
+        run: |
+          v=3.5.0
+          f=prometheus-${v}.linux-amd64.tar.gz
+          curl -sSfLO "https://github.com/prometheus/prometheus/releases/download/v${v}/${f}"
+          echo "e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a  ${f}" | sha256sum -c -
+          tar -xzf "${f}" "prometheus-${v}.linux-amd64/promtool"
+          echo "PROMTOOL=${PWD}/prometheus-${v}.linux-amd64/promtool" >> "$GITHUB_ENV"
+
       - name: Run tests
         run: make test
         env:
