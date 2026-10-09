@@ -8,9 +8,11 @@ import (
 	"time"
 
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // frozenApplicationQueryClient models the query layer's in-process cache: once it
@@ -55,7 +57,7 @@ func (f *frozenApplicationQueryClient) InvalidateApplication(_ string) {
 func TestApplicationCache_L1RefreshesAfterTTL(t *testing.T) {
 	client := newTestRedis(t)
 	fq := &frozenApplicationQueryClient{chainDelegatees: []string{"gw-a"}}
-	ac := NewApplicationCache(logging.NewLoggerFromConfig(logging.DefaultConfig()), client, fq)
+	ac := NewApplicationCache(logging.NewLoggerFromConfig(logging.DefaultConfig()), kv.NewRedis(zerolog.Nop(), client), fq)
 
 	ctx := context.Background()
 	require.NoError(t, ac.Start(ctx))

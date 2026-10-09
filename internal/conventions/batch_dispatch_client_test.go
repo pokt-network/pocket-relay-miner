@@ -34,13 +34,56 @@ func TestTheBatchingPublisherWritesThroughItsOwnClient(t *testing.T) {
 			"not the shared pool the cache and the meter wait on", path)
 	}
 
-	closed := deferredCloseOf(f, "batchRedisClient")
+	// The batch client is opened by openRedisRelayPublisher, which hands its
+	// Close back as closeBatchClient; serveRelayer defers that before the
+	// publisher's Close.
+	if !closesInFuncLit(f, "closeClient", "batchRedisClient") {
+		t.Fatalf("%s: closeClient, the close openRedisRelayPublisher returns, must close batchRedisClient", path)
+	}
+	closed := deferredCallOf(f, "closeBatchClient")
 	publisher := deferredCloseOf(f, "publisher")
 	if closed == token.NoPos {
-		t.Fatalf("%s has no deferred batchRedisClient.Close()", path)
+		t.Fatalf("%s has no deferred closeBatchClient()", path)
 	}
 	if publisher <= closed {
-		t.Errorf("%s defers publisher.Close() before batchRedisClient.Close(): defers run LIFO, so the "+
+		t.Errorf("%s defers publisher.Close() before closeBatchClient(): defers run LIFO, so the "+
 			"batch client would be closed when the final flush writes through it", path)
 	}
+}
+
+// deferredCallOf is the position of the first `defer name()`.
+func deferredCallOf(f *ast.File, name string) token.Pos {
+	pos := token.NoPos
+	ast.Inspect(f, func(n ast.Node) bool {
+		if d, ok := n.(*ast.DeferStmt); ok && pos == token.NoPos && isIdentNamed(d.Call.Fun, name) {
+			pos = d.Pos()
+		}
+		return pos == token.NoPos
+	})
+	return pos
+}
+
+// closesInFuncLit reports whether `name := func() { ... v.Close() ... }` is in f.
+func closesInFuncLit(f *ast.File, name, v string) bool {
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 || !isIdentNamed(as.Lhs[0], name) {
+			return !found
+		}
+		lit, ok := as.Rhs[0].(*ast.FuncLit)
+		if !ok {
+			return !found
+		}
+		ast.Inspect(lit.Body, func(inner ast.Node) bool {
+			if call, ok := inner.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Close" && isIdentNamed(sel.X, v) {
+					found = true
+				}
+			}
+			return !found
+		})
+		return !found
+	})
+	return found
 }

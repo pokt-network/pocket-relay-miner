@@ -3,11 +3,12 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/cosmos/gogoproto/proto"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -55,7 +56,7 @@ type serviceCacheL1Entry struct {
 // across all instances.
 type serviceCache struct {
 	logger      logging.Logger
-	redisClient *redisutil.Client
+	store       kv.Store
 	queryClient ServiceQueryClient
 
 	// L1: In-memory cache (xsync for lock-free performance), TTL-bounded by
@@ -86,12 +87,12 @@ type ServiceQueryClient interface {
 // with Close() when no longer needed.
 func NewServiceCache(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	queryClient ServiceQueryClient,
 ) KeyedEntityCache[string, *sharedtypes.Service] {
 	return &serviceCache{
 		logger:      logging.ForComponent(logger, logging.ComponentQueryService),
-		redisClient: redisClient,
+		store:       store,
 		queryClient: queryClient,
 		localCache:  xsync.NewMap[string, serviceCacheL1Entry](),
 	}
@@ -104,7 +105,7 @@ func (c *serviceCache) Start(ctx context.Context) error {
 	// Subscribe to invalidation events
 	if err := SubscribeToInvalidations(
 		c.ctx,
-		c.redisClient,
+		c.store,
 		c.logger,
 		serviceCacheType,
 		c.handleInvalidation,
@@ -154,8 +155,8 @@ func (c *serviceCache) Get(ctx context.Context, serviceID string, force ...bool)
 		}
 
 		// L2: Check Redis cache
-		redisKey := c.redisClient.KB().CacheKey(serviceCacheType, serviceID)
-		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+		redisKey := c.store.KB().CacheKey(serviceCacheType, serviceID)
+		data, err := c.store.Get(ctx, redisKey)
 		if err == nil {
 			svc := &sharedtypes.Service{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, svc); err == nil {
@@ -229,7 +230,7 @@ func (c *serviceCache) Get(ctx context.Context, serviceID string, force ...bool)
 	// Publish invalidation event if force refresh (leader only)
 	if forceRefresh {
 		payload := fmt.Sprintf(`{"service_id": "%s"}`, serviceID)
-		if err := PublishInvalidation(ctx, c.redisClient, c.logger, serviceCacheType, payload); err != nil {
+		if err := PublishInvalidation(ctx, c.store, c.logger, serviceCacheType, payload); err != nil {
 			c.logger.Warn().
 				Err(err).
 				Str(logging.FieldServiceID, serviceID).
@@ -254,8 +255,8 @@ func (c *serviceCache) Set(ctx context.Context, serviceID string, svc *sharedtyp
 		return fmt.Errorf("failed to marshal service: %w", err)
 	}
 
-	redisKey := c.redisClient.KB().CacheKey(serviceCacheType, serviceID)
-	if err := c.redisClient.Set(ctx, redisKey, data, ttl).Err(); err != nil {
+	redisKey := c.store.KB().CacheKey(serviceCacheType, serviceID)
+	if err := c.store.Set(ctx, redisKey, data, ttl); err != nil {
 		return fmt.Errorf("failed to set Redis cache: %w", err)
 	}
 
@@ -274,8 +275,8 @@ func (c *serviceCache) Invalidate(ctx context.Context, serviceID string) error {
 	c.localCache.Delete(serviceID)
 
 	// Remove from L2 (Redis)
-	redisKey := c.redisClient.KB().CacheKey(serviceCacheType, serviceID)
-	if err := c.redisClient.Del(ctx, redisKey).Err(); err != nil {
+	redisKey := c.store.KB().CacheKey(serviceCacheType, serviceID)
+	if err := c.store.Del(ctx, redisKey); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
@@ -284,7 +285,7 @@ func (c *serviceCache) Invalidate(ctx context.Context, serviceID string) error {
 
 	// Publish invalidation event to other instances
 	payload := fmt.Sprintf(`{"service_id": "%s"}`, serviceID)
-	if err := PublishInvalidation(ctx, c.redisClient, c.logger, serviceCacheType, payload); err != nil {
+	if err := PublishInvalidation(ctx, c.store, c.logger, serviceCacheType, payload); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
@@ -326,24 +327,11 @@ func (c *serviceCache) InvalidateAll(ctx context.Context) error {
 	c.localCache.Clear()
 
 	// Clear L2 (Redis) - delete all keys with the prefix
-	iter := c.redisClient.Scan(ctx, 0, c.redisClient.KB().CacheKey(serviceCacheType, "*"), 0).Iterator()
-	for iter.Next(ctx) {
-		if err := c.redisClient.Del(ctx, iter.Val()).Err(); err != nil {
-			c.logger.Warn().
-				Err(err).
-				Str("key", iter.Val()).
-				Msg("failed to delete service from Redis")
-		}
-	}
-	if err := iter.Err(); err != nil {
-		c.logger.Warn().
-			Err(err).
-			Msg("failed to scan Redis keys for service cache")
-	}
+	deleteByPrefix(ctx, c.store, c.logger, c.store.KB().CacheKey(serviceCacheType, ""))
 
 	// Publish invalidation event (empty payload means invalidate all)
 	payload := "{}"
-	if err := PublishInvalidation(ctx, c.redisClient, c.logger, serviceCacheType, payload); err != nil {
+	if err := PublishInvalidation(ctx, c.store, c.logger, serviceCacheType, payload); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to publish invalidation event")
@@ -360,7 +348,7 @@ func (c *serviceCache) InvalidateAll(ctx context.Context) error {
 // This is called by the orchestrator's pond worker pool for parallel warmup.
 func (c *serviceCache) warmupSingleService(ctx context.Context, id string) error {
 	return warmupKeyedFromRedis(
-		ctx, c.redisClient, c.logger,
+		ctx, c.store, c.logger,
 		serviceCacheType,
 		logging.FieldServiceID,
 		"failed to unmarshal service during warmup",
@@ -383,14 +371,14 @@ func (c *serviceCache) warmupSingleService(ctx context.Context, id string) error
 // lives in queryKeyedChainWithLock; only the service-specific decode, L1 warm and
 // chain call are supplied here.
 func (c *serviceCache) queryChainWithLock(ctx context.Context, serviceID string) (*sharedtypes.Service, error) {
-	return queryKeyedChainWithLock(ctx, c.redisClient, c.logger, serviceID, keyedQueryLockSpec[*sharedtypes.Service]{
+	return queryKeyedChainWithLock(ctx, c.store, c.logger, serviceID, keyedQueryLockSpec[*sharedtypes.Service]{
 		cacheType:   serviceCacheType,
 		chainLabel:  "service",
 		logKeyField: logging.FieldServiceID,
 		waitingMsg:  "another instance is querying service, waiting",
 		loadFromRedis: func(ctx context.Context, serviceID string) (*sharedtypes.Service, bool) {
-			redisKey := c.redisClient.KB().CacheKey(serviceCacheType, serviceID)
-			data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+			redisKey := c.store.KB().CacheKey(serviceCacheType, serviceID)
+			data, err := c.store.Get(ctx, redisKey)
 			if err != nil {
 				return nil, false
 			}
@@ -446,8 +434,8 @@ func (c *serviceCache) handleInvalidation(ctx context.Context, payload string) e
 	// Services are needed for relay metering (compute units, relay difficulty)
 	// so first relay after invalidation should not experience L2/L3 latency
 	if event.ServiceID != "" {
-		redisKey := c.redisClient.KB().CacheKey(serviceCacheType, event.ServiceID)
-		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+		redisKey := c.store.KB().CacheKey(serviceCacheType, event.ServiceID)
+		data, err := c.store.Get(ctx, redisKey)
 		if err == nil {
 			svc := &sharedtypes.Service{}
 			if err := proto.Unmarshal(data, svc); err == nil {
@@ -462,7 +450,7 @@ func (c *serviceCache) handleInvalidation(ctx context.Context, payload string) e
 					Str(logging.FieldServiceID, event.ServiceID).
 					Msg("failed to unmarshal service during eager reload")
 			}
-		} else if err != redis.Nil {
+		} else if !errors.Is(err, kv.ErrNotFound) {
 			c.logger.Warn().
 				Err(err).
 				Str(logging.FieldServiceID, event.ServiceID).

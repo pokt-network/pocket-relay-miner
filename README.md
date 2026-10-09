@@ -66,6 +66,9 @@ partial rejections.
 
 ## How it fits
 
+It runs in 1 of 2 modes. **High-availability mode**: relayers and miners as
+separate processes, sharing 1 Redis, with replicas:
+
 ```
                  gateways
                     │
@@ -92,6 +95,22 @@ version. v0.1.0 was tested on 1 relayer + 1 miner and on 2 relayers + 2 miners
 (the latter at lower load); the load tests and the capacity figures are from
 1 relayer + 1 miner.
 
+**Standalone mode**: 1 process (`pocket-relay-miner standalone`) runs the
+relayer and the miner together, keeps its state in an embedded store on local
+disk, and needs no Redis; no replicas. Built from source until a release ships
+it, and not yet load-tested:
+
+```
+   gateways ──> ┌──────────── standalone ────────────┐ ──> your backends
+                │ relayer ──(in the process)──> miner │ ──> Pocket chain
+                └─────────────────┬──────────────────┘
+                                  ▼
+                   embedded store (local disk, no Redis)
+```
+
+[docs/deploy/README.md, "Choose a mode"](docs/deploy/README.md#choose-a-mode)
+compares the two.
+
 ## Where to start
 
 **Deploy.** An AI agent starts at [AGENTS.md](AGENTS.md): the rules and the
@@ -99,9 +118,10 @@ invariants that stop a deployment.
 
 | I want to... | Read |
 |---|---|
-| choose a path, check prerequisites and ports | [docs/deploy/README.md](docs/deploy/README.md) |
-| run it with Docker Compose, on beta first | [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) |
-| run it on a host, binary and systemd | [docs/deploy/HOST.md](docs/deploy/HOST.md) |
+| choose a mode and a path, check prerequisites and ports | [docs/deploy/README.md](docs/deploy/README.md) |
+| run it with Docker Compose, on beta first | high availability: [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md); standalone: [docs/deploy/DOCKER_COMPOSE_STANDALONE.md](docs/deploy/DOCKER_COMPOSE_STANDALONE.md) |
+| run it on a host, binary and systemd | high availability: [docs/deploy/HOST.md](docs/deploy/HOST.md); standalone: [docs/deploy/HOST_STANDALONE.md](docs/deploy/HOST_STANDALONE.md) |
+| run the relayer and the miner in one process, with no Redis | [docs/STANDALONE.md](docs/STANDALONE.md) |
 | use Kubernetes | no example in v0.1.0; `tilt/` runs the stack on a local kind cluster and is a starting point for your own manifests |
 
 **Configure.** The relayer reads its config once, at startup: restart it after
@@ -109,9 +129,9 @@ every change.
 
 | I want to... | Read |
 |---|---|
-| see every key, its default and why to change it | [config.relayer.example.yaml](config.relayer.example.yaml), [config.miner.example.yaml](config.miner.example.yaml) |
+| see every key, its default and why to change it | high availability: [config.relayer.example.yaml](config.relayer.example.yaml), [config.miner.example.yaml](config.miner.example.yaml); standalone: [config.standalone.example.yaml](config.standalone.example.yaml) |
 | check a config against its schema | [config.relayer.schema.yaml](config.relayer.schema.yaml), [config.miner.schema.yaml](config.miner.schema.yaml), and `pocket-relay-miner relayer\|miner validate --config <file>` |
-| set up Redis | [config.redis.example.conf](config.redis.example.conf) |
+| set up Redis (high-availability mode) | [config.redis.example.conf](config.redis.example.conf) |
 | set up supplier keys | [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md) |
 | start from a minimal config that works | [examples/docker-compose/config/](examples/docker-compose/config/), [examples/host/](examples/host/) |
 
@@ -123,7 +143,7 @@ every change.
 | know what changed in a version, and what to do before upgrading | the release notes of each version: <https://github.com/pokt-network/pocket-relay-miner/releases> |
 | run Prometheus and Grafana with ready dashboards | [examples/observability/](examples/observability/README.md) |
 | know which metrics to read, in order | [docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md), and [scripts/observability/triage.sh](scripts/observability/triage.sh) to check them against Prometheus |
-| inspect what is in Redis | `pocket-relay-miner redis --help`; what each key holds: [docs/REDIS.md](docs/REDIS.md) |
+| inspect what is in Redis (high-availability mode) | `pocket-relay-miner redis --help`; what each key holds: [docs/REDIS.md](docs/REDIS.md). In standalone mode: the metrics and the logs ([docs/STANDALONE.md](docs/STANDALONE.md)) |
 | size memory, CPU and Redis for your load | [docs/benchmarks/](docs/benchmarks/README.md): the v0.1.0 capacity report and how to read it |
 
 **Test and measure.**

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -40,7 +42,7 @@ func TestProofTrackingRecordHoldsTheProofHashNotTheProof(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			client, _ := newTestRedis(t)
-			tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
+			tr := NewSubmissionTracker(zerolog.Nop(), kv.NewRedis(zerolog.Nop(), client), time.Hour)
 			const supplier, sessionID = "pokt1proofhash", "sess-proofhash"
 			if tc.seedClaim {
 				seedClaim(t, tr, supplier, sessionID, "0xclaimtx")

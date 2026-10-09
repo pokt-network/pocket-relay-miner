@@ -64,6 +64,12 @@ func relaysLost(supplier, service, reason string) float64 {
 	return testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, service, reason))
 }
 
+// priced is a session priced at amount uPOKT: these tests are about which book
+// money goes to, and session_price_test.go about what it is priced at.
+func priced(amount uint64) Upokt {
+	return Upokt{Amount: amount, OK: true}
+}
+
 func relaysForgone(supplier, service, reason string) float64 {
 	return testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, service, reason))
 }
@@ -82,7 +88,7 @@ func TestClaimTxError_Resolvable_CountsTheSessionAndNoMoney(t *testing.T) {
 	before := readLedger(supplier, service, "claim_tx_error", string(RebroadcastPhaseClaim))
 	relaysLostBefore := relaysLost(supplier, service, "claim_tx_error")
 
-	RecordClaimTxError(supplier, service, true, 9, 9_000_000)
+	RecordClaimTxError(supplier, service, true, 9, 9_000_000, priced(9))
 
 	after := readLedger(supplier, service, "claim_tx_error", string(RebroadcastPhaseClaim))
 	require.Equal(t, before.sessions+1, after.sessions,
@@ -102,7 +108,7 @@ func TestClaimTxError_NoResolver_IsForgoneNotAnAttempt(t *testing.T) {
 	const supplier, service = "pokt1ledger_claim_noresolver", "svc-1"
 	before := readLedger(supplier, service, "claim_tx_error", string(RebroadcastPhaseClaim))
 
-	RecordClaimTxError(supplier, service, false, 4, 4_000_000)
+	RecordClaimTxError(supplier, service, false, 4, 4_000_000, priced(4))
 
 	after := readLedger(supplier, service, "claim_tx_error", string(RebroadcastPhaseClaim))
 	require.Equal(t, before.sessions+1, after.sessions)
@@ -123,7 +129,7 @@ func TestProofTxError_Resolvable_OpensUnresolvedAndNotLoss(t *testing.T) {
 	before := readLedger(supplier, service, "proof_tx_error", string(RebroadcastPhaseProof))
 	relaysLostBefore := relaysLost(supplier, service, "proof_tx_error")
 
-	RecordProofTxError(supplier, service, true, 6, 6_000_000)
+	RecordProofTxError(supplier, service, true, 6, 6_000_000, priced(6))
 
 	after := readLedger(supplier, service, "proof_tx_error", string(RebroadcastPhaseProof))
 	require.Equal(t, before.sessions+1, after.sessions)
@@ -144,7 +150,7 @@ func TestProofTxError_NoResolver_IsLostNotUnresolved(t *testing.T) {
 	const supplier, service = "pokt1ledger_proof_noresolver", "svc-1"
 	before := readLedger(supplier, service, "proof_tx_error", string(RebroadcastPhaseProof))
 
-	RecordProofTxError(supplier, service, false, 5, 5_000_000)
+	RecordProofTxError(supplier, service, false, 5, 5_000_000, priced(5))
 
 	after := readLedger(supplier, service, "proof_tx_error", string(RebroadcastPhaseProof))
 	require.Equal(t, before.sessions+1, after.sessions)
@@ -172,7 +178,7 @@ func TestClaimWindowClosed_TheTxHashDecidesForgoneOrLost(t *testing.T) {
 		relaysForgoneBefore := relaysForgone(supplier, service, "claim_window_closed")
 		relaysLostBefore := relaysLost(supplier, service, "claim_window_closed")
 
-		RecordClaimWindowClosed(supplier, service, "", 3, 3_000_000)
+		RecordClaimWindowClosed(supplier, service, "", 3, 3_000_000, priced(3))
 
 		after := readLedger(supplier, service, "claim_window_closed", string(RebroadcastPhaseClaim))
 		require.Equal(t, before.sessions+1, after.sessions)
@@ -190,7 +196,7 @@ func TestClaimWindowClosed_TheTxHashDecidesForgoneOrLost(t *testing.T) {
 		const supplier, service = "pokt1ledger_cwc_lost", "svc-1"
 		before := readLedger(supplier, service, "claim_window_closed", string(RebroadcastPhaseClaim))
 
-		RecordClaimWindowClosed(supplier, service, "DEADBEEF", 3, 3_000_000)
+		RecordClaimWindowClosed(supplier, service, "DEADBEEF", 3, 3_000_000, priced(3))
 
 		after := readLedger(supplier, service, "claim_window_closed", string(RebroadcastPhaseClaim))
 		require.Equal(t, before.lost+3, after.lost,
@@ -209,7 +215,7 @@ func TestProofWindowClosed_TheTxHashDecidesLostOrAttempt(t *testing.T) {
 		const supplier, service = "pokt1ledger_pwc_lost", "svc-1"
 		before := readLedger(supplier, service, "proof_window_closed", string(RebroadcastPhaseProof))
 
-		RecordProofWindowClosed(supplier, service, "", 8, 8_000_000)
+		RecordProofWindowClosed(supplier, service, "", 8, 8_000_000, priced(8))
 
 		after := readLedger(supplier, service, "proof_window_closed", string(RebroadcastPhaseProof))
 		require.Equal(t, before.sessions+1, after.sessions)
@@ -225,7 +231,7 @@ func TestProofWindowClosed_TheTxHashDecidesLostOrAttempt(t *testing.T) {
 		const supplier, service = "pokt1ledger_pwc_attempt", "svc-1"
 		before := readLedger(supplier, service, "proof_window_closed", string(RebroadcastPhaseProof))
 
-		RecordProofWindowClosed(supplier, service, "CAFEBABE", 8, 8_000_000)
+		RecordProofWindowClosed(supplier, service, "CAFEBABE", 8, 8_000_000, priced(8))
 
 		after := readLedger(supplier, service, "proof_window_closed", string(RebroadcastPhaseProof))
 		require.Equal(t, before.sessions+1, after.sessions,
@@ -246,7 +252,7 @@ func TestUnresolvedResolution_TouchesNoSessionCounter(t *testing.T) {
 	before := testutil.ToFloat64(sessionsFailedTotal.WithLabelValues(supplier, service, "proof_tx_error"))
 	closedBefore := testutil.ToFloat64(upoktUnresolvedResolvedTotal.WithLabelValues(supplier, service, string(RebroadcastPhaseProof)))
 
-	RecordSessionUnresolvedResolved(supplier, service, string(RebroadcastPhaseProof), 2, 2_000_000)
+	RecordSessionUnresolvedResolved(supplier, service, string(RebroadcastPhaseProof), 2, 2_000_000, priced(2))
 
 	require.Equal(t, before,
 		testutil.ToFloat64(sessionsFailedTotal.WithLabelValues(supplier, service, "proof_tx_error")),
@@ -285,18 +291,18 @@ func TestMoneyLedgerCloses_OverAFailedProofThatLandsOnRetry(t *testing.T) {
 	require.Zero(t, residual(), "an empty book closes")
 
 	// The claim is accepted: the money enters the book.
-	RecordRevenueClaimed(supplier, service, cu, relays)
+	RecordRevenueClaimed(supplier, service, cu, relays, priced(10))
 	require.Equal(t, float64(10), residual(),
 		"claimed and not yet settled: the residual IS the open balance, and that is the honest reading")
 
 	// The proof submission fails, retryably. The money moves to `unresolved`.
-	RecordProofTxError(supplier, service, true, relays, cu)
+	RecordProofTxError(supplier, service, true, relays, cu, priced(10))
 	require.Zero(t, residual(),
 		"claimed = proved + lost + unresolved: the session is accounted for while its fate is unknown")
 
 	// The reconciler finds the proof on chain: the balance closes into proved.
-	RecordSessionUnresolvedResolved(supplier, service, string(RebroadcastPhaseProof), relays, cu)
-	RecordRevenueProved(supplier, service, cu, relays)
+	RecordSessionUnresolvedResolved(supplier, service, string(RebroadcastPhaseProof), relays, cu, priced(10))
+	RecordRevenueProved(supplier, service, cu, relays, priced(10))
 	require.Zero(t, residual(),
 		"and it still closes once the chain has answered -- this is the case that read 108.4%")
 

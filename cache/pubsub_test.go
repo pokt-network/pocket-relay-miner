@@ -8,9 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // TestSubscribeToInvalidations_ActiveOnReturn pins the subscription liveness
@@ -29,7 +31,7 @@ func TestSubscribeToInvalidations_ActiveOnReturn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	err := SubscribeToInvalidations(ctx, redisClient, log, "service",
+	err := SubscribeToInvalidations(ctx, kv.NewRedis(zerolog.Nop(), redisClient), log, "service",
 		func(ctx context.Context, payload string) error { return nil })
 	require.NoError(t, err)
 
@@ -51,14 +53,14 @@ func TestSubscribeToInvalidations_DeliversMessagePublishedImmediately(t *testing
 	t.Cleanup(cancel)
 
 	var delivered atomic.Int64
-	err := SubscribeToInvalidations(ctx, redisClient, log, "application",
+	err := SubscribeToInvalidations(ctx, kv.NewRedis(zerolog.Nop(), redisClient), log, "application",
 		func(ctx context.Context, payload string) error {
 			delivered.Add(1)
 			return nil
 		})
 	require.NoError(t, err)
 
-	require.NoError(t, PublishInvalidation(ctx, redisClient, log, "application", "x"))
+	require.NoError(t, PublishInvalidation(ctx, kv.NewRedis(zerolog.Nop(), redisClient), log, "application", "x"))
 
 	require.Eventually(t, func() bool { return delivered.Load() == 1 },
 		5*time.Second, 5*time.Millisecond,

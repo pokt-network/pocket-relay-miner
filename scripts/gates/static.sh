@@ -13,9 +13,11 @@
 # commit actually contains, while build/vet/lint stay whole-tree because a
 # package cannot be compiled in isolation from the change that breaks it.
 #
-# This repository has TWO Go modules -- the root and tilt/backend-server -- and
-# `go build ./...` in the root does not reach the second one. Both are checked
-# here, matching what `make lint` and `make fmt` already do.
+# This repository has THREE Go modules -- the root, tilt/backend-server and
+# tilt/tiltcheck -- and `go build ./...` in the root reaches neither of the
+# other two. All three are checked here, matching what `make lint` and
+# `make fmt` already do. tilt/tiltcheck also runs: it renders the Tiltfiles of
+# both relay miner modes and validates what they would deploy.
 
 set -uo pipefail
 
@@ -24,7 +26,8 @@ set -uo pipefail
 
 gate_repo_root
 
-readonly BACKEND_DIR="tilt/backend-server"
+# The Go modules besides the root, each with its own go.mod.
+readonly SUB_MODULES=("tilt/backend-server" "tilt/tiltcheck")
 
 staged_only=0
 for arg in "$@"; do
@@ -105,16 +108,16 @@ else
     gate_detail "$build_out"
 fi
 
-if [ -f "$BACKEND_DIR/go.mod" ]; then
-    if build_out="$(cd "$BACKEND_DIR" && go build ./... 2>&1)"; then
-        gate_pass "$BACKEND_DIR builds"
+for mod in "${SUB_MODULES[@]}"; do
+    if [ ! -f "$mod/go.mod" ]; then
+        gate_skip "$mod absent on this branch"
+    elif build_out="$(cd "$mod" && go build ./... 2>&1)"; then
+        gate_pass "$mod builds"
     else
-        gate_fail "$BACKEND_DIR does not build:"
+        gate_fail "$mod does not build:"
         gate_detail "$build_out"
     fi
-else
-    gate_skip "$BACKEND_DIR absent on this branch"
-fi
+done
 
 # ---------------------------------------------------------------------------
 gate_step "go vet"
@@ -138,14 +141,15 @@ else
     gate_detail "$vet_out"
 fi
 
-if [ -f "$BACKEND_DIR/go.mod" ]; then
-    if vet_out="$(cd "$BACKEND_DIR" && go vet ./... 2>&1)"; then
-        gate_pass "$BACKEND_DIR vet clean"
+for mod in "${SUB_MODULES[@]}"; do
+    [ -f "$mod/go.mod" ] || continue
+    if vet_out="$(cd "$mod" && go vet ./... 2>&1)"; then
+        gate_pass "$mod vet clean"
     else
-        gate_fail "go vet ($BACKEND_DIR):"
+        gate_fail "go vet ($mod):"
         gate_detail "$vet_out"
     fi
-fi
+done
 
 # ---------------------------------------------------------------------------
 # .gitignore cannot enforce anything on a path git already tracks, which is
@@ -227,15 +231,46 @@ else
         gate_detail "$lint_out" 30
     fi
 
-    if [ -f "$BACKEND_DIR/go.mod" ]; then
-        if lint_out="$(cd "$BACKEND_DIR" && golangci-lint run 2>&1)"; then
-            gate_pass "$BACKEND_DIR lint clean"
+    for mod in "${SUB_MODULES[@]}"; do
+        [ -f "$mod/go.mod" ] || continue
+        if lint_out="$(cd "$mod" && golangci-lint run 2>&1)"; then
+            gate_pass "$mod lint clean"
         else
-            gate_fail "golangci-lint ($BACKEND_DIR):"
+            gate_fail "golangci-lint ($mod):"
             gate_detail "$lint_out" 30
         fi
-    fi
+    done
 fi
+
+# ---------------------------------------------------------------------------
+# The Tiltfiles of both relay miner modes, executed with Tilt's builtins
+# stubbed (tilt/tiltcheck): what they would deploy is asserted, and every
+# relay-miner config they render is checked with this binary's own validate.
+# No cluster, no network. A skipped test is a failure here: the tests skip only
+# without the binary, which this step always builds.
+gate_step "Tiltfile renders (both modes)"
+render_bin_dir="$(mktemp -d)"
+if build_out="$(go build -o "$render_bin_dir/pocket-relay-miner" . 2>&1)"; then
+    render_out="$(cd tilt/tiltcheck && PRM_BIN="$render_bin_dir/pocket-relay-miner" go test -count=1 -v ./... 2>&1)"
+    render_rc=$?
+    renders="$(printf '%s\n' "$render_out" | grep -c -- '^--- PASS: TestRender_' || true)"
+    skips="$(printf '%s\n' "$render_out" | grep -c -- '--- SKIP' || true)"
+    if [ "$render_rc" -ne 0 ]; then
+        gate_fail "a Tiltfile render failed:"
+        gate_detail "$(printf '%s\n' "$render_out" | grep -v '^=== \|^--- PASS\|^PASS$\|^ok ' | tail -20)"
+    elif [ "$skips" -ne 0 ]; then
+        gate_fail "${skips} Tiltfile render test(s) skipped: nothing was validated"
+    elif [ "$renders" -eq 0 ]; then
+        gate_fail "no Tiltfile render test ran"
+    else
+        gate_pass "${renders} Tiltfile renders, both modes, configs validated"
+    fi
+    gate_exercised coverage tiltfile_renders "${renders:-0}"
+else
+    gate_fail "could not build the binary the renders are validated with:"
+    gate_detail "$build_out"
+fi
+rm -rf "$render_bin_dir"
 
 gate_step "gate self-tests"
 if lib_test_out="$(./scripts/gates/lib_test.sh 2>&1)"; then

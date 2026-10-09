@@ -12,11 +12,13 @@ import (
 	"time"
 
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // countingAppQueryClient is the L3 (chain) stub for the real application cache.
@@ -67,7 +69,7 @@ func TestCleanupAll_LiveReadersUnaffected(t *testing.T) {
 	ctx := context.Background()
 
 	// --- REAL supplier cache: same wiring as cmd_relayer.go (ha:supplier). ---
-	supplierCache := cache.NewSupplierCache(logger, client.Client, cache.SupplierCacheConfig{})
+	supplierCache := cache.NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), client.Client), cache.SupplierCacheConfig{})
 	require.NoError(t, supplierCache.Start(ctx))
 	t.Cleanup(func() { _ = supplierCache.Close() })
 
@@ -97,7 +99,7 @@ func TestCleanupAll_LiveReadersUnaffected(t *testing.T) {
 
 	// --- REAL application cache with a counting L3 stub. ---
 	appStub := &countingAppQueryClient{}
-	appCache := cache.NewApplicationCache(logger, client.Client, appStub)
+	appCache := cache.NewApplicationCache(logger, kv.NewRedis(zerolog.Nop(), client.Client), appStub)
 	require.NoError(t, appCache.Start(ctx))
 	t.Cleanup(func() { _ = appCache.Close() })
 

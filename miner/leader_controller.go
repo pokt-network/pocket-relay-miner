@@ -15,6 +15,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
@@ -28,8 +29,12 @@ type LeaderControllerConfig struct {
 	// Core dependencies (lightweight, created before election)
 	Logger      logging.Logger
 	RedisClient *redistransport.Client // Wrapped client with KeyBuilder
-	KeyManager  keys.KeyManager
-	Config      *Config
+
+	// KV keeps the caches, the registries and the block records. Nil means
+	// Redis, through RedisClient.
+	KV         kv.Store
+	KeyManager keys.KeyManager
+	Config     *Config
 
 	// Leader election
 	GlobalLeader *leader.GlobalLeaderElector
@@ -90,6 +95,9 @@ type LeaderController struct {
 
 // NewLeaderController creates a new leader controller.
 func NewLeaderController(config LeaderControllerConfig) *LeaderController {
+	if config.KV == nil && config.RedisClient != nil {
+		config.KV = kv.NewRedis(config.Logger, config.RedisClient)
+	}
 	return &LeaderController{
 		logger: logging.ForComponent(config.Logger, logging.ComponentLeaderController),
 		config: config,
@@ -176,7 +184,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	// KeyBuilder for namespace-aware channel names.
 	c.redisBlockPublisher = cache.NewRedisBlockPublisher(
 		c.logger,
-		c.config.RedisClient,
+		c.config.KV,
 	)
 	c.logger.Info().Msg("redis block publisher ready")
 
@@ -189,7 +197,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	// reads SHARED params at-height for window timing.
 	c.sharedParamsCache = cache.NewSharedParamsCache(
 		c.logger,
-		c.config.RedisClient,
+		c.config.KV,
 		c.queryClients.Shared(),
 		blockTimeSeconds,
 	)
@@ -200,7 +208,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 
 	c.proofParamsCache = cache.NewProofParamsCache(
 		c.logger,
-		c.config.RedisClient,
+		c.config.KV,
 		cache.NewProofQueryClientAdapter(c.queryClients.Proof()),
 		c.queryClients.Shared(),
 		blockTimeSeconds,
@@ -212,7 +220,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 
 	c.supplierParamsCache = cache.NewRedisSupplierParamCache(
 		c.logger,
-		c.config.RedisClient,
+		c.config.KV,
 		c.queryClients.Supplier(),
 		cache.CacheConfig{
 			TTLBlocks:        100,
@@ -227,7 +235,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 
 	c.applicationCache = cache.NewApplicationCache(
 		c.logger,
-		c.config.RedisClient,
+		c.config.KV,
 		cache.NewApplicationQueryClientAdapter(c.queryClients.Application()),
 	)
 	if err := c.applicationCache.Start(ctx); err != nil {
@@ -237,7 +245,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 
 	c.serviceCache = cache.NewServiceCache(
 		c.logger,
-		c.config.RedisClient,
+		c.config.KV,
 		cache.NewServiceQueryClientAdapter(c.queryClients.Service()),
 	)
 	if err := c.serviceCache.Start(ctx); err != nil {
@@ -258,7 +266,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	} else {
 		c.supplierCache = cache.NewSupplierCache(
 			c.logger,
-			c.config.RedisClient,
+			c.config.KV,
 			cache.SupplierCacheConfig{},
 		)
 		c.ownsSupplierCache = true
@@ -284,7 +292,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		},
 		c.config.GlobalLeader,
 		blockSubscriberAdapter,
-		c.config.RedisClient,
+		c.config.KV,
 		c.sharedParamsCache,
 		c.proofParamsCache,
 		c.supplierParamsCache,
@@ -325,9 +333,9 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	// Create supplier registry
 	c.supplierRegistry = NewSupplierRegistry(
 		c.logger,
-		c.config.RedisClient,
+		c.config.KV,
 		SupplierRegistryConfig{
-			IndexKey: c.config.RedisClient.KB().SuppliersRegistryIndexKey(),
+			IndexKey: c.config.KV.KB().SuppliersRegistryIndexKey(),
 		},
 	)
 
@@ -335,8 +343,8 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	// This publishes serviceFactor config to Redis for relayers to consume
 	c.serviceFactorRegistry = NewServiceFactorRegistry(
 		c.logger,
-		c.config.RedisClient,
-		c.config.RedisClient.KB(),
+		c.config.KV,
+		c.config.KV.KB(),
 		ServiceFactorRegistryConfig{
 			DefaultServiceFactor: c.config.Config.DefaultServiceFactor,
 			ServiceFactors:       c.config.Config.ServiceFactors,
@@ -405,15 +413,18 @@ func (c *LeaderController) Start(ctx context.Context) error {
 
 	// Relay streams no longer expire, so a supplier decommissioned for good
 	// leaves its lane behind. This reports those lanes; it never deletes one.
-	c.orphanStreamMonitor = NewOrphanStreamMonitor(
-		c.logger,
-		c.config.RedisClient,
-		c.config.GlobalLeader,
-		0, // default sweep interval
-	)
-	if err := c.orphanStreamMonitor.Start(ctx); err != nil {
-		c.cleanup()
-		return fmt.Errorf("failed to start orphan stream monitor: %w", err)
+	// The lanes are Redis streams: in standalone mode there is no Redis.
+	if c.config.RedisClient != nil {
+		c.orphanStreamMonitor = NewOrphanStreamMonitor(
+			c.logger,
+			c.config.RedisClient,
+			c.config.GlobalLeader,
+			0, // default sweep interval
+		)
+		if err := c.orphanStreamMonitor.Start(ctx); err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to start orphan stream monitor: %w", err)
+		}
 	}
 
 	c.active = true

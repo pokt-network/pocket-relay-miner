@@ -10,10 +10,12 @@ import (
 	"github.com/pokt-network/poktroll/pkg/client"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // frozenSessionQueryClient models the L3 (chain) session source for the session
@@ -98,7 +100,7 @@ func TestSessionCache_L1RefreshesAfterTTL(t *testing.T) {
 
 	sc := NewRedisSessionCache(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		sq,
 		sh,
 		bc,

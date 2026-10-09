@@ -9,12 +9,14 @@ import (
 
 	sdkmath "cosmossdk.io/math"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -54,7 +56,7 @@ func newCacheTestSupplierManager(t *testing.T, qc *fakeSupplierQueryClient) (*Su
 	redisClient, _ := newTestRedis(t)
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	supplierCache := cache.NewSupplierCache(logger, redisClient, cache.SupplierCacheConfig{})
+	supplierCache := cache.NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), redisClient), cache.SupplierCacheConfig{})
 
 	// Build a minimal SupplierManager with only the fields the helper uses:
 	// logger, config.SupplierCache, config.SupplierQueryClient, config.MinerID.

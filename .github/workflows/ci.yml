@@ -40,6 +40,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
+# Docker Hub refuses pulls without credentials past its rate limit, and a run
+# went red on it before any test ran. The same image comes from Google's Docker
+# Hub mirror: the Redis services below and the tests' exclusive Redis
+# (internal/testredis) pull it from there.
+env:
+  REDIS_TEST_IMAGE: mirror.gcr.io/library/redis:8.10.1-alpine
+
 jobs:
   tracked-files:
     name: Tracked Files
@@ -105,7 +112,7 @@ jobs:
       # fake, which is exactly why nothing caught that bug: tests that assert on
       # blocking, PEL ageing or eviction have to run against the real server.
       redis:
-        image: redis:8.10.1-alpine
+        image: mirror.gcr.io/library/redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-
@@ -123,6 +130,18 @@ jobs:
         with:
           go-version: "1.26.5"
           cache: true
+
+      # The dashboards' run-totals test needs promtool. Pulling its image from
+      # Docker Hub without credentials hit the pull rate limit (a red run with
+      # every Go test green), so the binary comes from the release, checked.
+      - name: Install promtool
+        run: |
+          v=3.5.0
+          f=prometheus-${v}.linux-amd64.tar.gz
+          curl -sSfLO "https://github.com/prometheus/prometheus/releases/download/v${v}/${f}"
+          echo "e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a  ${f}" | sha256sum -c -
+          tar -xzf "${f}" "prometheus-${v}.linux-amd64/promtool"
+          echo "PROMTOOL=${PWD}/prometheus-${v}.linux-amd64/promtool" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: make test
@@ -168,7 +187,7 @@ jobs:
       # fake, which is exactly why nothing caught that bug: tests that assert on
       # blocking, PEL ageing or eviction have to run against the real server.
       redis:
-        image: redis:8.10.1-alpine
+        image: mirror.gcr.io/library/redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-
@@ -227,6 +246,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+        with:
+          # BuildKit itself is an image; from the mirror, as the Dockerfile's are.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Extract version metadata
         id: meta
@@ -264,6 +286,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+        with:
+          # BuildKit itself is an image; from the mirror, as the Dockerfile's are.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Extract version metadata
         id: meta

@@ -1,7 +1,8 @@
 # Observability: Prometheus and Grafana
 
-Seven Grafana dashboards, provisioned with Prometheus and a Redis exporter,
-for the relayer and the miner. Every metric the binaries export is on a panel.
+Eight Grafana dashboards, provisioned with Prometheus (and, in
+high-availability mode, a Redis exporter), for the relayer and the miner, and
+for the standalone process. Every metric the binaries export is on a panel.
 Open them in this order:
 
 | Dashboard | The question it answers |
@@ -13,6 +14,7 @@ Open them in this order:
 | 5 Storage and memory | Is Redis or process memory what is throttling me? |
 | 6 Suppliers and chain | Stake, balance, keys, leadership and the chain clock |
 | 7 Process internals | Where inside the binaries time and memory go |
+| 8 Standalone store | Standalone mode only: is the embedded store (disk, write-ahead log, LSM) or the relay queue what is throttling me? |
 
 A stat panel that is red is an alarm; each panel's description (the `i` next
 to its title) says what it means and what to do. What to read first during an
@@ -45,13 +47,36 @@ Without a browser, list the dashboards through Grafana's HTTP API:
 curl -s -u admin:admin "http://127.0.0.1:${GRAFANA_PORT:-3000}/api/search?type=dash-db" | grep -o '"title":"[^"]*"'
 ```
 
-**Expect**: 7 titles, `Relay Miner / 1 Money` to `Relay Miner / 7 Process internals`.
+**Expect**: 8 titles, `Relay Miner / 1 Money` to `Relay Miner / 8 Standalone store`.
 If it prints nothing, Grafana is still starting after `up`: retry after a few
 seconds.
 
 With the public, unstaked key the money panels stay at 0: nothing is served.
 The chain panels (dashboard 6) and the process panels (dashboard 7) fill in at
-once.
+once. Dashboard 8 stays empty in high-availability mode: it reads only the
+standalone process.
+
+## With the compose example, standalone mode
+
+The standalone-mode example
+([docs/deploy/DOCKER_COMPOSE_STANDALONE.md](../../docs/deploy/DOCKER_COMPOSE_STANDALONE.md))
+carries the same `observability` profile, with no Redis exporter: standalone
+mode has no Redis. Its Prometheus reads
+[prometheus/prometheus.standalone.yml](prometheus/prometheus.standalone.yml),
+which scrapes the one process (`standalone:9092`) once, as job `standalone`:
+scraped under 2 jobs, every summed panel would count it twice.
+
+```bash
+docker compose -p prm-standalone -f examples/docker-compose/docker-compose.standalone.yaml --profile observability up -d
+curl -s "http://127.0.0.1:${PROMETHEUS_PORT:-9091}/api/v1/targets" | grep -o '"health":"[a-z]*"' | sort | uniq -c
+```
+
+**Expect** (not verified): `1 "health":"up"`.
+Grafana is as above. The Redis panels of dashboard 5 stay empty; its gate
+panels ("Every gate open", and "Store free", which in standalone mode reads the
+free disk of the embedded store) apply as they are. Dashboard 8 (Standalone
+store) shows the embedded store: its disk, the write-ahead log syncs, the LSM's
+health, the relay queue of each supplier and the process's memory and CPU.
 
 ## With a host deployment
 
@@ -59,7 +84,12 @@ Run Prometheus and Grafana any way you like and:
 - scrape the relayer's `metrics.addr` (127.0.0.1:9090 in `examples/host/`) as
   job `relayers`, the miner's (127.0.0.1:9092) as job `miners`, and a Redis
   exporter as job `redis`; set the label `instance` to `relayer` and `miner`,
-  as [prometheus/prometheus.yml](prometheus/prometheus.yml) does;
+  as [prometheus/prometheus.yml](prometheus/prometheus.yml) does. In
+  standalone mode, scrape its one `metrics.addr` (127.0.0.1:9092 in
+  `examples/host/standalone.yaml`) once, as job `standalone`, and no Redis
+  exporter, as
+  [prometheus/prometheus.standalone.yml](prometheus/prometheus.standalone.yml)
+  does;
 - provision the JSON files in [grafana/dashboards/](grafana/dashboards/).
 
 ## Changing the dashboards

@@ -22,10 +22,12 @@ import (
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/rings"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -166,7 +168,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 
 	rc, redisPrefix := newTestRedis(t)
 
-	simVerifier, err := NewSimulationVerifier(logger, &simCfg, rc, signer,
+	simVerifier, err := NewSimulationVerifier(logger, &simCfg, kv.NewRedis(zerolog.Nop(), rc), signer,
 		map[string]struct{}{simWSTestService: {}}, clock)
 	require.NoError(t, err)
 

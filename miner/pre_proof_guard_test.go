@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -167,9 +168,10 @@ func (s *stubProofQueryClient) GetParams(_ context.Context) (pocktclient.ProofPa
 // running the full OnSessionsNeedProof pipeline. OnSessionsNeedProof requires
 // a block client, shared client, proof checker, smst manager, and a live
 // transaction client — all of which are covered by other tests. What matters
-// for WS-A is: (a) NotFound → mark missing + metric + skip; (b) Found →
-// proceed; (c) other RPC error → fail open. We test that decision logic by
-// calling the guard branches directly.
+// for WS-A is: (a) NotFound → skip; (b) Found → proceed; (c) other RPC error
+// → fail open. We test that decision logic by calling the guard branches
+// directly. What a NotFound does to the session runs through the real cycle in
+// pre_proof_notfound_test.go.
 
 // runGuard replicates the guard logic from OnSessionsNeedProof so we can
 // assert its behavior without spinning up the full pipeline. Keep this in
@@ -183,56 +185,7 @@ func runGuard(
 		return false
 	}
 	_, err := lc.proofQueryClient.GetClaim(ctx, snapshot.SupplierOperatorAddress, snapshot.SessionID)
-	if err != nil && isClaimNotFoundError(err) {
-		RecordProofSkipped(snapshot.SupplierOperatorAddress, snapshot.ServiceID, ProofSkippedReasonClaimMissingOnChain)
-		if lc.sessionCoordinator != nil {
-			_ = lc.sessionCoordinator.OnClaimMissing(ctx, snapshot.SessionID)
-		}
-		return true
-	}
-	return false
-}
-
-func TestPreProofGuard_NotFound_SkipsAndMarks(t *testing.T) {
-	coord, store, _ := setupTestCoordinator(t)
-	ctx := context.Background()
-
-	require.NoError(t, store.Save(ctx, &SessionSnapshot{
-		SessionID:               "sess-notfound",
-		SupplierOperatorAddress: "pokt1test",
-		ServiceID:               "svc-a",
-		ApplicationAddress:      "pokt1app",
-		SessionStartHeight:      100,
-		SessionEndHeight:        110,
-		State:                   SessionStateClaimed,
-	}))
-
-	stub := &stubProofQueryClient{
-		getClaimFn: func(ctx context.Context, supplier, sessionID string) (pocktclient.Claim, error) {
-			return nil, status.Error(codes.NotFound, "claim not found")
-		},
-	}
-
-	lc := &LifecycleCallback{
-		logger:             logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		config:             DefaultLifecycleCallbackConfig(),
-		sessionCoordinator: coord,
-		proofQueryClient:   stub,
-	}
-
-	snapshot := &SessionSnapshot{
-		SessionID:               "sess-notfound",
-		SupplierOperatorAddress: "pokt1test",
-		ServiceID:               "svc-a",
-	}
-
-	skipped := runGuard(ctx, lc, snapshot)
-	require.True(t, skipped, "NotFound must cause the guard to skip the session")
-	require.Equal(t, 1, stub.calls)
-
-	got, err := store.Get(ctx, "sess-notfound")
-	require.NoError(t, err)
-	assert.Equal(t, SessionStateClaimMissing, got.State)
+	return err != nil && isClaimNotFoundError(err)
 }
 
 func TestPreProofGuard_Found_Proceeds(t *testing.T) {
@@ -382,4 +335,170 @@ func TestPreProofGuard_APendingClaimGetsItsProof(t *testing.T) {
 	signed, result := judgedProofCycle(t, prooftypes.ClaimProofStatus_PENDING_VALIDATION)
 	require.Equal(t, 1, signed, "control: a claim waiting for its proof gets it")
 	require.True(t, result.IsSettled("session-judged"))
+}
+
+// A claim the chain does not hold at proof time ends the session: it is counted
+// once in sessions_failed_total, and the money its claim put in `claimed` moves
+// to `lost`, so claimed = proved + lost + unresolved still closes. A second call
+// counts nothing.
+func TestOnClaimMissing_CountsTheSessionOnceAndItsMoneyAsLost(t *testing.T) {
+	coord, store, _ := setupTestCoordinator(t)
+	coord.SetPricer(perMillionPricer{})
+	ctx := context.Background()
+	const service = "svc-claim-missing-lost"
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID: "sess-missing-lost", SupplierOperatorAddress: "pokt1test", ServiceID: service,
+		SessionStartHeight: 100, SessionEndHeight: 110, State: SessionStateClaimed, ClaimTxHash: "deadbeef",
+		RelayCount: 3, TotalComputeUnits: 3_000_000,
+	}))
+	saved, err := store.Get(ctx, "sess-missing-lost")
+	require.NoError(t, err)
+	require.Equal(t, int64(3), saved.RelayCount, "premise: the session carries its weight")
+	before := readLedger("pokt1test", service, "claim_missing", "")
+	relaysBefore := testutil.ToFloat64(relaysLostTotal.WithLabelValues("pokt1test", service, "claim_missing"))
+
+	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-lost"))
+	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-lost"))
+
+	after := readLedger("pokt1test", service, "claim_missing", "")
+	require.Equal(t, before.sessions+1, after.sessions, "one failed session, once")
+	require.InDelta(t, before.lost+3, after.lost, 1e-9, "the claimed money is lost")
+	require.Equal(t, before.forgone, after.forgone, "nothing forgone: the claim was in the book")
+	require.Equal(t, relaysBefore+3, testutil.ToFloat64(relaysLostTotal.WithLabelValues("pokt1test", service, "claim_missing")))
+}
+
+// A session that never held a claim never put money in `claimed`: its money
+// is forgone, not lost.
+func TestOnClaimMissing_ASessionThatNeverHeldAClaimIsForgone(t *testing.T) {
+	coord, store, _ := setupTestCoordinator(t)
+	coord.SetPricer(perMillionPricer{})
+	ctx := context.Background()
+	const service = "svc-claim-missing-forgone"
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID: "sess-missing-forgone", SupplierOperatorAddress: "pokt1test", ServiceID: service,
+		SessionStartHeight: 100, SessionEndHeight: 110, State: SessionStateActive,
+		RelayCount: 2, TotalComputeUnits: 2_000_000,
+	}))
+	before := readLedger("pokt1test", service, "claim_missing", "")
+
+	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-forgone"))
+
+	after := readLedger("pokt1test", service, "claim_missing", "")
+	require.Equal(t, before.sessions+1, after.sessions)
+	require.InDelta(t, before.forgone+2, after.forgone, 1e-9)
+	require.Equal(t, before.lost, after.lost)
+}
+
+// A session another miner settled is not marked, and not counted.
+func TestOnClaimMissing_ASettledSessionIsNotCounted(t *testing.T) {
+	coord, store, _ := setupTestCoordinator(t)
+	ctx := context.Background()
+	const service = "svc-claim-missing-settled"
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID: "sess-missing-settled", SupplierOperatorAddress: "pokt1test", ServiceID: service,
+		SessionStartHeight: 100, SessionEndHeight: 110, State: SessionStateProved, RelayCount: 1, TotalComputeUnits: 1_000_000,
+	}))
+	before := readLedger("pokt1test", service, "claim_missing", "")
+	require.NoError(t, coord.OnClaimMissing(ctx, "sess-missing-settled"))
+	require.Equal(t, before, readLedger("pokt1test", service, "claim_missing", ""))
+}
+
+// reinstatedProbe reads what a reinstatement reversed.
+func reinstatedProbe(supplier, service, from string) (sessions, upokt float64) {
+	return testutil.ToFloat64(sessionsReinstatedTotal.WithLabelValues(supplier, service, "claim_missing")),
+		testutil.ToFloat64(upoktReinstatedTotal.WithLabelValues(supplier, service, "claim_missing", from))
+}
+
+// claimMissingStores runs a case on both stores the miner keeps sessions in.
+func claimMissingStores(t *testing.T, run func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string)) {
+	t.Run("redis", func(t *testing.T) {
+		coord, store, _ := setupTestCoordinator(t)
+		coord.SetPricer(perMillionPricer{})
+		run(t, coord, store, t.Name())
+	})
+	t.Run("pebble", func(t *testing.T) {
+		h := newPebbleCommitHarness(t, "pokt1test")
+		coord := NewSessionCoordinator(logging.NewLoggerFromConfig(logging.DefaultConfig()), h.stores.sessions,
+			SMSTRecoveryConfig{SupplierAddress: "pokt1test"})
+		coord.SetPricer(perMillionPricer{})
+		run(t, coord, h.stores.sessions, t.Name())
+	})
+}
+
+func seedForClaimMissing(t *testing.T, store SessionStore, id, service string, state SessionState) {
+	t.Helper()
+	created, err := store.CreateIfAbsent(context.Background(), &SessionSnapshot{
+		SessionID: id, SupplierOperatorAddress: "pokt1test", ServiceID: service,
+		SessionStartHeight: 100, SessionEndHeight: 110, State: state, ClaimTxHash: "deadbeef",
+		RelayCount: 3, TotalComputeUnits: 3_000_000,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+}
+
+// A claim_missing session the chain is later seen to hold the claim of comes
+// back to claimed: what claim_missing counted is reversed, once, so the net
+// failed sessions and the net lost money are back to where they were.
+func TestClaimMissing_AReinstatedSessionIsTakenBackOnce(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		seedForClaimMissing(t, store, "sess-back", service, SessionStateClaimed)
+		before := readLedger("pokt1test", service, "claim_missing", "")
+		backBefore, backLostBefore := reinstatedProbe("pokt1test", service, ClaimMissingLost)
+
+		require.NoError(t, coord.OnClaimMissing(ctx, "sess-back"))
+		marked, err := store.Get(ctx, "sess-back")
+		require.NoError(t, err)
+		require.Equal(t, ClaimMissingLost, marked.ClaimMissingVerdict, "the verdict is kept with the state")
+
+		root := make([]byte, SMSTRootLen)
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-back", root, "deadbeef"))
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-back", root, "deadbeef"))
+
+		after := readLedger("pokt1test", service, "claim_missing", "")
+		back, backLost := reinstatedProbe("pokt1test", service, ClaimMissingLost)
+		require.Equal(t, before.sessions+1, after.sessions, "claim_missing counted it once")
+		require.Equal(t, backBefore+1, back, "and the reinstatement took it back once")
+		require.InDelta(t, after.lost-before.lost, backLost-backLostBefore, 1e-9, "net lost money is back to zero")
+		require.InDelta(t, 3, backLost-backLostBefore, 1e-9)
+
+		got, err := store.Get(ctx, "sess-back")
+		require.NoError(t, err)
+		require.Equal(t, SessionStateClaimed, got.State)
+		require.Empty(t, got.ClaimMissingVerdict, "the flip clears the verdict: nothing is reversed twice")
+	})
+}
+
+// A session that never held a claim had its money counted forgone: that is
+// what its reinstatement takes back.
+func TestClaimMissing_AReinstatedForgoneSessionIsTakenBackFromForgone(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		seedForClaimMissing(t, store, "sess-back-forgone", service, SessionStateActive)
+		before := readLedger("pokt1test", service, "claim_missing", "")
+		_, backForgoneBefore := reinstatedProbe("pokt1test", service, ClaimMissingForgone)
+
+		require.NoError(t, coord.OnClaimMissing(ctx, "sess-back-forgone"))
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-back-forgone", make([]byte, SMSTRootLen), "deadbeef"))
+
+		after := readLedger("pokt1test", service, "claim_missing", "")
+		_, backForgone := reinstatedProbe("pokt1test", service, ClaimMissingForgone)
+		require.InDelta(t, after.forgone-before.forgone, backForgone-backForgoneBefore, 1e-9)
+		require.InDelta(t, 3, backForgone-backForgoneBefore, 1e-9)
+	})
+}
+
+// A reactivation of a session that was never counted claim_missing reverses
+// nothing.
+func TestClaimMissing_AReactivationOfAnotherStateReversesNothing(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		// claim_tx_error counted an attempt and no money: nothing to take back.
+		seedForClaimMissing(t, store, "sess-txerr", service, SessionStateClaimTxError)
+		back, _ := reinstatedProbe("pokt1test", service, ClaimMissingLost)
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-txerr", make([]byte, SMSTRootLen), "deadbeef"))
+		again, _ := reinstatedProbe("pokt1test", service, ClaimMissingLost)
+		require.Equal(t, back, again)
+		require.Zero(t, testutil.ToFloat64(sessionsReinstatedTotal.WithLabelValues("pokt1test", service, string(SessionStateClaimTxError))))
+	})
 }

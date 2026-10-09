@@ -2,12 +2,13 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/cosmos/gogoproto/proto"
 	"github.com/redis/go-redis/v9"
@@ -38,7 +39,7 @@ const (
 // if governance changes params mid-session. See shared_params_singleton.go for details.
 type proofParamsCache struct {
 	logger           logging.Logger
-	redisClient      *redisutil.Client
+	store            kv.Store
 	queryClient      ProofQueryClient
 	sharedClient     ProofSharedQueryClient
 	blockTimeSeconds int64
@@ -76,7 +77,7 @@ type ProofSharedQueryClient interface {
 // TTL is calculated as: num_blocks_per_session (from shared params) × blockTimeSeconds
 func NewProofParamsCache(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	queryClient ProofQueryClient,
 	sharedClient ProofSharedQueryClient,
 	blockTimeSeconds int64,
@@ -87,7 +88,7 @@ func NewProofParamsCache(
 
 	return &proofParamsCache{
 		logger:           logging.ForComponent(logger, logging.ComponentSharedParamCache),
-		redisClient:      redisClient,
+		store:            store,
 		queryClient:      queryClient,
 		sharedClient:     sharedClient,
 		blockTimeSeconds: blockTimeSeconds,
@@ -101,7 +102,7 @@ func (c *proofParamsCache) Start(ctx context.Context) error {
 	// Subscribe to invalidation events
 	if err := SubscribeToInvalidations(
 		c.ctx,
-		c.redisClient,
+		c.store,
 		c.logger,
 		proofParamsCacheType,
 		c.handleInvalidation,
@@ -147,7 +148,7 @@ func (c *proofParamsCache) Get(ctx context.Context, force ...bool) (*prooftypes.
 		}
 
 		// L2: Check Redis cache
-		data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsProofKey()).Bytes()
+		data, err := c.store.Get(ctx, c.store.KB().ParamsProofKey())
 		if err == nil {
 			params := &prooftypes.Params{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, params); err == nil {
@@ -216,7 +217,7 @@ func (c *proofParamsCache) Get(ctx context.Context, force ...bool) (*prooftypes.
 	// Publish invalidation event if force refresh (leader only)
 	if forceRefresh {
 		payload := "{}"
-		if err := PublishInvalidation(ctx, c.redisClient, c.logger, proofParamsCacheType, payload); err != nil {
+		if err := PublishInvalidation(ctx, c.store, c.logger, proofParamsCacheType, payload); err != nil {
 			c.logger.Warn().
 				Err(err).
 				Msg("failed to publish invalidation event after force refresh")
@@ -240,7 +241,7 @@ func (c *proofParamsCache) Set(ctx context.Context, params *prooftypes.Params, t
 		return fmt.Errorf("failed to marshal proof params: %w", err)
 	}
 
-	if err := c.redisClient.Set(ctx, c.redisClient.KB().ParamsProofKey(), data, ttl).Err(); err != nil {
+	if err := c.store.Set(ctx, c.store.KB().ParamsProofKey(), data, ttl); err != nil {
 		return fmt.Errorf("failed to set Redis cache: %w", err)
 	}
 
@@ -264,7 +265,7 @@ func (c *proofParamsCache) InvalidateAll(ctx context.Context) error {
 	c.localCache.Store(nil)
 
 	// Remove from L2 (Redis)
-	if err := c.redisClient.Del(ctx, c.redisClient.KB().ParamsProofKey()).Err(); err != nil {
+	if err := c.store.Del(ctx, c.store.KB().ParamsProofKey()); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to delete proof params from Redis")
@@ -272,7 +273,7 @@ func (c *proofParamsCache) InvalidateAll(ctx context.Context) error {
 
 	// Publish invalidation event to other instances
 	payload := "{}"
-	if err := PublishInvalidation(ctx, c.redisClient, c.logger, proofParamsCacheType, payload); err != nil {
+	if err := PublishInvalidation(ctx, c.store, c.logger, proofParamsCacheType, payload); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to publish invalidation event")
@@ -290,7 +291,7 @@ func (c *proofParamsCache) WarmupFromRedis(ctx context.Context) error {
 	c.logger.Info().Msg("warming up proof params cache from Redis")
 
 	// Load from Redis (L2) into local cache (L1)
-	data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsProofKey()).Bytes()
+	data, err := c.store.Get(ctx, c.store.KB().ParamsProofKey())
 	if err != nil {
 		// Key doesn't exist in Redis, skip warmup
 		c.logger.Debug().Msg("no proof params in Redis to warm up")
@@ -315,10 +316,10 @@ func (c *proofParamsCache) WarmupFromRedis(ctx context.Context) error {
 // queryChainWithLock queries the chain with distributed locking to prevent
 // duplicate queries from multiple instances.
 func (c *proofParamsCache) queryChainWithLock(ctx context.Context) (*prooftypes.Params, error) {
-	lockKey := c.redisClient.KB().ParamsProofLockKey()
+	lockKey := c.store.KB().ParamsProofLockKey()
 	// Try to acquire distributed lock
 	lockToken := newLockToken()
-	locked, err := c.redisClient.SetNX(ctx, lockKey, lockToken, 5*time.Second).Result()
+	locked, err := c.store.SetNX(ctx, lockKey, []byte(lockToken), 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -328,7 +329,7 @@ func (c *proofParamsCache) queryChainWithLock(ctx context.Context) (*prooftypes.
 	// and re-fire the duplicate chain query the lock exists to prevent
 	// (same fix as cache/keyed_query_lock.go).
 	if locked {
-		defer releaseCacheLock(ctx, c.redisClient, lockKey, lockToken)
+		defer releaseCacheLock(ctx, c.store, lockKey, lockToken)
 	}
 
 	if !locked {
@@ -337,7 +338,7 @@ func (c *proofParamsCache) queryChainWithLock(ctx context.Context) (*prooftypes.
 		time.Sleep(5 * time.Millisecond)
 
 		// Retry L2 after waiting
-		data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsProofKey()).Bytes()
+		data, err := c.store.Get(ctx, c.store.KB().ParamsProofKey())
 		if err == nil {
 			params := &prooftypes.Params{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, params); err == nil {
@@ -385,7 +386,7 @@ func (c *proofParamsCache) handleInvalidation(ctx context.Context, payload strin
 
 	// Eagerly reload from L2 (Redis) to avoid cold cache on next relay
 	// This eliminates the latency penalty on the first relay after invalidation
-	data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsProofKey()).Bytes()
+	data, err := c.store.Get(ctx, c.store.KB().ParamsProofKey())
 	if err == nil {
 		params := &prooftypes.Params{}
 		if err := proto.Unmarshal(data, params); err == nil {
@@ -398,7 +399,7 @@ func (c *proofParamsCache) handleInvalidation(ctx context.Context, payload strin
 				Err(err).
 				Msg("failed to unmarshal proof params during eager reload")
 		}
-	} else if err != redis.Nil {
+	} else if !errors.Is(err, kv.ErrNotFound) {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to eagerly reload proof params from L2")

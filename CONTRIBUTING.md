@@ -10,17 +10,24 @@ replica, so every millisecond on the hot path counts; the miner turns served
 relays into claims and proofs that get the supplier paid.
 
 - **Language**: Go, the version in `go.mod` (CI builds with the same).
-- **State**: all session state is in Redis. No component keeps it on local disk.
+- **State**: all session state is in the store: Redis in high-availability
+  mode, the embedded Pebble store in standalone mode. Nothing else keeps it.
 - **Two processes, one binary**: the relayer is a stateless multi-transport
   proxy that validates relays, signs responses and publishes them to Redis
   Streams, routing to backends by the `Rpc-Type` header (1=gRPC, 2=WebSocket,
   3=JSON_RPC, 4=REST, 5=CometBFT). The miner consumes those streams, builds SMST
   trees in Redis and submits claims and proofs. Relayers receive block events
   only through Redis pub/sub, published by the miner.
+- **Two modes**: that pair over Redis is the **high-availability mode**. The
+  **standalone mode** (`pocket-relay-miner standalone`, `standalone/`) runs
+  both in one process with no Redis: the same state machines over an embedded
+  Pebble store (`storage/`) and an in-process queue (`transport/pebblequeue/`),
+  selected by the seams in `cmd/serve_hooks.go`. A change to shared code
+  keeps both modes working; [docs/STANDALONE.md](docs/STANDALONE.md) describes the mode.
 
 | Package | What it holds |
 |---|---|
-| `main.go`, `cmd/` | the CLI: `relayer`, `miner`, `redis` (debug subcommands in `cmd/redis/`), `relay` (the load-test client in `cmd/relay/`), `version` |
+| `main.go`, `cmd/` | the CLI: `relayer`, `miner`, `standalone`, `redis` (debug subcommands in `cmd/redis/`), `relay` (the load-test client in `cmd/relay/`), `version` |
 | `relayer/` | the relayer: proxy, relay validation, metering, signing, WebSocket bridge, health checks |
 | `miner/` | the miner: stream consumption, SMST in Redis, session lifecycle, claims and proofs, supplier management |
 | `cache/` | L1 local (`xsync`), L2 Redis and L3 chain caches, with pub/sub invalidation |
@@ -30,7 +37,9 @@ relays into claims and proofs that get the supplier paid.
 | `tx/` | the transaction client: claims and proofs broadcast, permits, inclusion reads |
 | `query/` | on-chain query clients |
 | `client/` | the block subscriber the miner requires, and `relay_client/`, which builds and signs relays for the CLI |
-| `transport/` | the mined-relay types and codec; `redis/` holds streams, the publisher, the consumer, store health and the KeyBuilder (`namespace.go`); `grpcconn/` builds every gRPC connection to a full node |
+| `transport/` | the mined-relay types and codec; `redis/` holds streams, the publisher, the consumer, store health and the KeyBuilder (`namespace.go`); `pebblequeue/` is standalone mode's in-process queue on the embedded store; `grpcconn/` builds every gRPC connection to a full node |
+| `storage/` | standalone mode's store: `kv/` (the key-value interface, over Redis and over Pebble) and `pebblestore/` (the embedded store and its periodic WAL sync) |
+| `standalone/` | standalone mode's config: one file with the shared sections, `relayer:` and `miner:` |
 | `pool/` | backend endpoint pools with selection and a circuit breaker |
 | `config/` | configuration shared by both binaries, and the retired-key table |
 | `observability/` | the metrics and pprof server and shared registries |
@@ -214,6 +223,12 @@ pocket-relay-miner redis submissions --supplier pokt1abc... [--failed-only]
 pocket-relay-miner redis flush --pattern "ha:test:*"   # destructive, asks first
 ```
 
+In standalone mode nothing can open the Pebble store beside the running
+process, so the same reads go through its read-only inspect server
+(`inspect.enabled`, loopback only): `pocket-relay-miner standalone inspect
+sessions|supplier|streams|smst|dedup|meter|submissions`
+([docs/STANDALONE.md](docs/STANDALONE.md#inspecting-the-store)).
+
 ## Tests
 
 Every change passes `make fmt lint test` before it is done. A feature that spans
@@ -257,7 +272,7 @@ same implementation. They report and never fix.
 
 | level | command | covers |
 |---|---|---|
-| 1 | `make gate LEVEL=1` | gofmt, build, vet, golangci-lint, tracked files, Spanish, unreachable functions -- both Go modules |
+| 1 | `make gate LEVEL=1` | gofmt, build, vet, golangci-lint, tracked files, Spanish, unreachable functions -- the three Go modules -- and the Tiltfile renders of both modes |
 | 2 | `make gate LEVEL=2` (the default of `make gate`) | level 1 plus the test suite (including `internal/conventions`), the race detector and the coverage run |
 | 3 | `make gate LEVEL=3` | level 2 plus live validation on Tilt, claim and proof verified on chain |
 

@@ -1,6 +1,17 @@
 ## Docker Compose example
 
-Redis, 1 relayer and 1 miner, pointed at the beta testnet
+2 compose files, 1 per mode, both pointed at the beta testnet:
+
+| File | Mode | Runs | Runbook |
+|---|---|---|---|
+| `docker-compose.yaml` | high availability | Redis, 1 relayer, 1 miner | [DOCKER_COMPOSE.md](../../docs/deploy/DOCKER_COMPOSE.md) |
+| `docker-compose.standalone.yaml` | standalone | 1 process, its embedded store on a volume, no Redis | [DOCKER_COMPOSE_STANDALONE.md](../../docs/deploy/DOCKER_COMPOSE_STANDALONE.md) |
+
+The rest of this page describes the high-availability file; the standalone
+file is described in its header and its runbook. It uses
+`config/standalone.yaml` and the same `config/supplier-keys*.yaml`.
+
+High-availability mode: Redis, 1 relayer and 1 miner, pointed at the beta testnet
 (`pocket-lego-testnet`) through the public Sauron endpoints. No chain runs
 here: the node is remote. For a local chain to develop on, use Tilt
 ([docs/testing/TILT.md](../../docs/testing/TILT.md)).

@@ -1,0 +1,77 @@
+# Pocket RelayMiner -- STANDALONE MODE: the relayer and the miner in one
+# process, their state in an embedded store, and no Redis.
+#
+# For HIGH-AVAILABILITY MODE (replicas and failover on a shared Redis), run the
+# relayer and miner subcommands with config.relayer.example.yaml and
+# config.miner.example.yaml instead. A standalone config has no redis section.
+#
+#   pocket-relay-miner standalone validate --config config.standalone.yaml
+#   pocket-relay-miner standalone --config config.standalone.yaml
+#
+# The sections at the top level are written once and given to both sides.
+# relayer: and miner: hold the keys only that side reads: the same keys, with
+# the same meaning and defaults, as in config.relayer.example.yaml and
+# config.miner.example.yaml. Writing a top-level section again inside a side is
+# an error: one value per setting, in one place.
+
+pocket_node:
+  query_node_rpc_url: "http://localhost:26657"
+  query_node_grpc_url: "localhost:9090"
+  chain_id: "pocket"
+  grpc_insecure: true
+  query_timeout_seconds: 5
+
+keys:
+  hot_reload_enabled: true
+  keys_file: "/keys/supplier-keys.yaml"
+
+logging:
+  level: "info"
+  format: "json"
+
+# One observability server for the process: both sides' metrics on one port.
+metrics:
+  enabled: true
+  addr: ":9092"
+
+pprof:
+  enabled: false
+  addr: "127.0.0.1:6060"
+
+# The embedded store: everything the process keeps lives here (the relay
+# queue, the sessions and their dedup marks, the relay meter's counters, the
+# caches, the session trees, the claim and proof tracking). A write reaches the
+# OS before it returns (a crash of the process loses nothing); the disk is
+# synced every sync_interval, which bounds what an OS crash or a power loss can
+# lose. New work stops when the disk has less than 1 GiB free.
+storage:
+  path: "/data/pocket-relay-miner"
+  sync_interval: "1s"
+
+# A read-only server for `pocket-relay-miner standalone inspect`: no other
+# process can open the store while this one runs. Loopback only.
+inspect:
+  enabled: false
+  addr: "127.0.0.1:9094"
+
+relayer:
+  listen_addr: "0.0.0.0:8080"
+  health_check:
+    enabled: true
+    addr: "0.0.0.0:8081"
+  services:
+    my-service:
+      validation_mode: eager
+      default_backend: jsonrpc
+      backends:
+        jsonrpc:
+          url: "http://backend:8545"
+  # How often relays served but not yet mined write their budget charges.
+  redis:
+    batch_publish_interval_ms: 1000
+
+miner:
+  block_time_seconds: 30
+  # How long a relay handed back waits before it is delivered again.
+  redis:
+    claim_idle_timeout_ms: 60000

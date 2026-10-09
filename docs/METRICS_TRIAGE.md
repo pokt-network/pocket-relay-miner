@@ -14,11 +14,22 @@ Two rules before any series:
    `upokt_claimed_total` = 6742.81 — 45% of the value "lost", none of it real.
 
 All counters are per process and reset on restart, and a restart is normal (HA
-failover, rollout, OOM). So a run total is
-`sum(last_over_time(<metric>[<run length>]))` evaluated at the END of the run,
-never `increase()`: a counter born inside the window is invisible to `increase()`.
-Keep the window inside ONE run — a window that reaches into the previous run adds
-its numbers silently.
+failover, rollout, OOM). So a run total is, per series, its last value minus its
+last value before the window, or its last value when it was born or restarted
+inside the window, summed and evaluated at the END of the run:
+
+```
+sum(((last_over_time(m[W]) - last_over_time(m[W] offset W)) >= 0 and resets(m[W]) == 0)
+    or last_over_time(m[W]))
+```
+
+Never `increase()`: a counter born inside the window is invisible to it. A plain
+`last_over_time` adds a pod's whole lifetime, work done before the window
+included. The dashboards' `T()` (`scripts/dashboards/generate.py`) and
+`scripts/observability/triage.sh` use this expression, and
+`scripts/dashboards/test_totals.py` evaluates both on promtool. Keep the window
+inside ONE run: one that reaches into the previous run adds that run's work
+inside the window.
 
 ---
 
@@ -38,7 +49,11 @@ This is the money question, and only one pair of series answers it.
 `*_inclusion_outcome` is the only one written **after asking the chain** (the
 inclusion reconciler polls `GetClaim`), which is why it is the one that
 discriminates. Its other outcomes (`on_chain_missing`, `on_chain_rejected`,
-`poll_error`) are the real alarm.
+`poll_error`) are the real alarm. A claim's `poll_error` is recorded only after
+the chain could not be asked from the claim window's close until two blocks
+before the proof window's close: until then the miner keeps asking, since a
+claim found then still gets its proof. A proof's `poll_error` is recorded at
+its window's close, because the chain removes the claim in the next block.
 
 **Two different resend paths, and they are easy to confuse — this table confused
 them, twice, on 2026-09-18.** The FIRST is the restart resubmission: a miner that
@@ -103,6 +118,20 @@ curl -s "localhost:26657/block_results?height=$H" | jq '
   deferral is doing its job. Both rising together means the window ran out.
   It counts **attempts, not sessions** — one session deferred for four blocks
   increments it four times — so it is not a denominator for anything.
+- **`proof_skipped_total{reason="claim_not_found_yet"}`** is the same kind of
+  deferral: the node answered that the session's claim does not exist, which a
+  node behind the chain also answers. The session goes back to `claimed` and the
+  chain is asked again next block; only a NotFound on the last pass of the proof
+  window books it `claim_missing` (`reason="claim_missing_on_chain"`). It
+  counts attempts, not sessions.
+- **`sessions_failed_total{reason="claim_missing"}`** and
+  **`{reason="claim_window_closed"}`**: a session whose claim the chain did not
+  hold at proof time, or whose claim window was marked closed. If the chain is
+  later seen to hold the claim after all, the session comes back to `claimed`
+  and is taken back in `sessions_reinstated_total{reason}`, its money in
+  `upokt_reinstated_total{reason,from}` (`from` the book it had been counted
+  in): the net is the failed count minus the reinstated one. Counters never go
+  down, so every reader subtracts.
 - **`sessions_failed_total{reason="proof_window_closed"}`**: includes sessions
   whose proof was already on chain before the process restarted.
 - **`proofs_submitted_total`** does not count a proof that landed on a rebroadcast,
@@ -124,16 +153,27 @@ Two things about HOW to read it, both measured on 2026-09-18:
 - **It is a run-END reading.** Mid-run `claimed` is legitimately larger than the sum
   of the doors, because a session inside its proof window has been claimed and has
   not reached any door yet. Measured during a gate run: 304 claims on chain,
-  `claimed` = 384000 uPOKT, every door still 0. That is not the defect this identity
+  `claimed` above 0, every door still 0. That is not the defect this identity
   hunts.
-- **Read it in uPOKT, not POKT.** The series are recorded as POKT
-  (`Add(cu / 1e6)` in `miner/metrics.go`), so on a small run every term falls below
-  1 and an integer reading turns the whole identity into `0 == 0 + 0 + 0` — which
-  "closes" and means nothing. `triage.sh` scales by 1e6 for exactly this reason.
+- **The series are uPOKT, as the chain pays them.** Each session is priced with
+  the chain's own formula (`Claim.GetClaimeduPOKT`) under the shared params and
+  relay-mining difficulty at its start height, so `upokt_claimed_total` matches
+  what settles: on the localnet, 100 uPOKT per compute unit. Every term adds whole
+  uPOKT, so the identity closes exactly or names a session counted twice.
+- **A process that dies loses what it counted since its last scrape.** Counters
+  live in the process; an increment made in the seconds before a crash never
+  reaches Prometheus. Every book is written exactly once (claimed by the flip
+  into claimed, whichever path flips it), so a crash can leave an identity open,
+  never inflate it. What was paid is the chain's: `triage.sh` and the live gate
+  compare against its settlement, not against these series.
+- **`unpriced_compute_units_total` must be 0.** A session whose price could not be
+  read (the node did not answer for its start height) adds its compute units
+  there, under the book it is missing from, and nothing to the uPOKT series: no
+  guessed amount, and an identity that does not close says so.
 
 | Identity | Series |
 |---|---|
-| Nothing vanished and nothing was counted twice | `upokt_claimed_total` == `upokt_proved_total` + `upokt_lost_total` + (`upokt_unresolved_opened_total` − `upokt_unresolved_resolved_total`) |
+| Nothing vanished and nothing was counted twice | `upokt_claimed_total` == `upokt_proved_total` + (`upokt_lost_total` − `upokt_reinstated_total{from="lost"}`) + (`upokt_unresolved_opened_total` − `upokt_unresolved_resolved_total`) |
 
 `unresolved` is a session that left through a retryable submission failure and has
 not been answered yet. It is a real series rather than an absence on purpose: a

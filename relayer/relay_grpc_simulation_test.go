@@ -18,6 +18,7 @@ import (
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
@@ -25,6 +26,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/rings"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // newSimGRPCService wires a RelayGRPCService with an ENABLED simulation verifier
@@ -58,7 +60,7 @@ func newSimGRPCService(t *testing.T, backendURL string) (*RelayGRPCService, *rec
 
 	rc, _ := newTestRedis(t)
 
-	simVerifier, err := NewSimulationVerifier(logger, &simCfg, rc, signer, map[string]struct{}{serviceID: {}}, clock)
+	simVerifier, err := NewSimulationVerifier(logger, &simCfg, kv.NewRedis(zerolog.Nop(), rc), signer, map[string]struct{}{serviceID: {}}, clock)
 	require.NoError(t, err)
 
 	endpoint, err := pool.NewBackendEndpoint("backend", backendURL)

@@ -2,6 +2,10 @@
 
 Redis is the central state store for distributed coordination. **It's NOT just a cache** - it stores critical revenue-generating data.
 
+This page is about the **high-availability mode** (`relayer` and `miner`).
+The **standalone mode** (`standalone`) uses no Redis: its state is in an
+embedded store on local disk, described in [STANDALONE.md](STANDALONE.md).
+
 **Topology**: 1 Redis shared by the relayers and miners of a deployment. v0.1.0
 was tested on 1 relayer + 1 miner and on 2 relayers + 2 miners (the latter at
 lower load), always against a standalone Redis; the load tests and the capacity
@@ -236,12 +240,12 @@ carry, such as active defragmentation or a different `hz`, were not measured.
 
 ---
 
-## Standalone, Sentinel and Cluster
+## Single-node, Sentinel and Cluster
 
 The URL scheme selects the client: `redis://` or `rediss://` for a single
 Redis, `redis-sentinel://` for Sentinel, `redis-cluster://` for Cluster (see the
 `redis.url` comment in the example configs). v0.1.0 was tested and measured
-only against a standalone Redis; Sentinel and Cluster are accepted by the
+only against a single-node Redis; Sentinel and Cluster are accepted by the
 client but not verified. The keys carry no `{...}` hash tags except the
 miner's rebroadcast keys (`ha:miner:rebroadcast:{claim}:...`).
 

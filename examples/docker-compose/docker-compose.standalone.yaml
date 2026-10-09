@@ -1,0 +1,111 @@
+# Pocket RelayMiner with Docker Compose in STANDALONE MODE: one process runs
+# the relayer and the miner, their state in an embedded store on a volume, and
+# no Redis. Pointed at the beta testnet (chain id pocket-lego-testnet) through
+# the public Sauron endpoints. No chain runs here: the node is remote.
+#
+#   docker compose -p prm-standalone -f docker-compose.standalone.yaml up -d --build   # start
+#   docker compose -p prm-standalone -f docker-compose.standalone.yaml ps              # standalone healthy
+#   docker compose -p prm-standalone -f docker-compose.standalone.yaml down -v         # stop and delete the store
+#
+# The runbook is docs/deploy/DOCKER_COMPOSE_STANDALONE.md. The
+# high-availability mode (Redis, a relayer and a miner) is docker-compose.yaml
+# next to this file, with docs/deploy/DOCKER_COMPOSE.md.
+#
+# As cloned, the stack starts with config/supplier-keys.yaml: 1 PUBLIC,
+# unstaked key that serves nothing and only proves the store, the node
+# connection and both sides. Never fund or stake it. Before serving relays:
+#   1. Put YOUR keys in config/supplier-keys.local.yaml (gitignored) and point
+#      the keys mount below at it.
+#   2. config/standalone.yaml, under relayer.services: one entry per service
+#      your suppliers are staked for, each with the URL of your backend.
+#   3. Validate the config.
+#
+# Mainnet instead of beta: switch every value marked "Mainnet:" in
+# config/standalone.yaml.
+
+services:
+  standalone:
+    # Standalone mode is not in v0.1.2, the release the high-availability
+    # example pins: the image is built from this checkout, and named after it
+    # rather than after a release. Once a release ships standalone, pin that
+    # release's image here instead and drop build:.
+    build:
+      context: ../..
+    image: pocket-relay-miner:standalone-local
+    command: ["standalone", "--config", "/config/standalone.yaml"]
+    volumes:
+      - ./config/standalone.yaml:/config/standalone.yaml:ro
+      # The public, unstaked key. Switch to ./config/supplier-keys.local.yaml
+      # for your own keys: mode 0600, owned by uid 1000 (the image's uid).
+      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
+      # The embedded store: everything the process keeps between restarts.
+      - standalone-data:/home/pocket/.pocket-relay-miner/data
+    ports:
+      # Relay traffic. Bound to loopback so nothing outside this host reaches
+      # it by accident. For gateways, bind the address they reach, for example
+      # "0.0.0.0:8180:8080" or "<public-ip>:8180:8080", behind your TLS proxy.
+      - "127.0.0.1:${RELAYER_PORT:-8180}:8080"
+    # Sizing: the sum of the high-availability example's miner (4g) and
+    # relayer (2g). Not measured for standalone mode: watch memory as traffic
+    # grows (docs/deploy/TROUBLESHOOTING.md, "Memory and CPU").
+    mem_limit: 6g
+    cpus: 2
+    environment:
+      # Go runtime soft limit ~10% below mem_limit, so GC tightens before an OOM kill.
+      GOMEMLIMIT: 5400MiB
+      # Equal to cpus.
+      GOMAXPROCS: "2"
+    healthcheck:
+      # /ready on the relayer's health port answers 200 once the relayer can
+      # serve, which needs the miner side up and publishing.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    # Give the relayer's and the miner's drains their time on stop.
+    stop_grace_period: 60s
+    # Exits if it cannot read the chain at startup.
+    restart: unless-stopped
+
+  # --- Observability (optional) ------------------------------------------------
+  # Prometheus and Grafana with the 8 dashboards in examples/observability/.
+  # They belong to the "observability" profile, so a plain `up` does not start
+  # them; add `--profile observability` to start them too. Both ports are bound
+  # to loopback: use an SSH tunnel to reach them from another machine. There is
+  # no Redis exporter: standalone mode has no Redis.
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.5.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    volumes:
+      - ../observability/prometheus/prometheus.standalone.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      # Prometheus has no authentication.
+      - "127.0.0.1:${PROMETHEUS_PORT:-9091}:9090"
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:12.1.1
+    environment:
+      # Change the password on first login, or set it here from a secret.
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/01-money.json
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  standalone-data:
+  prometheus-data:
+  grafana-data:

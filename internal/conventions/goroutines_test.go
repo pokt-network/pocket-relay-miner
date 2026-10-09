@@ -73,7 +73,7 @@ var bareGoroutineAllowlist = map[string]int{
 	"cache/supplier_cache.go: WarmupFromRedis":                1,
 	"cache/supplier_params.go: Start":                         1,
 	"client/block_subscriber.go: Subscribe":                   1,
-	"cmd/cmd_relayer.go: runHARelayer":                        1,
+	"cmd/cmd_relayer.go: serveRelayer":                        1,
 	"cmd/cmd_relayer.go: startHealthServer":                   2,
 	"cmd/relay/common.go: runLoadTest":                        1,
 	"keys/manager.go: Start":                                  1,

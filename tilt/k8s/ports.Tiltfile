@@ -18,6 +18,10 @@ PORT_REGISTRY = {
     # Observability
     "grafana": 3000,
     "prometheus": 9091,
+
+    # Standalone mode: the inspect server, loopback in the pod, reached
+    # through Tilt's port forward
+    "standalone_inspect": 9094,
 }
 
 def get_port(service_name):

@@ -5,10 +5,12 @@ package miner
 import (
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // TestLeaderControllerSharesTheWorkersSupplierCache pins that a leader miner
@@ -40,7 +42,7 @@ import (
 func TestLeaderControllerSharesTheWorkersSupplierCache(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	redisClient, _ := newTestRedis(t)
-	workerCache := cache.NewSupplierCache(logger, redisClient, cache.SupplierCacheConfig{})
+	workerCache := cache.NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), redisClient), cache.SupplierCacheConfig{})
 
 	c := &LeaderController{
 		logger: logger,
@@ -58,7 +60,7 @@ func TestLeaderControllerSharesTheWorkersSupplierCache(t *testing.T) {
 		c.supplierCache = shared
 		c.ownsSupplierCache = false
 	} else {
-		c.supplierCache = cache.NewSupplierCache(logger, redisClient, cache.SupplierCacheConfig{})
+		c.supplierCache = cache.NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), redisClient), cache.SupplierCacheConfig{})
 		c.ownsSupplierCache = true
 	}
 
@@ -97,7 +99,7 @@ func TestLeaderControllerBuildsItsOwnSupplierCacheWhenNoneIsShared(t *testing.T)
 		c.supplierCache = shared
 		c.ownsSupplierCache = false
 	} else {
-		c.supplierCache = cache.NewSupplierCache(logger, redisClient, cache.SupplierCacheConfig{})
+		c.supplierCache = cache.NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), redisClient), cache.SupplierCacheConfig{})
 		c.ownsSupplierCache = true
 	}
 

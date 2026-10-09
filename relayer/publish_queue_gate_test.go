@@ -12,12 +12,14 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -49,7 +51,7 @@ func TestHTTPQueueFullRefusesBeforeTheEagerMeterCharges(t *testing.T) {
 	app.stakeUpokt.Store(1_000_000)
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		meterRedis,
+		kv.NewRedis(zerolog.Nop(), meterRedis),
 		app,
 		nil,
 		&fakeSessionClient{numSuppliers: 1},

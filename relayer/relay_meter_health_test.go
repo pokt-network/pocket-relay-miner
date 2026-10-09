@@ -7,10 +7,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -29,7 +31,7 @@ func newHealthTestMeter(t *testing.T, ctx context.Context) (*RelayMeter, string,
 
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		app,
 		nil,
 		&fakeSessionClient{numSuppliers: 1},

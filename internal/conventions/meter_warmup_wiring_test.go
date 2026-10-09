@@ -8,7 +8,7 @@ import (
 
 // The relay meter warmup runs only when cache warmup is enabled, warms the pairs
 // of the suppliers this replica signs for, and runs after the meter starts and
-// before the proxy serves. runHARelayer builds a whole process and has no test,
+// before the proxy serves. serveRelayer builds a whole process and has no test,
 // so the wiring is frozen by reading it.
 
 // meterWarmupViolations reports what is wrong with the meter warmup wiring in f.

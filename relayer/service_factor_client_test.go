@@ -10,9 +10,11 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // The service factor is read once per relay, on the hot path of both validation
@@ -87,7 +89,7 @@ func newServiceFactorTestClient(t *testing.T) (*ServiceFactorClient, *getKeyCoun
 	counter := newGetKeyCounter()
 	redisClient.AddHook(counter)
 
-	return NewServiceFactorClient(testLogger(), redisClient), counter
+	return NewServiceFactorClient(testLogger(), kv.NewRedis(zerolog.Nop(), redisClient)), counter
 }
 
 // writeManifest publishes a manifest the way the miner's registry does.
@@ -96,9 +98,9 @@ func writeManifest(t *testing.T, client *ServiceFactorClient, manifest ServiceFa
 
 	bz, err := json.Marshal(manifest)
 	require.NoError(t, err)
-	require.NoError(t, client.redisClient.Set(
+	require.NoError(t, client.store.(*kv.Redis).Client().Set(
 		context.Background(),
-		client.redisClient.KB().ServiceFactorManifestKey(),
+		client.store.(*kv.Redis).Client().KB().ServiceFactorManifestKey(),
 		bz,
 		0,
 	).Err())
@@ -244,7 +246,7 @@ func TestLoadManifest_ATransientRedisErrorKeepsTheLastGoodManifest(t *testing.T)
 	require.NoError(t, client.loadManifest(ctx))
 	require.True(t, client.Priced(), "premise: a good manifest is held")
 
-	failRedis := testredis.NewFailSwitch(client.redisClient)
+	failRedis := testredis.NewFailSwitch(client.store.(*kv.Redis).Client())
 	failRedis.Fail("redis is unreachable")
 
 	require.Error(t, client.loadManifest(ctx), "premise: the reload really failed")
@@ -267,8 +269,8 @@ func TestLoadManifest_AnUnparseableManifestKeepsTheLastGoodOne(t *testing.T) {
 	writeManifest(t, client, ServiceFactorManifest{HasDefault: true, DefaultFactor: 0.01})
 	require.NoError(t, client.loadManifest(ctx))
 
-	require.NoError(t, client.redisClient.Set(
-		ctx, client.redisClient.KB().ServiceFactorManifestKey(), "not json", 0,
+	require.NoError(t, client.store.(*kv.Redis).Client().Set(
+		ctx, client.store.(*kv.Redis).Client().KB().ServiceFactorManifestKey(), "not json", 0,
 	).Err())
 
 	require.Error(t, client.loadManifest(ctx))

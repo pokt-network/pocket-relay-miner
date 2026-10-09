@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/cosmos/gogoproto/proto"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,8 +39,8 @@ func TestSharedParamsSingleton_ContendedLoserKeepsWinnersLock(t *testing.T) {
 	require.NoError(t, client.Set(ctx, client.KB().ParamsSharedCacheKey(), data, 0).Err())
 
 	c := &sharedParamsCache{
-		logger:      testLogger(),
-		redisClient: client,
+		logger: testLogger(),
+		store:  kv.NewRedis(zerolog.Nop(), client),
 	}
 
 	got, err := c.queryChainWithLock(ctx)
@@ -64,8 +66,8 @@ func TestProofParamsSingleton_ContendedLoserKeepsWinnersLock(t *testing.T) {
 	require.NoError(t, client.Set(ctx, client.KB().ParamsProofKey(), data, 0).Err())
 
 	c := &proofParamsCache{
-		logger:      testLogger(),
-		redisClient: client,
+		logger: testLogger(),
+		store:  kv.NewRedis(zerolog.Nop(), client),
 	}
 
 	got, err := c.queryChainWithLock(ctx)

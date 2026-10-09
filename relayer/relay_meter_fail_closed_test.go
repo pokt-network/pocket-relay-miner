@@ -8,9 +8,11 @@ import (
 	"time"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // newFailClosedMeter wires a meter whose only interesting property is which of
@@ -24,7 +26,7 @@ func newFailClosedMeter(t *testing.T, appAddrTheClientKnows string) (*RelayMeter
 
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		app,
 		nil,
 		&fakeSessionClient{numSuppliers: 1},
@@ -125,7 +127,7 @@ func TestACorruptMeterMetaRefusesInsteadOfRecursing(t *testing.T) {
 	require.True(t, allowed, "precondition: a healthy meter admits the relay")
 
 	// A meta blob that exists and does not parse.
-	require.NoError(t, meter.redisClient.Set(
+	require.NoError(t, meter.store.(*kv.Redis).Client().Set(
 		ctx, meter.metaKey(sessionID, supplier), []byte("{not json"), time.Minute).Err())
 
 	allowed, err = meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, "svc", supplier, 100, 91, 95)

@@ -9,9 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // lockReleaseTimeout bounds the release itself. It is short: the lock already
@@ -19,23 +17,18 @@ import (
 // than left holding a connection.
 const lockReleaseTimeout = time.Second
 
-// releaseIfOwner deletes the key only when it still holds the exact token the
-// caller wrote. SetNX plus DEL is not a lock: between acquiring and releasing,
-// the TTL can expire and a DIFFERENT instance can acquire, and an unconditional
-// DEL then frees a lock somebody else is holding -- letting a third instance in
-// to fire the duplicate chain query the lock exists to prevent.
+// The release deletes the key only when it still holds the exact token the
+// caller wrote (kv.Store.CompareAndDelete). SetNX plus DEL is not a lock:
+// between acquiring and releasing, the TTL can expire and a DIFFERENT instance
+// can acquire, and an unconditional DEL then frees a lock somebody else is
+// holding -- letting a third instance in to fire the duplicate chain query the
+// lock exists to prevent.
 //
 // That window is not theoretical here. The release runs on a context detached
 // from the request precisely so it survives cancellation, so a request whose L3
 // query outran the lock TTL now DOES reach Redis on its way out, where before
 // it failed and left the successor alone. Making the release conditional is
 // what keeps that fix from trading one duplicate query for another.
-var releaseIfOwner = redis.NewScript(`
-if redis.call("get", KEYS[1]) == ARGV[1] then
-	return redis.call("del", KEYS[1])
-end
-return 0
-`)
 
 // fallbackTokenSeq discriminates fallback tokens minted in the same process.
 var fallbackTokenSeq atomic.Uint64
@@ -76,8 +69,8 @@ func newLockToken() string {
 // context.WithoutCancel keeps the caller's VALUES -- tracing and the like. It
 // does not keep deadlines: the returned context reports none, which is why the
 // timeout below is imposed here rather than inherited.
-func releaseCacheLock(ctx context.Context, redisClient *redisutil.Client, lockKey, token string) {
+func releaseCacheLock(ctx context.Context, store kv.Store, lockKey, token string) {
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lockReleaseTimeout)
 	defer cancel()
-	_ = releaseIfOwner.Run(releaseCtx, redisClient, []string{lockKey}, token).Err()
+	_, _ = store.CompareAndDelete(releaseCtx, lockKey, []byte(token)) //nolint:errcheck // best effort: the lock carries a TTL
 }

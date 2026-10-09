@@ -19,6 +19,7 @@ import (
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 type simHTTPFixture struct {
@@ -118,7 +120,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 
 	rc, _ := newTestRedis(t)
 
-	simVerifier, err := NewSimulationVerifier(logger, &simCfg, rc, signer,
+	simVerifier, err := NewSimulationVerifier(logger, &simCfg, kv.NewRedis(zerolog.Nop(), rc), signer,
 		map[string]struct{}{simTestService: {}, simTestService2: {}}, clock)
 	require.NoError(t, err)
 
@@ -133,7 +135,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 		clientPool:         clients,
 		clientPoolFallback: fallback,
 		responseSigner:     signer,
-		supplierCache:      cache.NewSupplierCache(logger, rc, cache.SupplierCacheConfig{}),
+		supplierCache:      cache.NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), rc), cache.SupplierCacheConfig{}),
 		publisher:          pub,
 		metricRecorder:     NewMetricRecorder(logger, pool),
 		bufferPool:         NewBufferPool(1 << 20),

@@ -200,7 +200,7 @@ func (a *RedisBlockClientAdapter) deliver(event BlockEvent) bool {
 // misses events and is never told.
 func (a *RedisBlockClientAdapter) pollLatestHeight(ctx context.Context) {
 	defer a.wg.Done()
-	redisClient := a.redisSubscriber.redisClient
+	redisClient := a.redisSubscriber.store
 	if redisClient == nil {
 		return
 	}
@@ -304,7 +304,7 @@ func (a *RedisBlockClientAdapter) GetBlockAtHeight(ctx context.Context, height i
 	if held := a.lastBlock.Load(); held != nil && held.height == height && len(held.hash) > 0 {
 		return held, nil
 	}
-	if redisClient := a.redisSubscriber.redisClient; redisClient != nil {
+	if redisClient := a.redisSubscriber.store; redisClient != nil {
 		event, found, err := readBlockRecord(ctx, redisClient, height)
 		if err == nil && found && len(event.Hash) > 0 {
 			return &simpleBlock{height: event.Height, hash: event.Hash}, nil

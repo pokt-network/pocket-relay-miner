@@ -16,12 +16,14 @@ import (
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
@@ -102,7 +104,7 @@ func TestSupplierManager_Reconcile_PicksUpStakedAfterStart(t *testing.T) {
 
 	registry := NewSupplierRegistry(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		SupplierRegistryConfig{},
 	)
 
@@ -177,7 +179,7 @@ func TestSupplierManager_Reconcile_DefersRemovalWhilePendingSessions(t *testing.
 
 	registry := NewSupplierRegistry(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		SupplierRegistryConfig{},
 	)
 
@@ -268,7 +270,7 @@ func TestSupplierManager_Reconcile_ReleasesLeaseOnceUnconfigured(t *testing.T) {
 
 	registry := NewSupplierRegistry(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		SupplierRegistryConfig{},
 	)
 
@@ -370,7 +372,7 @@ func TestSupplierManager_KeyRemoval_ReleasesTheLease(t *testing.T) {
 
 	registry := NewSupplierRegistry(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		SupplierRegistryConfig{},
 	)
 

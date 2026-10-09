@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
@@ -35,12 +37,12 @@ func TestPublishBlockEvent_AConsumerWokenByTheEventFindsTheRecord(t *testing.T) 
 	defer cancel()
 	redisClient := newTestRedis(t)
 
-	sub := NewRedisBlockSubscriber(testLogger(), redisClient, nil)
+	sub := NewRedisBlockSubscriber(testLogger(), kv.NewRedis(zerolog.Nop(), redisClient), nil)
 	require.NoError(t, sub.Start(ctx))
 	t.Cleanup(func() { _ = sub.Close() })
 	events := sub.Subscribe(ctx)
 
-	pub := NewRedisBlockPublisher(testLogger(), redisClient)
+	pub := NewRedisBlockPublisher(testLogger(), kv.NewRedis(zerolog.Nop(), redisClient))
 	hash := []byte{0xAB, 0xCD, 0x01}
 	// A subscriber registers on the server asynchronously; publish until the
 	// first event arrives.
@@ -56,12 +58,12 @@ func TestPublishBlockEvent_AConsumerWokenByTheEventFindsTheRecord(t *testing.T) 
 	}, 5*time.Second, time.Millisecond)
 	require.Equal(t, int64(500), got.Height)
 
-	record, found, err := readBlockRecord(ctx, redisClient, 500)
+	record, found, err := readBlockRecord(ctx, kv.NewRedis(zerolog.Nop(), redisClient), 500)
 	require.NoError(t, err)
 	require.True(t, found, "the record must exist by the time the event is heard")
 	require.Equal(t, hash, record.Hash)
 
-	latest, found, err := readLatestPublishedHeight(ctx, redisClient)
+	latest, found, err := readLatestPublishedHeight(ctx, kv.NewRedis(zerolog.Nop(), redisClient))
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, int64(500), latest)
@@ -83,10 +85,10 @@ func TestAdapter_GetBlockAtHeightReadsTheRecordThenItsOwnNode(t *testing.T) {
 	ctx := context.Background()
 	redisClient := newTestRedis(t)
 	node := &countingReader{}
-	adapter := NewRedisBlockClientAdapter(testLogger(), NewRedisBlockSubscriber(testLogger(), redisClient, nil), node)
+	adapter := NewRedisBlockClientAdapter(testLogger(), NewRedisBlockSubscriber(testLogger(), kv.NewRedis(zerolog.Nop(), redisClient), nil), node)
 
 	hash := []byte{0x60, 0x06}
-	pub := NewRedisBlockPublisher(testLogger(), redisClient)
+	pub := NewRedisBlockPublisher(testLogger(), kv.NewRedis(zerolog.Nop(), redisClient))
 	require.NoError(t, pub.PublishBlockHeight(ctx, BlockEvent{Height: 600, Hash: hash}))
 
 	blk, err := adapter.GetBlockAtHeight(ctx, 600)
@@ -107,7 +109,7 @@ func TestAdapter_GetBlockAtHeightReadsTheRecordThenItsOwnNode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("from-the-node"), blk.Hash(), "an empty recorded hash must not seed a proof")
 
-	relayerLike := NewRedisBlockClientAdapter(testLogger(), NewRedisBlockSubscriber(testLogger(), redisClient, nil), nil)
+	relayerLike := NewRedisBlockClientAdapter(testLogger(), NewRedisBlockSubscriber(testLogger(), kv.NewRedis(zerolog.Nop(), redisClient), nil), nil)
 	_, err = relayerLike.GetBlockAtHeight(ctx, 601)
 	require.Error(t, err, "no record and no node")
 }
@@ -117,8 +119,20 @@ func TestAdapter_GetBlockAtHeightReadsTheRecordThenItsOwnNode(t *testing.T) {
 // aborted whole, its PUBLISH included, as Redis answers EXECABORT.
 type oomOnSet struct{}
 
-func (oomOnSet) DialHook(next redis.DialHook) redis.DialHook          { return next }
-func (oomOnSet) ProcessHook(next redis.ProcessHook) redis.ProcessHook { return next }
+func (oomOnSet) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+// ProcessHook refuses a lone SET the way Redis at maxmemory does: the block
+// record and latest height are written as single commands.
+func (oomOnSet) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "set" {
+			err := errors.New("OOM command not allowed when used memory > 'maxmemory'.")
+			cmd.SetErr(err)
+			return err
+		}
+		return next(ctx, cmd)
+	}
+}
 func (oomOnSet) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []redis.Cmder) error {
 		oom := errors.New("OOM command not allowed when used memory > 'maxmemory'.")
@@ -158,13 +172,13 @@ func TestPublishBlockEvent_TheEventGoesOutWhenRedisRefusesTheRecord(t *testing.T
 	defer cancel()
 	redisClient, full := newTestRedisPair(t)
 
-	sub := NewRedisBlockSubscriber(testLogger(), redisClient, nil)
+	sub := NewRedisBlockSubscriber(testLogger(), kv.NewRedis(zerolog.Nop(), redisClient), nil)
 	require.NoError(t, sub.Start(ctx))
 	t.Cleanup(func() { _ = sub.Close() })
 	events := sub.Subscribe(ctx)
 
 	full.AddHook(testredis.ProductCommands(oomOnSet{}))
-	pub := NewRedisBlockPublisher(testLogger(), full)
+	pub := NewRedisBlockPublisher(testLogger(), kv.NewRedis(zerolog.Nop(), full))
 
 	var got BlockEvent
 	require.Eventually(t, func() bool {
@@ -177,7 +191,7 @@ func TestPublishBlockEvent_TheEventGoesOutWhenRedisRefusesTheRecord(t *testing.T
 		}
 	}, 5*time.Second, time.Millisecond, "the event must be published although the record was refused")
 	require.Equal(t, int64(800), got.Height)
-	_, found, err := readBlockRecord(ctx, redisClient, 800)
+	_, found, err := readBlockRecord(ctx, kv.NewRedis(zerolog.Nop(), redisClient), 800)
 	require.NoError(t, err)
 	require.False(t, found, "precondition: the hook refused the record")
 }
@@ -189,7 +203,7 @@ func TestAdapter_ThePollDeliversAHeightThePubSubNeverCarried(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	redisClient := newTestRedis(t)
-	adapter := NewRedisBlockClientAdapter(testLogger(), NewRedisBlockSubscriber(testLogger(), redisClient, nil), nil)
+	adapter := NewRedisBlockClientAdapter(testLogger(), NewRedisBlockSubscriber(testLogger(), kv.NewRedis(zerolog.Nop(), redisClient), nil), nil)
 	adapter.pollInterval = 20 * time.Millisecond
 	require.NoError(t, adapter.Start(ctx))
 	t.Cleanup(adapter.Close)
@@ -263,4 +277,42 @@ func TestAdapter_TwoDeliverersNeverSendALowerHeightAfterAHigherOne(t *testing.T)
 	second := <-blocks
 	require.Equal(t, []int64{101, 103}, []int64{first.Height(), second.Height()},
 		"deliveries must reach consumers in the order their heights were taken")
+}
+
+// roundTrips counts the commands sent alone and the pipelines sent to Redis.
+type roundTrips struct{ single, pipelines atomic.Int64 }
+
+func (r *roundTrips) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (r *roundTrips) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		r.single.Add(1)
+		return next(ctx, cmd)
+	}
+}
+
+func (r *roundTrips) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		r.pipelines.Add(1)
+		return next(ctx, cmds)
+	}
+}
+
+// TestPublishBlockEvent_IsOneRoundTripOnRedis: the record, the latest height
+// and the event go to Redis in one pipeline, on every block.
+func TestPublishBlockEvent_IsOneRoundTripOnRedis(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	redisClient, counted := newTestRedisPair(t)
+	trips := &roundTrips{}
+	counted.AddHook(testredis.ProductCommands(trips))
+	pub := NewRedisBlockPublisher(testLogger(), kv.NewRedis(zerolog.Nop(), counted))
+
+	require.NoError(t, pub.PublishBlockHeight(ctx, BlockEvent{Height: 900, Hash: []byte{0x09}}))
+
+	require.Equal(t, int64(1), trips.pipelines.Load(), "one pipeline")
+	require.Zero(t, trips.single.Load(), "no command sent on its own")
+	_, found, err := readBlockRecord(ctx, kv.NewRedis(zerolog.Nop(), redisClient), 900)
+	require.NoError(t, err)
+	require.True(t, found, "the record was written")
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/relayer"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/pocket-relay-miner/tx"
@@ -128,11 +129,12 @@ type SupplierState struct {
 	stakeView atomic.Pointer[supplierStakeView]
 	status    atomic.Int32
 
-	// Redis stream consumer for this supplier
-	Consumer *redistransport.StreamsConsumer
+	// Relay queue consumer for this supplier. Assigned only a non-nil value:
+	// the nil checks on it are nil-interface checks.
+	Consumer transport.MinedRelayConsumer
 
 	// Session management
-	SessionStore       *RedisSessionStore
+	SessionStore       SessionStore
 	SessionCoordinator *SessionCoordinator
 
 	// SMST management (for building and managing session trees)
@@ -247,6 +249,15 @@ type SupplierManagerConfig struct {
 	// Redis connection
 	RedisClient *redistransport.Client
 
+	// Backend builds the backend that keeps each supplier's relay queue,
+	// sessions and dedup marks, from this config. Nil means Redis, through
+	// RedisClient.
+	Backend func(SupplierManagerConfig) StoreBackend
+
+	// KV carries the meter cleanup signal to the relayers. Nil means Redis,
+	// through RedisClient.
+	KV kv.Store
+
 	// StoreHealth pauses stream consumption and tracking writes while Redis
 	// cannot take writes. nil never pauses.
 	StoreHealth *redistransport.StoreHealth
@@ -325,6 +336,10 @@ type SupplierManagerConfig struct {
 	// ServiceClient queries the current service CUPR for the claim-build
 	// CUPR-mismatch guard. If nil, the guard is skipped.
 	ServiceClient client.ServiceQueryClient
+
+	// Pricer prices a session's money in uPOKT for the money metrics. Nil: the
+	// chain's own price, from SharedClient and ProofChecker's difficulty client.
+	Pricer SessionPricer
 
 	// SessionLifecycleConfig contains configuration for session lifecycle management.
 	SessionLifecycleConfig SessionLifecycleConfig
@@ -462,6 +477,8 @@ type SupplierManager struct {
 	// Deduplicator (shared across suppliers). Prevents counter drift when Redis
 	// Streams redeliver a relay (consumer reclaim, transient ack failure).
 	deduplicator Deduplicator
+	// backend builds every supplier's stores (StoreBackend).
+	backend StoreBackend
 
 	// inclusionReconciler is the process-wide, block-driven verifier +
 	// rebroadcaster for BOTH claims and proofs. It reads the rebroadcastStore
@@ -539,26 +556,16 @@ func NewSupplierManager(
 		mgr.rebuildAdmission = NewRebuildAdmission(componentLogger)
 	}
 
-	// Construct a shared deduplicator if we have a Redis client. Falls back to
-	// nil if Redis is absent (e.g. tests) — handleRelay treats nil as fail-open.
-	if config.RedisClient != nil {
-		// KeyPrefix empty → defaults to "ha:miner:dedup" (matches KeyBuilder.MinerDedupKey).
-		//
-		// BlockTimeSeconds forwarded from config, not left zero: an empty
-		// DeduplicatorConfig here used to mean the operator's configured
-		// block_time_seconds was silently dropped, and NewRedisDeduplicator's
-		// own fallback (30) took over regardless of what was set. On mainnet
-		// (verified live 2026-08-21, ~64s/block) that produced a dedup TTL
-		// (TTLBlocks=10 x 30s = 5min) roughly HALF the wall-clock window it
-		// was meant to cover (~10.7min) -- a relay duplicate arriving after 5
-		// minutes but within the intended 10-block window would no longer be
-		// caught, and would be counted a second time.
-		mgr.deduplicator = NewRedisDeduplicator(
-			componentLogger,
-			config.RedisClient,
-			DeduplicatorConfig{BlockTimeSeconds: config.BlockTimeSeconds},
-		)
+	// Every supplier's stores, and the shared deduplicator, come from the
+	// backend: Redis unless the caller passes another. With no Redis client
+	// (tests) the Redis backend has no deduplicator, which handleRelay treats
+	// as fail-open.
+	if config.Backend != nil {
+		mgr.backend = config.Backend(config)
+	} else {
+		mgr.backend = newRedisStoreBackend(componentLogger, config)
 	}
+	mgr.deduplicator = mgr.backend.deduplicator()
 
 	return mgr
 }
@@ -632,9 +639,9 @@ func (m *SupplierManager) startWithDistributedClaiming(ctx context.Context, supp
 		Msg("filtered suppliers by staking status")
 
 	// Create the claimer (always, even with empty staked set).
-	m.claimer = NewSupplierClaimer(
+	m.claimer = newSupplierClaimer(
 		m.logger,
-		m.config.RedisClient,
+		m.storeBackend().leaseStore(),
 		m.config.MinerID,
 		m.config.ClaimerConfig,
 	)
@@ -757,6 +764,9 @@ func (m *SupplierManager) reconcileLoop(ctx context.Context, interval time.Durat
 // every block interval, so the connection is held continuously in practice.
 // Formula: poolSize = numSuppliers + 20 overhead
 func (m *SupplierManager) checkPoolSize(numSuppliers int) {
+	if m.config.RedisClient == nil {
+		return // standalone mode: no Redis pool to size
+	}
 	poolSize := m.config.RedisClient.PoolSize()
 	minRequired := numSuppliers + 20 // Formula: numSuppliers + 20 overhead
 
@@ -930,17 +940,10 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 // claimer: losing revenue to a false-drain is worse than carrying a dead
 // supplier for one extra reconcile interval.
 func (m *SupplierManager) hasPendingSessions(ctx context.Context, supplierAddr string) bool {
-	if m.config.RedisClient == nil {
+	if m.config.RedisClient == nil && m.config.Backend == nil {
 		return false
 	}
-	store := NewRedisSessionStore(
-		m.logger,
-		m.config.RedisClient,
-		SessionStoreConfig{
-			SupplierAddress: supplierAddr,
-			SessionTTL:      m.config.SessionTTL,
-		},
-	)
+	store := m.storeBackend().sessionStore(supplierAddr)
 	defer func() { _ = store.Close() }()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -1340,14 +1343,8 @@ func extractStakedEndpoints(configs []*sharedtypes.SupplierServiceConfig) []cach
 // This logs the inherited sessions and validates SMST state.
 func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier string, warmupData *SupplierWarmupData) error {
 	// First, load existing sessions from Redis to validate handoff
-	sessionStore := NewRedisSessionStore(
-		m.logger,
-		m.config.RedisClient,
-		SessionStoreConfig{
-			SupplierAddress: supplier,
-			SessionTTL:      m.config.SessionTTL,
-		},
-	)
+	sessionStore := m.storeBackend().sessionStore(supplier)
+	smst := m.storeBackend().smstStore(supplier)
 
 	// Get all sessions for this supplier
 	sessions, err := sessionStore.GetBySupplier(ctx)
@@ -1379,10 +1376,9 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 			}
 
 			activeCount++
-			smstKey := m.config.RedisClient.KB().SMSTNodesKey(supplier, session.SessionID)
-			exists, _ := m.config.RedisClient.Exists(ctx, smstKey).Result()
+			exists, _ := smst.exists(ctx, smstNodes, session.SessionID) //nolint:errcheck // a failed read reads as missing, as before: this only logs
 
-			if exists == 0 && session.RelayCount > 0 {
+			if !exists && session.RelayCount > 0 {
 				missingSmstCount++
 				m.logger.Warn().
 					Str("supplier", supplier).
@@ -1563,15 +1559,13 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	// Create supplier-specific context
 	supplierCtx, cancelFn := context.WithCancel(ctx)
 
-	// Create session store for this supplier
-	sessionStore := NewRedisSessionStore(
-		m.logger,
-		m.config.RedisClient,
-		SessionStoreConfig{
-			SupplierAddress: operatorAddr,
-			SessionTTL:      m.config.SessionTTL,
-		},
-	)
+	// The supplier's session store, relay queue consumer and batch committer.
+	stores, err := m.storeBackend().forSupplier(operatorAddr, m.deduplicator)
+	if err != nil {
+		cancelFn()
+		return err
+	}
+	sessionStore, consumer := stores.sessions, stores.consumer
 
 	// Create session coordinator (replaces WAL-based SMSTSnapshotManager)
 	// No WAL needed - SMST persists to Redis via Commit(), and relay streams act as WAL
@@ -1584,32 +1578,10 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		},
 	)
 
-	// Create consumer for this supplier (single stream per supplier, fast 100ms polling)
-	consumer, err := redistransport.NewStreamsConsumer(
-		m.logger,
-		m.config.RedisClient,
-		transport.ConsumerConfig{
-			StreamPrefix:            m.config.RedisClient.KB().StreamPrefix(), // Namespace-aware prefix (e.g., "ha:relays")
-			SupplierOperatorAddress: operatorAddr,
-			ConsumerGroup:           m.config.RedisClient.KB().ConsumerGroup(), // Namespace-aware group (e.g., "ha-miners")
-			ConsumerName:            m.config.ConsumerName,
-			BatchSize:               int64(m.config.BatchSize),                // Use config value (default: 1000)
-			ClaimIdleTimeout:        m.config.ClaimIdleTimeout.Milliseconds(), // From config (default: 60000ms)
-			// Note: blocks for one block interval per read - hardcoded in consumer
-		},
-	)
-	if err == nil {
-		consumer.SetStoreHealth(m.config.StoreHealth)
-	}
-	if err != nil {
-		cancelFn()
-		return fmt.Errorf("failed to create consumer for %s: %w", operatorAddr, err)
-	}
-
 	// Create SMST manager for building session trees (Redis-backed for HA)
-	smstManager := NewRedisSMSTManager(
+	smstManager := newSMSTManager(
 		m.logger,
-		m.config.RedisClient,
+		m.storeBackend().smstStore(operatorAddr),
 		RedisSMSTManagerConfig{
 			SupplierAddress:    operatorAddr,
 			CacheTTL:           m.config.CacheTTL,
@@ -1620,8 +1592,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 	// Built before the lifecycle manager, whose claim transition flushes it.
 	relayBatch := newRelayBatch(
-		m.logger, m.config.RedisClient, operatorAddr,
-		sessionStore, m.deduplicator, smstManager, sessionCoordinator, consumer,
+		m.logger, operatorAddr, m.deduplicator, smstManager, sessionCoordinator, consumer, stores.commit,
 	)
 
 	// SMST trees are lazy-loaded from Redis on-demand:
@@ -1676,6 +1647,8 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		if m.config.ServiceClient != nil {
 			lifecycleCallback.SetServiceClient(m.config.ServiceClient)
 		}
+		lifecycleCallback.SetPricer(m.pricer())
+		sessionCoordinator.SetPricer(m.pricer())
 		// Pre-proof GetClaim guard (WS-A): skips proof submission for sessions
 		// whose claim is not on-chain, preventing FailedPrecondition retry
 		// storms and wasted gas.
@@ -1735,14 +1708,13 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Wire meter cleanup publisher for notifying relayers when sessions leave active state.
 		// This publishes cleanup signals to ha:meter:cleanup so relayers can decrement their
 		// active sessions metric and clear session meter data.
-		meterCleanupChannel := m.config.RedisClient.KB().MeterCleanupChannel()
-		redisClient := m.config.RedisClient
+		store := m.kvStore()
 		meterCleanupPublisher := NewRedisMeterCleanupPublisher(
 			m.logger,
 			func(ctx context.Context, channel string, message interface{}) error {
-				return redisClient.Publish(ctx, channel, message).Err()
+				return store.Publish(ctx, channel, []byte(fmt.Sprint(message)))
 			},
-			meterCleanupChannel,
+			store.KB().MeterCleanupChannel(),
 		)
 		lifecycleManager.SetMeterCleanupPublisher(meterCleanupPublisher)
 
@@ -1771,7 +1743,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		cancelFn:           cancelFn,
 	}
 	state.StoreStatus(SupplierStatusActive)
-	m.wireRebuildAdmission(operatorAddr, consumer, lifecycleManager)
+	m.wireRebuildAdmission(operatorAddr, stores.setPause, lifecycleManager)
 
 	if lifecycleManager != nil {
 		// Conditional flush delay -- wired BEFORE Start(), not alongside
@@ -1875,15 +1847,53 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	return nil
 }
 
+// leaseOwner is who holds the supplier's lease: through the claimer, or the
+// backend's lease store for a manager whose claimer never started.
+func (m *SupplierManager) leaseOwner(ctx context.Context, supplier string) (string, error) {
+	if m.claimer != nil {
+		return m.claimer.LeaseOwner(ctx, supplier)
+	}
+	return m.storeBackend().leaseStore().owner(ctx, supplier)
+}
+
+// kvStore is the manager's kv store: the one the caller passed, or Redis.
+func (m *SupplierManager) kvStore() kv.Store {
+	if m.config.KV != nil {
+		return m.config.KV
+	}
+	return kv.NewRedis(m.logger, m.config.RedisClient)
+}
+
+// pricer prices a session's money in uPOKT, with the shared params and the
+// relay-mining difficulty at its start height; nil without both clients.
+func (m *SupplierManager) pricer() SessionPricer {
+	if m.config.Pricer != nil {
+		return m.config.Pricer
+	}
+	if m.config.ProofChecker == nil {
+		return nil
+	}
+	return NewChainPricer(m.config.SharedClient, m.config.ProofChecker.ServiceDifficultyClient())
+}
+
+// storeBackend is the manager's backend; a manager built without
+// NewSupplierManager (tests) gets the Redis one over its config.
+func (m *SupplierManager) storeBackend() StoreBackend {
+	if m.backend != nil {
+		return m.backend
+	}
+	return newRedisStoreBackend(m.logger, m.config)
+}
+
 // wireRebuildAdmission holds the supplier's consumer while a proof waits for
 // memory, and lets its claim's flush delay release that hold. Called before
 // the consumer and the lifecycle manager start.
-func (m *SupplierManager) wireRebuildAdmission(operatorAddr string, consumer *redistransport.StreamsConsumer, lifecycleManager *SessionLifecycleManager) {
+func (m *SupplierManager) wireRebuildAdmission(operatorAddr string, setPause func(redistransport.IngestionPause), lifecycleManager *SessionLifecycleManager) {
 	if m.rebuildAdmission == nil {
 		return
 	}
 	admission := m.rebuildAdmission
-	consumer.SetIngestionPause(admission.IngestionPause(operatorAddr))
+	setPause(admission.IngestionPause(operatorAddr))
 	if lifecycleManager != nil {
 		lifecycleManager.SetClaimFlushWaiting(func() func() { return admission.claimFlushWaiting(operatorAddr) })
 	}
@@ -2907,8 +2917,7 @@ func (m *SupplierManager) teardownSupplier(state *SupplierState) {
 	// Only remove from registry and cache if no other miner has already claimed
 	// this supplier. During rebalance, miner1 may release a supplier that miner2
 	// has already claimed and registered — deleting here would clobber miner2's entries.
-	claimKey := m.config.RedisClient.KB().MinerClaimKey(operatorAddr)
-	claimOwner, claimErr := m.config.RedisClient.Get(ctx, claimKey).Result()
+	claimOwner, claimErr := m.leaseOwner(ctx, operatorAddr)
 	reclaimedByOther := claimErr == nil && claimOwner != "" && claimOwner != m.config.MinerID
 
 	if reclaimedByOther {
@@ -3241,7 +3250,7 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 // addSupplier* calls via sync.Once.
 func (m *SupplierManager) ensureSharedTrackers() {
 	m.sharedTrackersOnce.Do(func() {
-		m.sharedSubmissionTracker = NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
+		m.sharedSubmissionTracker = NewSubmissionTracker(m.logger, m.kvStore(), m.config.SubmissionTrackingTTL)
 
 		// Only build the rebroadcast store + reconciler when we can actually run
 		// it. Leaving m.rebroadcastStore nil means the lifecycle callback skips
@@ -3262,7 +3271,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			return
 		}
 		inclusionQuery := m.config.ProofQueryClient
-		m.rebroadcastStore = NewRebroadcastStore(m.config.RedisClient, 0) // 0 → default TTL
+		m.rebroadcastStore = m.storeBackend().rebroadcastStore()
 
 		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, inclusionHeight int64) error {
 			if outcome == inclusionFound {
@@ -3331,13 +3340,33 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			return nil
 		}
 		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error {
+			// The chain validated this proof: the session is proved whatever
+			// its submission reported. This runs BEFORE the counter, as the
+			// claim side does: a failure keeps the entry and the observation is
+			// re-delivered next block.
+			settle := true
+			if outcome == inclusionFound {
+				flip, err := m.markProvedSession(ctx, supplier, sessionID, e)
+				if err != nil {
+					return err
+				}
+				// Settles once: only the delivery whose flip moved the session
+				// settles, so a re-delivered observation (a failed clear) counts
+				// nothing again. Which money settles is the entry's to say
+				// (OrigTxHash, in settleLedgerOutcome), not the state's: an
+				// OnProofTxError that failed to write leaves proving behind a
+				// balance RecordProofTxError already opened.
+				settle = flip.From != ""
+			}
 			proofInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
 			// Closes the `unresolved` balance this session's submission failure
 			// opened, and names where the money went. on_chain_rejected settles
 			// it as lost like on_chain_missing does: the chain executed the proof
 			// and refused it, so nothing further will answer, and without this
 			// branch a rejected proof's balance would never come down.
-			m.settleLedgerOutcome(ctx, RebroadcastPhaseProof, e, supplier, sessionID, outcome)
+			if settle {
+				m.settleLedgerOutcome(ctx, RebroadcastPhaseProof, e, supplier, sessionID, outcome)
+			}
 			if outcome == inclusionMissing {
 				m.recordMissingCause(ctx, RebroadcastPhaseProof, e, supplier, sessionID)
 			}
@@ -3362,18 +3391,13 @@ func (m *SupplierManager) ensureSharedTrackers() {
 						Msg("proof on-chain outcome observed but not recorded in the submission tracker")
 				}
 			}
-			// Metric + tracker only, and that is a GAP rather than a property:
-			// proof_tx_error has the same anatomy as claim_tx_error — the
-			// broadcast can report failure while the proof lands — and there IS
-			// a state to restore, `proved`. It does not cost a slash (the proof
-			// is on-chain), so it is not fixed here; it leaves the session in a
-			// failed state and the ledger counting it lost. Queue item 37.
 			return nil
 		}
 
 		claimPhase := reconcilePhase{
 			phase:             RebroadcastPhaseClaim,
 			windowCloseHeight: sharedtypes.GetClaimWindowCloseHeight,
+			pollRetryUntil:    claimPollRetryUntil,
 			verdict:           claimPhaseVerdict,
 			recordOutcome:     recordClaimOutcome,
 			recordRebroadcast: func(supplier, serviceID, result string) {
@@ -3658,6 +3682,7 @@ func (m *SupplierManager) settleLedgerOutcome(
 
 	relays := snapshot.RelayCount
 	computeUnits := int64(snapshot.TotalComputeUnits)
+	upokt := quote(ctx, m.pricer(), snapshot)
 
 	switch phase {
 	case RebroadcastPhaseClaim:
@@ -3665,25 +3690,24 @@ func (m *SupplierManager) settleLedgerOutcome(
 		// never in the book, so there was no balance to hold. The chain's answer
 		// decides whether it enters the book or is written off.
 		if outcome == inclusionFound {
-			// The chain HOLDS this claim, so "uPOKT claimed" is literally true.
-			// This is the write the recovery path was missing: the submission
-			// never confirmed, so nothing counted it, and the session goes on to
-			// be proved -- crediting `proved` revenue that `claimed` never had.
-			RecordRevenueClaimed(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays)
+			// The chain HOLDS this claim. Its money entered `claimed` at the
+			// flip into claimed that ran just before this (reactivateClaimed-
+			// Session), the single writer of that book; a flip that found the
+			// session already claimed means another path already counted it.
 			return
 		}
-		RecordRevenueForgone(supplier, snapshot.ServiceID, outcome, relays, computeUnits)
+		RecordRevenueForgone(supplier, snapshot.ServiceID, outcome, relays, computeUnits, upokt)
 
 	case RebroadcastPhaseProof:
 		// This money IS in the book and is waiting in `unresolved`, opened by the
 		// same failure path that wrote this entry. Close that balance first, then
 		// name where it went.
-		RecordSessionUnresolvedResolved(supplier, snapshot.ServiceID, string(phase), relays, computeUnits)
+		RecordSessionUnresolvedResolved(supplier, snapshot.ServiceID, string(phase), relays, computeUnits, upokt)
 		if outcome == inclusionFound {
-			RecordRevenueProved(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays)
+			RecordRevenueProved(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays, upokt)
 			return
 		}
-		RecordRevenueLost(supplier, snapshot.ServiceID, outcome, relays, computeUnits)
+		RecordRevenueLost(supplier, snapshot.ServiceID, outcome, relays, computeUnits, upokt)
 	}
 }
 
@@ -3748,6 +3772,26 @@ func resolveMissingCause(cause tx.TxInclusion, rebroadcasts int) tx.TxInclusion 
 		return tx.TxInclusionUnknown
 	}
 	return cause
+}
+
+// claimPollRetryUntil is the last height at which a claim found on chain can
+// still get its proof: the reconciler flips it to claimed at h, the lifecycle
+// moves it to proving at the next block, and a proof is accepted only below
+// the proof window close.
+func claimPollRetryUntil(p *sharedtypes.Params, sessionEnd int64) int64 {
+	return sharedtypes.GetProofWindowCloseHeight(p, sessionEnd) - 2
+}
+
+// markProvedSession moves a session whose proof the chain validated to proved,
+// through the owning supplier's coordinator, and returns what it flipped from.
+// Like reactivateClaimedSession, a supplier this replica no longer owns returns
+// an error so the entry is kept for its new owner.
+func (m *SupplierManager) markProvedSession(ctx context.Context, supplier, sessionID string, e rebroadcastEntry) (Reactivation, error) {
+	state, ok := m.suppliers.Load(supplier)
+	if !ok || state.SessionCoordinator == nil {
+		return Reactivation{}, fmt.Errorf("supplier %s no longer owned by this replica", supplier)
+	}
+	return state.SessionCoordinator.OnProofObservedOnChain(ctx, sessionID, e.TxHash)
 }
 
 // reactivateClaimedSession returns a session to `claimed` after the reconciler

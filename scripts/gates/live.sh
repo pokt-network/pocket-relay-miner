@@ -13,6 +13,11 @@
 #   scripts/gates/live.sh --relays 600 --concurrency 10
 #   scripts/gates/live.sh --service develop-grpc
 #
+# It validates whichever mode the localnet runs (relay_miner_mode in
+# tilt_config.yaml), read from the cluster's Deployments: relayer + miner is
+# high-availability mode, standalone is standalone mode. A green verdict covers
+# only the mode it names; the two modes are two runs.
+#
 # This gate NEVER starts or stops anything. If the localnet is not up it says
 # what to run and exits non-zero. Bringing the cluster up takes ports and
 # containers that another session on this machine may be using, so that
@@ -132,12 +137,39 @@ if [ -z "$pods" ]; then
     gate_verdict "live"
 fi
 
+# The mode, from the Deployments and nothing else: every read below that names
+# a Deployment or a ConfigMap follows it.
+deployment_names="$(kubectl get deployments -o name 2>/dev/null || true)"
+if relay_miner_mode="$(printf '%s\n' "$deployment_names" | gate_relay_miner_mode)"; then
+    gate_pass "relay miner mode: ${relay_miner_mode}"
+else
+    gate_fail "cannot tell the relay miner mode: ${relay_miner_mode}"
+    gate_verdict "live"
+fi
+case "$relay_miner_mode" in
+ha) relay_miner_deployments="relayer miner" ;;
+standalone) relay_miner_deployments="standalone" ;;
+esac
+
+# side_config <relayer|miner> -- that side's rendered config, as a document
+# whose top level is the side's own keys, in either mode.
+side_config() {
+    local cm
+    cm="$(gate_side_configmap "$relay_miner_mode" "$1")" || return 1
+    if [ "$relay_miner_mode" = standalone ]; then
+        kubectl get configmap "$cm" -o jsonpath='{.data.config\.yaml}' 2>/dev/null |
+            python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; s=c.get(sys.argv[1]); print(yaml.safe_dump(s) if s else "", end="")' "$1"
+    else
+        kubectl get configmap "$cm" -o jsonpath='{.data.config\.yaml}' 2>/dev/null
+    fi
+}
+
 # The fleet must be SETTLED before load: a rollout in progress (Tilt rebuild,
 # manual restart) means relays land while consumers are being replaced, and the
 # short localnet claim/proof windows turn ordinary handover latency into
 # missed windows. The rule: live validation runs if and only if no more
 # changes are in flight and every pod is on the current ReplicaSet.
-for dep in relayer miner; do
+for dep in $relay_miner_deployments; do
     if rollout_out="$(kubectl rollout status "deployment/${dep}" --timeout=5s 2>&1)"; then
         gate_pass "${dep}: rollout settled"
     else
@@ -147,8 +179,8 @@ for dep in relayer miner; do
 done
 [ "$gate_failed" -ne 0 ] && gate_verdict "live"
 
-for app in relayer miner validator; do
-    running="$(printf '%s\n' "$pods" | awk -v a="$app" '$1 ~ a && $3 == "Running" {n++} END {print n+0}')"
+for app in $relay_miner_deployments validator; do
+    running="$(printf '%s\n' "$pods" | awk -v a="$app" 'index($1, a "-") == 1 && $3 == "Running" {n++} END {print n+0}')"
     if [ "$running" -gt 0 ]; then
         gate_pass "$app: $running pod(s) Running"
     else
@@ -266,12 +298,34 @@ fi
 # STAKED suppliers only: the registry also lists not_staked leftovers, and a
 # relay pinned to one of those is answered 503 ("supplier ... is not_staked").
 # The count also feeds the thin-load warning and the settlement filter.
-suppliers="$("$BIN" redis supplier --list 2>/dev/null | awk '/^pokt/ && $2 == "active" {print $1}')"
+#
+# Standalone mode: no other process can open the store while the standalone
+# process runs, so the registry is read through its inspect server, which Tilt
+# forwards to STANDALONE_INSPECT_ADDR. A server that does not answer fails the
+# gate: an empty list would read as "no suppliers".
+STANDALONE_INSPECT_ADDR="${STANDALONE_INSPECT_ADDR:-127.0.0.1:9094}"
+printf '%s\n' "$relay_miner_mode" >"${BIN_DIR}/relay_miner_mode"
+if [ "$relay_miner_mode" = standalone ]; then
+    if inspect_out="$("$BIN" standalone inspect supplier --list --addr "$STANDALONE_INSPECT_ADDR" 2>&1)"; then
+        suppliers="$(printf '%s\n' "$inspect_out" | awk '/^pokt/ && $2 == "active" {print $1}')"
+    else
+        suppliers=""
+        gate_fail "the standalone inspect server at ${STANDALONE_INSPECT_ADDR} did not answer:"
+        gate_detail "$inspect_out"
+    fi
+    supplier_source="the registry, through the standalone inspect server"
+else
+    suppliers="$("$BIN" redis supplier --list 2>/dev/null | awk '/^pokt/ && $2 == "active" {print $1}')"
+    supplier_source="the registry"
+fi
 supplier_count="$(printf '%s\n' "$suppliers" | grep -c '^pokt' || true)"
 if [ "$supplier_count" -gt 0 ]; then
-    gate_pass "${supplier_count} supplier(s) registered"
+    gate_pass "${supplier_count} supplier(s) registered, read from ${supplier_source}"
 else
-    gate_fail "no suppliers in the registry -- the miner has not registered any"
+    gate_fail "no staked suppliers in ${supplier_source} -- the miner has not registered any"
+    if [ "$relay_miner_mode" = standalone ]; then
+        printf '         the gauge is first set 30s after the process starts, and only with miner.balance_monitor.enabled\n'
+    fi
 fi
 [ "$gate_failed" -ne 0 ] && gate_verdict "live"
 
@@ -420,10 +474,10 @@ fi
 # which lists exactly the services the localnet serves. A deliberate MATRIX
 # override skips this (narrowing is the override's purpose).
 if [ -z "$matrix_overridden" ]; then
-    staked_services="$(kubectl get configmap relayer-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null |
+    staked_services="$(side_config relayer |
         python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; print("\n".join(sorted((c.get("services") or {}).keys())))' 2>/dev/null || true)"
     if [ -z "$staked_services" ]; then
-        gate_fail "could not read the staked services from configmap relayer-config -- cannot prove the matrix is complete"
+        gate_fail "could not read the staked services from the relayer's rendered config ($(gate_side_configmap "$relay_miner_mode" relayer)) -- cannot prove the matrix is complete"
     else
         for svc in $staked_services; do
             case "$svc" in
@@ -755,9 +809,9 @@ case " $MATRIX " in
     # pipefail makes a kubectl failure emit "0" twice (python prints 0 for
     # empty stdin AND the || fallback fires on the pipeline status), and the
     # doubled value blows up the -gt test, skipping this block silently.
-    rendered_relayer_config="$(kubectl get configmap relayer-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+    rendered_relayer_config="$(side_config relayer || true)"
     if [ -z "$rendered_relayer_config" ]; then
-        gate_skip "could not read relayer-config for the distribution assert"
+        gate_skip "could not read the relayer's rendered config ($(gate_side_configmap "$relay_miner_mode" relayer)) for the distribution assert"
         backend_count=0
         lb_mode=""
     else
@@ -874,7 +928,7 @@ if [ -z "$SETTLE_TIMEOUT_MIN" ]; then
     settle_claim_close="$(printf '%s' "$settle_params_json" | jq -r '.params.claim_window_close_offset_blocks | tonumber? // empty' 2>/dev/null)"
     settle_proof_open="$(printf '%s' "$settle_params_json" | jq -r '.params.proof_window_open_offset_blocks | tonumber? // empty' 2>/dev/null)"
     settle_proof_close="$(printf '%s' "$settle_params_json" | jq -r '.params.proof_window_close_offset_blocks | tonumber? // empty' 2>/dev/null)"
-    settle_block_time="$(kubectl get configmap miner-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null |
+    settle_block_time="$(side_config miner |
         python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; v=c.get("block_time_seconds"); print(v if v is not None else "")' 2>/dev/null || true)"
     SETTLE_TIMEOUT_MIN="$(gate_settle_timeout_min "$settle_session_blocks" "$settle_claim_open" "$settle_claim_close" \
         "$settle_proof_open" "$settle_proof_close" "$settle_block_time")"
@@ -1009,7 +1063,7 @@ while IFS=$'\t' read -r mode svc sent exact; do
         *)
             unexplained="$(gate_unexplained_shortfall "$sent" "${relays_n:-0}" "${dropped:-0}")"
             gate_fail "${svc} (${mode}): served ${sent}, billed ${relays_n:-0}, announced drops ${dropped:-0} -- ${unexplained} relay(s) LOST with no counter"
-            printf '         check the WAL (redis streams) and submissions for this service\n'
+            printf '         check the WAL and submissions for this service (redis streams and submissions in high-availability mode; standalone inspect streams and submissions in standalone mode)\n'
             ;;
         esac
     else
@@ -1074,10 +1128,31 @@ fi
 # start with the bare hex session ID), so the check could never fire.
 fail_states_file="${BIN_DIR}/miner_session_states.txt"
 : >"$fail_states_file"
-for supplier in $suppliers; do
-    "$BIN" redis sessions --supplier "$supplier" --json 2>/dev/null |
-        jq -r '(if type == "array" then . else [] end)[] | .state // empty' 2>/dev/null
-done >>"$fail_states_file"
+# Standalone mode reads the same listing through the inspect server; a
+# supplier whose listing does not come back fails the gate, never reads as
+# zero failures.
+if [ "$relay_miner_mode" = standalone ]; then
+    states_read=0
+    for supplier in $suppliers; do
+        # stdout only: the binary logs to stderr at startup (maxprocs), which
+        # would make the JSON unparseable; stderr is shown when the read fails.
+        if listing="$("$BIN" standalone inspect sessions --supplier "$supplier" --json --addr "$STANDALONE_INSPECT_ADDR" 2>"${BIN_DIR}/inspect.stderr")" &&
+            printf '%s\n' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            printf '%s\n' "$listing" | jq -r '.[] | .state // empty' >>"$fail_states_file"
+            states_read=$((states_read + 1))
+        else
+            gate_fail "miner session states of ${supplier} not read from the standalone inspect server:"
+            gate_detail "$(cat "${BIN_DIR}/inspect.stderr")${listing:+
+$listing}"
+        fi
+    done
+    gate_exercised coverage session_state_listings "$states_read"
+else
+    for supplier in $suppliers; do
+        "$BIN" redis sessions --supplier "$supplier" --json 2>/dev/null |
+            jq -r '(if type == "array" then . else [] end)[] | .state // empty' 2>/dev/null
+    done >>"$fail_states_file"
+fi
 # The unordered-nonce cause, read as a delta over this run.
 nonce_rejections_after="$(nonce_rejections_now)"
 broadcasts_after="$(max_broadcasts_per_supplier_now)"
@@ -1161,7 +1236,7 @@ assert_timeout_regime_per_phase() {
     elif [ "${regime_total%%.*}" -le 0 ] 2>/dev/null; then
         gate_fail "0 signed transactions after a run that served relays -- those relays can only be paid through signed claims, so the deadline counter is not counting them"
     elif [ -z "$claim_window_blocks" ] || [ -z "$proof_window_blocks" ] || [ -z "$block_time_seconds" ]; then
-        gate_nothing_measured "could not read the claim/proof window width from ${window_source_desc} or block_time_seconds from configmap miner-config -- the expected timeout regime cannot be derived, so this run's regime counts prove nothing about the deadline rule"
+        gate_nothing_measured "could not read the claim/proof window width from ${window_source_desc} or block_time_seconds from the miner's rendered config -- the expected timeout regime cannot be derived, so this run's regime counts prove nothing about the deadline rule"
     elif [ "$regime_unknown" != "ABSENT" ] && [ "${regime_unknown%%.*}" -gt 0 ] 2>/dev/null; then
         gate_fail "${regime_unknown} transaction(s) fell to regime=unknown -- the window could not be derived, so the deadline came from the SDK ceiling instead of the claim/proof window"
     else
@@ -1229,7 +1304,7 @@ claim_window_blocks="$(printf '%s' "$shared_params_json" | jq -r '.params.claim_
 proof_window_blocks="$(printf '%s' "$shared_params_json" | jq -r '.params.proof_window_close_offset_blocks | tonumber? // empty' 2>/dev/null)"
 case "$claim_window_blocks" in '' | *[!0-9]* | 0) claim_window_blocks="" ;; esac
 case "$proof_window_blocks" in '' | *[!0-9]* | 0) proof_window_blocks="" ;; esac
-block_time_seconds="$(kubectl get configmap miner-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null |
+block_time_seconds="$(side_config miner |
     python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; v=c.get("block_time_seconds"); print(v if v is not None else "")' 2>/dev/null || true)"
 # YAML renders an integer-valued float as "60.0", not "60" -- python's own
 # str() does that, no override needed to reproduce it -- and that string

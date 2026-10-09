@@ -118,6 +118,26 @@ data:
             target_label: __address__
             replacement: ${{1}}:9092
 
+      # Standalone-mode process (relay_miner_mode: standalone): both sides'
+      # metrics on 9092, scraped ONCE. The dashboards sum ha_* series across
+      # jobs, so scraping it as relayers and miners too would count it twice.
+      # In high-availability mode no pod matches and the job is empty.
+      - job_name: 'standalone'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: standalone
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: exported_instance
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: instance
+          - source_labels: [__address__]
+            regex: ([^:]+)(?::\\d+)?
+            target_label: __address__
+            replacement: ${{1}}:9092
+
       # Backend metrics
       - job_name: 'backend'
         static_configs:
@@ -435,7 +455,7 @@ data:
         relabel_configs:
           # Filter to only collect logs from our apps FIRST
           - source_labels: [__meta_kubernetes_pod_label_app]
-            regex: (miner|relayer|validator|path|backend|redis.*)
+            regex: (miner|relayer|standalone|validator|path|backend|redis.*)
             action: keep
           # Drop init containers
           - source_labels: [__meta_kubernetes_pod_container_init]

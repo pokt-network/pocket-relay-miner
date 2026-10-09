@@ -1,4 +1,9 @@
-# Deploy on a host (binary + systemd)
+# Deploy on a host (binary + systemd): high-availability mode
+
+This runbook runs the **high-availability mode**. For the **standalone mode**
+(1 service, an embedded store, no Redis), follow
+[HOST_STANDALONE.md](HOST_STANDALONE.md) instead;
+[README.md, "Choose a mode"](README.md#choose-a-mode) compares the two.
 
 This runbook installs the relayer and the miner as 2 systemd services on 1
 Linux host (or VM), next to Redis 8.10 or newer. Example files are in
@@ -326,7 +331,7 @@ at `✓ SUCCESS` once the proof window has passed.
 
 ## Dashboards (optional)
 
-Prometheus and Grafana with the 7 dashboards of the compose example work on a
+Prometheus and Grafana with the 8 dashboards of the compose example work on a
 host too: scrape `127.0.0.1:9090` (relayer) and `127.0.0.1:9092` (miner) and
 provision the dashboard files, as
 [examples/observability/README.md, "With a host deployment"](../../examples/observability/README.md#with-a-host-deployment)

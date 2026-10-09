@@ -4,6 +4,14 @@ def get_defaults():
     """Returns default configuration for Tilt environment"""
     return {
 
+        # Which mode the relay miner runs in:
+        #   "ha"          relayer and miner Deployments sharing Redis
+        #                 (high-availability mode)
+        #   "standalone"  one process, its state on a volume, no Redis
+        # Not called "mode": redis.mode below already uses the word "standalone"
+        # for a single Redis server, which is a different thing.
+        "relay_miner_mode": "ha",
+
         "global": {
             "image": "pocket-relay-miner",
 
@@ -77,7 +85,10 @@ def get_defaults():
             "pprof_port": 6060,
             "config": {
                 "listen_addr": "0.0.0.0:8080",
-                "validation_mode": "optimistic",
+                # No top-level validation_mode: the relayer has no such key
+                # (its default is default_validation_mode), so it was warned
+                # about and ignored on every run after the first. Each
+                # service's mode is forced by the mode matrix in utils.Tiltfile.
             },
         },
         "miner": {

@@ -79,7 +79,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "expr": "((sum(((last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))) / 1e6",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -137,7 +137,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "expr": "((sum(((last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))) / 1e6",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -199,7 +199,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "((sum(last_over_time(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(last_over_time(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)))",
+          "expr": "(((sum(((last_over_time(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(((last_over_time(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)))) / 1e6",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -214,7 +214,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Claimed and will not be paid. Any value above 0 has a reason in the panels below.",
+      "description": "Claimed and will not be paid, net of what a reinstatement took back. Any value above 0 has a reason in the panels below.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -261,7 +261,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "expr": "(((sum(((last_over_time(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(((last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"lost\"}[$__range]) - last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"lost\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"lost\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"lost\"}[$__range])) or vector(0)))) / 1e6",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -276,7 +276,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Served but never claimed: it never entered the book.",
+      "description": "Served but never claimed: it never entered the book. Net of what a reinstatement took back.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -323,7 +323,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_miner_upokt_forgone_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "expr": "(((sum(((last_over_time(ha_miner_upokt_forgone_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_forgone_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_forgone_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_forgone_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(((last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"forgone\"}[$__range]) - last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"forgone\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"forgone\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"forgone\"}[$__range])) or vector(0)))) / 1e6",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -382,7 +382,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 6
       },
@@ -403,7 +403,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(last_over_time(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - ((sum(last_over_time(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(last_over_time(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)))",
+          "expr": "((sum(((last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(((last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - ((sum(((last_over_time(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(((last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"lost\"}[$__range]) - last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"lost\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"lost\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\",from=\"lost\"}[$__range])) or vector(0))) - ((sum(((last_over_time(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(((last_over_time(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)))) / 1e6",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -448,8 +448,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 6,
         "y": 6
       },
       "id": 9,
@@ -469,7 +469,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) / (sum(last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "expr": "(sum(((last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) / (sum(((last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_upokt_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -506,8 +506,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 12,
         "y": 6
       },
       "id": 10,
@@ -527,7 +527,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_miner_relays_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "expr": "(sum(((last_over_time(ha_miner_relays_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_relays_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_relays_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_relays_claimed_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
           "instant": true,
           "legendFormat": "claimed",
           "range": false,
@@ -538,7 +538,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum(last_over_time(ha_miner_relays_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "expr": "(sum(((last_over_time(ha_miner_relays_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_relays_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_relays_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_relays_proved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
           "instant": true,
           "legendFormat": "proved",
           "range": false,
@@ -549,6 +549,68 @@
       "type": "stat"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Work whose session could not be priced in uPOKT (the chain's params or difficulty at its start height were not readable): the POKT above is short by it, and the identity does not close. 0 on a healthy run.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1e-09
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "id": 11,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "(sum(((last_over_time(ha_miner_unpriced_compute_units_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_unpriced_compute_units_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_unpriced_compute_units_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_unpriced_compute_units_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Unpriced compute units",
+      "type": "stat"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -556,7 +618,7 @@
         "x": 0,
         "y": 10
       },
-      "id": 11,
+      "id": 12,
       "panels": [],
       "title": "Why money is lost or forgone",
       "type": "row"
@@ -601,7 +663,7 @@
         "x": 0,
         "y": 11
       },
-      "id": 12,
+      "id": 13,
       "options": {
         "legend": {
           "calcs": [
@@ -622,7 +684,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (reason)(rate(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__rate_interval]))",
+          "expr": "(sum by (reason)(rate(ha_miner_upokt_lost_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__rate_interval]))) / 1e6",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -670,7 +732,7 @@
         "x": 8,
         "y": 11
       },
-      "id": 13,
+      "id": 14,
       "options": {
         "legend": {
           "calcs": [
@@ -691,7 +753,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (reason)(rate(ha_miner_upokt_forgone_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__rate_interval]))",
+          "expr": "(sum by (reason)(rate(ha_miner_upokt_forgone_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__rate_interval]))) / 1e6",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -729,7 +791,7 @@
         "x": 16,
         "y": 11
       },
-      "id": 14,
+      "id": 15,
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
@@ -761,7 +823,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "DECOY for loss: proof_tx_error here is a failed ATTEMPT that a retry usually lands. The inclusion outcomes on the Claims and proofs dashboard say what the chain has.",
+      "description": "DECOY for loss: proof_tx_error here is a failed ATTEMPT that a retry usually lands. The inclusion outcomes on the Claims and proofs dashboard say what the chain has. Reinstated: counted claim_missing, then the chain was seen to hold the claim; subtract it.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -786,7 +848,7 @@
         "x": 0,
         "y": 19
       },
-      "id": 15,
+      "id": 16,
       "options": {
         "cellHeight": "sm",
         "showHeader": true
@@ -803,6 +865,18 @@
           "legendFormat": "sessions",
           "range": false,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (supplier,service_id,reason)(increase(ha_miner_sessions_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "reinstated",
+          "range": false,
+          "refId": "B"
         }
       ],
       "title": "Sessions failed, by supplier, service and reason",
@@ -817,7 +891,8 @@
               "Time": true
             },
             "renameByName": {
-              "Value": "sessions"
+              "Value #A": "sessions",
+              "Value #B": "reinstated"
             }
           }
         }
@@ -832,7 +907,289 @@
         "x": 0,
         "y": 26
       },
-      "id": 16,
+      "id": 17,
+      "panels": [],
+      "title": "Taken back: a claim the chain held after all",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Failed sessions that came back to claimed when the chain was seen to hold their claim, by the reason they failed under (the sessions table above). claim_missing: the pre-proof claim check was answered wrong. claim_window_closed: the claim landed after the window was marked closed.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 27
+      },
+      "id": 18,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "(sum(((last_over_time(ha_miner_sessions_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_sessions_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_sessions_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_sessions_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Sessions reinstated",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Subtracted from the Lost and Forgone stats above.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 27
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "(sum by (from)(rate(ha_miner_upokt_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__rate_interval]))) / 1e6",
+          "legendFormat": "{{from}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Taken back by book (POKT/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "relays/s",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 27
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (from)(rate(ha_miner_relays_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{from}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Relays taken back",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "compute units/s",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 27
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (from)(rate(ha_miner_compute_units_reinstated_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{from}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Compute units taken back",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "id": 22,
       "panels": [],
       "title": "The volume behind the money",
       "type": "row"
@@ -875,9 +1232,9 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 27
+        "y": 36
       },
-      "id": 17,
+      "id": 23,
       "options": {
         "legend": {
           "calcs": [
@@ -971,9 +1328,9 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 27
+        "y": 36
       },
-      "id": 18,
+      "id": 24,
       "options": {
         "legend": {
           "calcs": [
@@ -1067,9 +1424,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 27
+        "y": 36
       },
-      "id": 19,
+      "id": 25,
       "options": {
         "legend": {
           "calcs": [
@@ -1090,7 +1447,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "((sum(last_over_time(ha_miner_relays_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(last_over_time(ha_miner_relays_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)))",
+          "expr": "((sum(((last_over_time(ha_miner_relays_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_relays_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_relays_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_relays_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(((last_over_time(ha_miner_relays_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_relays_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_relays_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_relays_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)))",
           "legendFormat": "relays",
           "refId": "A"
         },
@@ -1099,7 +1456,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "((sum(last_over_time(ha_miner_compute_units_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(last_over_time(ha_miner_compute_units_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)))",
+          "expr": "((sum(((last_over_time(ha_miner_compute_units_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_compute_units_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_compute_units_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_compute_units_unresolved_opened_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)) - (sum(((last_over_time(ha_miner_compute_units_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) - last_over_time(ha_miner_compute_units_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range] offset $__range)) >= 0 and resets(ha_miner_compute_units_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range]) == 0) or last_over_time(ha_miner_compute_units_unresolved_resolved_total{supplier=~\"$supplier\",service_id=~\"$service\"}[$__range])) or vector(0)))",
           "legendFormat": "compute units",
           "refId": "B"
         }
@@ -1113,9 +1470,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 44
       },
-      "id": 20,
+      "id": 26,
       "panels": [],
       "title": "Balance and stake now",
       "type": "row"
@@ -1148,9 +1505,9 @@
         "h": 8,
         "w": 16,
         "x": 0,
-        "y": 36
+        "y": 45
       },
-      "id": 21,
+      "id": 27,
       "options": {
         "cellHeight": "sm",
         "showHeader": true
@@ -1260,9 +1617,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 36
+        "y": 45
       },
-      "id": 22,
+      "id": 28,
       "options": {
         "colorMode": "background",
         "graphMode": "none",

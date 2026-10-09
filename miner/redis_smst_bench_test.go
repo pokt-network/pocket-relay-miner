@@ -54,11 +54,11 @@ func (s *RedisSMSTBenchSuite) reset(b *testing.B) {
 	testredis.DeletePrefix(b, s.redisClient, s.redisPrefix)
 }
 
-func (s *RedisSMSTBenchSuite) createTestRedisStore(sessionID string) *RedisMapStore {
+func (s *RedisSMSTBenchSuite) createTestRedisStore(sessionID string) *nodeStore {
 	store := NewRedisMapStore(s.ctx, s.redisClient, "pokt1bench_mapstore_default", sessionID)
-	redisStore, ok := store.(*RedisMapStore)
+	redisStore, ok := store.(*nodeStore)
 	if !ok {
-		panic("NewRedisMapStore should return *RedisMapStore")
+		panic("NewRedisMapStore should return *nodeStore")
 	}
 	return redisStore
 }

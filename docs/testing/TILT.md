@@ -2,8 +2,8 @@
 
 This is the zero-to-running guide for the local test environment. Tilt spins up
 a full Pocket Network localnet in a **kind** Kubernetes cluster (context
-`kind-kind`): a validator, Redis, the relayer + miner under test, demo backends,
-a gateway, and an observability stack. Once it is up you send relays with
+`kind-kind`): a validator, the relay miner under test in either mode (see
+"Choose the mode" below), demo backends, a gateway, and an observability stack. Once it is up you send relays with
 the `relay` CLI straight at a relayer ([DIRECT_CLI.md](DIRECT_CLI.md)) and run
 the HA/chaos suite against it.
 
@@ -42,6 +42,38 @@ in `examples/docker-compose/` is the operators' deployment example (Redis,
 relayer and miner pointed at the beta testnet; no local chain); its runbook is
 [`docs/deploy/DOCKER_COMPOSE.md`](../deploy/DOCKER_COMPOSE.md).
 
+### Choose the mode
+
+One key in `tilt_config.yaml` picks what runs as the relay miner:
+
+| `relay_miner_mode` | Runs | Store |
+|---|---|---|
+| `ha` (the default) | the `relayer` and `miner` Deployments (`relayer.count`, `miner.count`), sharing Redis: high-availability mode | Redis |
+| `standalone` | one `standalone` Deployment, 1 replica, the relayer and the miner in one process: standalone mode. `relayer.count` and `miner.count` are ignored; the `relayer.config` and `miner.config` sections become its `relayer:` and `miner:` sections | PVC `standalone-store`, mounted at `/data` |
+
+Before a relay-miner pod deploys, in either mode, Tilt checks its config: a
+local resource named `<config>-check` (`relayer-config-check`,
+`miner-config-check`, `standalone-config-check`) runs `make build` and the
+binary's `validate` on the exact YAML the ConfigMap mounts, and the Deployment
+waits on it. A key the binary does not understand -- a retired one left in an
+older `tilt_config.yaml` -- turns that resource red with every key named, and
+the pod does not deploy; remove the key from `tilt_config.yaml` and the check
+re-runs. It needs Go on the host, as `make build` does.
+
+To switch: `make tilt-down-k8s`, change the key, `make tilt-up-k8s`. The live
+gate reads the mode from the cluster, so both modes are validated with the same
+`scripts/gates/live.sh`, one run each ([scripts/gates/README.md](../../scripts/gates/README.md)).
+
+In standalone mode, a value the two config sections set differently in
+`pocket_node` or `keys` stops the Tiltfile with the key's name: a standalone
+config holds it once. The process runs with `--strict-config`, so a key it does
+not understand stops the pod rather than being ignored. Redis is still deployed
+when the gateway is enabled (it uses Redis); the standalone process never
+connects to it. Level 3 has passed on this setup in both modes. The static
+gate adds `tilt/tiltcheck`: it executes the Tiltfiles of both modes with Tilt's builtins
+stubbed, asserts what they would deploy, and validates every rendered
+relay-miner config with the binary's own `validate`.
+
 ## 2. What you get (pods & replicas)
 
 With a `tilt_config.yaml` copied from `tilt_config.example.yaml` (gateway and
@@ -61,6 +93,7 @@ each (`tilt/k8s/defaults.Tiltfile`).
 | `backend` / `backend-2` | Deployment | 1 each | demo RPC backends (multi-backend pool) |
 | `nginx-backend` | Deployment | 1 | nginx backend for pool testing |
 | `account-init` | Job | — | one-shot: funds the localnet accounts (apps, suppliers, gateway) |
+| `standalone` | Deployment | 1, standalone mode only | replaces `relayer` and `miner`; a Service named `relayer` keeps the URL the suppliers are staked at |
 | `prometheus` | Deployment | 1 | metrics |
 | `grafana` | Deployment | 1 | dashboards |
 | `loki` | Deployment | 1 | log aggregation |
@@ -108,6 +141,11 @@ ports are **not** the container ports.
 > **Prometheus is `:9091`, not `:9090`.** `:9090` is the validator gRPC port;
 > the Prometheus query UI/API is forwarded to **`:9091`** (container `9090`). Scrape the raw relayer/miner metrics at
 > `:9190/metrics` and `:9092/metrics` respectively.
+
+> **Standalone mode forwards the same host ports** to its one pod: relay
+> `:8180`, health `:8280`, metrics (both sides) `:9092`, pprof `:6065`, and its
+> read-only inspect server `:9094`. There is no `:9190` and no `:6060`.
+> Prometheus scrapes it once, as job `standalone`.
 
 > **Single-pod forwards.** `relayer` and `miner` are each one Deployment with
 > a single port-forward set, so with `count: 2`, `localhost:8180` and
@@ -209,6 +247,8 @@ leaf/relay-count model is in [../CLAIM_LEAF_MODEL.md](../CLAIM_LEAF_MODEL.md).
 # Logs — direct, but containers rotate under load and you lose history
 kubectl --context kind-kind logs -l app=relayer -f
 kubectl --context kind-kind logs -l app=miner   -f
+# Standalone mode: one process, both sides
+kubectl --context kind-kind logs -l app=standalone -f
 ```
 
 ```bash
@@ -250,6 +290,16 @@ use the built-in `redis` subcommand — full reference in
 pocket-relay-miner redis leader
 pocket-relay-miner redis keys --pattern "ha:*" --stats
 pocket-relay-miner redis submissions --supplier pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj
+```
+
+In standalone mode the same reads go through the process's inspect server, which
+Tilt enables and forwards to `localhost:9094`
+([../STANDALONE.md](../STANDALONE.md#inspecting-the-store)):
+
+```bash
+pocket-relay-miner standalone inspect sessions --supplier pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj
+pocket-relay-miner standalone inspect streams
+pocket-relay-miner standalone inspect submissions --failed-only
 ```
 
 ## 7. Sending relays

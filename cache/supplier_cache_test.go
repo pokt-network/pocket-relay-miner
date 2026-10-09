@@ -11,9 +11,11 @@ import (
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -26,7 +28,7 @@ func newTestSupplierCache(t *testing.T) (*SupplierCache, *redisutil.Client) {
 	client := newTestRedis(t)
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	cache := NewSupplierCache(logger, client, SupplierCacheConfig{})
+	cache := NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), client), SupplierCacheConfig{})
 
 	return cache, client
 }
@@ -678,7 +680,7 @@ func TestSetSupplierState_WritesABoundedTTL(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	const configuredTTL = 3 * time.Second
-	cache := NewSupplierCache(logger, client, SupplierCacheConfig{
+	cache := NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), client), SupplierCacheConfig{
 		TTL: configuredTTL,
 	})
 
@@ -721,7 +723,7 @@ func TestNewSupplierCache_DefaultsTTLWhenUnconfigured(t *testing.T) {
 	client := newTestRedis(t)
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
-	cache := NewSupplierCache(logger, client, SupplierCacheConfig{})
+	cache := NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), client), SupplierCacheConfig{})
 	require.Equal(t, defaultSupplierCacheTTL, time.Duration(cache.ttl.Load()))
 
 	const addr = "pokt1ttldefault"

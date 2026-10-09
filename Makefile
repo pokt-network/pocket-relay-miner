@@ -9,6 +9,7 @@ BUILD_DIR=bin
 
 # Backend server directory
 BACKEND_DIR=tilt/backend-server
+TILTCHECK_DIR=tilt/tiltcheck
 
 # Docker image configuration
 DOCKER_IMAGE?=ghcr.io/pokt-network/pocket-relay-miner:rc
@@ -80,11 +81,13 @@ fmt: ## Format code
 	@echo "Formatting code..."
 	@go fmt ./...
 	@cd $(BACKEND_DIR) && go fmt ./...
+	@cd $(TILTCHECK_DIR) && go fmt ./...
 
 lint: ## Run golangci-lint
 	@echo "Running linters..."
 	@golangci-lint run
 	@cd $(BACKEND_DIR) && golangci-lint run
+	@cd $(TILTCHECK_DIR) && golangci-lint run
 
 lint-blank: ## Report discarded errors (`_ = f()`); informational, never fails the build
 	@echo "Reporting discarded errors..."

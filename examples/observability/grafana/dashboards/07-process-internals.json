@@ -605,7 +605,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (instance)(rate(process_cpu_seconds_total{job=~\"relayers|miners\",instance=~\"$instance\"}[$__rate_interval]))",
+          "expr": "sum by (instance)(rate(process_cpu_seconds_total{job=~\"relayers|miners|standalone\",instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
@@ -674,7 +674,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (instance)(process_open_fds{job=~\"relayers|miners\",instance=~\"$instance\"})",
+          "expr": "max by (instance)(process_open_fds{job=~\"relayers|miners|standalone\",instance=~\"$instance\"})",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
@@ -1111,6 +1111,15 @@
           "expr": "sum by (result)(rate(ha_cache_lock_acquisitions_total[$__rate_interval]))",
           "legendFormat": "lock {{result}}",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (channel)(rate(ha_kv_bus_dropped_total[$__rate_interval]))",
+          "legendFormat": "standalone bus dropped {{channel}}",
+          "refId": "C"
         }
       ],
       "title": "Invalidations / locks",

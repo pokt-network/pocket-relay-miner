@@ -29,6 +29,26 @@ import (
 // rejects it and the chunk becomes permanently undispatchable -- head-of-line
 // blocking invented for a message we already knew how to reject.
 func prepareXAdd(streamPrefix string, msg *transport.MinedRelayMessage) (string, *redis.XAddArgs, string, error) {
+	streamName, data, reason, err := PrepareEntry(streamPrefix, msg)
+	if err != nil {
+		return "", nil, reason, err
+	}
+
+	// Build XADD arguments (NO MaxLen - use TTL instead)
+	return streamName, &redis.XAddArgs{
+		Stream: streamName,
+		Values: map[string]interface{}{
+			"data": data,
+		},
+	}, "", nil
+}
+
+// PrepareEntry validates a mined relay and encodes it as a queue entry: the
+// supplier's stream name and the bytes stored for it. Every queue the relayer
+// publishes to stores the same bytes, so the miner decodes them one way
+// (DecodeEntry). On a refusal it returns the reject reason the caller records
+// with RecordPublishReject.
+func PrepareEntry(streamPrefix string, msg *transport.MinedRelayMessage) (stream string, data []byte, reason string, err error) {
 	if msg == nil {
 		return "", nil, rejectReasonNilMessage, fmt.Errorf("message is nil")
 	}
@@ -71,18 +91,11 @@ func prepareXAdd(streamPrefix string, msg *transport.MinedRelayMessage) (string,
 			wire = &c
 		}
 	}
-	data, err := wire.Marshal()
+	data, err = wire.Marshal()
 	if err != nil {
 		return "", nil, "serialize_failed", fmt.Errorf("failed to serialize message: %w", err)
 	}
-
-	// Build XADD arguments (NO MaxLen - use TTL instead)
-	return streamName, &redis.XAddArgs{
-		Stream: streamName,
-		Values: map[string]interface{}{
-			"data": data,
-		},
-	}, "", nil
+	return streamName, data, "", nil
 }
 
 // serviceOf is the service label for a message that may be nil.

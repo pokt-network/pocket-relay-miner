@@ -7,9 +7,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -91,7 +93,7 @@ func newAtHeightTestCache(t *testing.T, sharedClient *recordingSharedQueryClient
 
 	c := NewRedisSharedParamCache(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		sharedClient,
 		nil, // blockClient: only GetLatestSharedParams needs it
 		CacheConfig{},

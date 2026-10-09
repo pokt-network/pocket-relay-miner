@@ -1,6 +1,6 @@
 # Deploying Pocket RelayMiner v0.1.2
 
-Start here, pick 1 path, and follow its runbook from the first step.
+Start here, pick a mode and a path, and follow its runbook from the first step.
 
 ## Words you will meet
 
@@ -37,18 +37,48 @@ Start here, pick 1 path, and follow its runbook from the first step.
   (CometBFT RPC and gRPC). The compose example uses the public
   `sauron-*.infra.pocket.network` endpoints; in production use your own or a
   provider's.
-- **Redis**: the database the relayer and the miner share. It holds every relay
-  until it is claimed and proved, which is why it must never evict a key.
+- **Redis**: the database the relayer and the miner share in high-availability
+  mode. It holds every relay until it is claimed and proved, which is why it
+  must never evict a key.
+- **Embedded store**: the database inside the process in standalone mode, a
+  directory on local disk (`storage.path`). It holds what Redis holds in
+  high-availability mode.
+- **Standalone mode and high-availability mode**: the two ways to run the relay
+  miner ([choose a mode](#choose-a-mode)).
 - **Keyring**: an encrypted store of keys created by `pocketd`; one of the 2 ways
   to give the relay miner its keys ([more](../SUPPLIER_KEYS.md)).
 
+## Choose a mode
+
+| | Standalone mode | High-availability mode |
+|---|---|---|
+| What runs | 1 process: `pocket-relay-miner standalone`, the relayer and the miner together | `pocket-relay-miner relayer` and `pocket-relay-miner miner`, 1 or more of each |
+| Where the state is | an embedded store, a directory on the host's local disk | 1 Redis 8.10+ shared by every relayer and miner |
+| Replicas and failover | no: 1 process per set of supplier keys | yes: miners share the suppliers through leases, relayers scale out |
+| What you operate | 1 process and 1 directory | the processes and a Redis with `maxmemory` and `noeviction` |
+| Config | 1 file ([config.standalone.example.yaml](../../config.standalone.example.yaml)) | 1 per process ([relayer](../../config.relayer.example.yaml), [miner](../../config.miner.example.yaml)) |
+| Since | not in v0.1.2: build from source until a release ships it | v0.1.0 |
+| Load-tested | no: the capacity figures below are high-availability mode's | 1 relayer + 1 miner ([capacity report](../benchmarks/v0.1.0/Relay-Miner-Capacity.pdf)) |
+
+Choose standalone mode for one host that serves and claims for its own
+suppliers and should not run Redis. Choose high-availability mode for more than
+one relayer or miner, or when the processes must survive a host failing. Moving
+between them is a fresh start: their state is in different stores.
+[docs/STANDALONE.md](../STANDALONE.md) describes standalone mode in full.
+
 ## Choose a path
 
-| Path | Use it when | Runbook | Verified |
-|---|---|---|---|
-| Docker Compose | you want the fastest start, on beta through public endpoints | [DOCKER_COMPOSE.md](DOCKER_COMPOSE.md) | on beta with an unstaked key: configs validated, Redis, node connection, blocks reaching both processes, relayer ready. Not verified: relays, claims and proofs on beta or mainnet |
-| Host (binary + systemd) | you run services on VMs or bare metal without containers | [HOST.md](HOST.md) | configs and units checked; not verified end to end under systemd |
-| Kubernetes | you already run Kubernetes | no example in v0.1.0 | not verified |
+| Path | Mode | Use it when | Runbook | Verified |
+|---|---|---|---|---|
+| Docker Compose | high availability | you want the fastest start, on beta through public endpoints | [DOCKER_COMPOSE.md](DOCKER_COMPOSE.md) | on beta with an unstaked key: configs validated, Redis, node connection, blocks reaching both processes, relayer ready. Not verified: relays, claims and proofs on beta or mainnet |
+| Docker Compose | standalone | the fastest start without Redis | [DOCKER_COMPOSE_STANDALONE.md](DOCKER_COMPOSE_STANDALONE.md) | config validated; the process starts with no Redis and stops only where it needs the node. Not verified: the image build, and the run on beta |
+| Host (binary + systemd) | high availability | you run services on VMs or bare metal without containers | [HOST.md](HOST.md) | configs and units checked; not verified end to end under systemd |
+| Host (binary + systemd) | standalone | 1 VM or bare-metal host, no containers, no Redis | [HOST_STANDALONE.md](HOST_STANDALONE.md) | config and unit checked; not verified end to end under systemd |
+| Kubernetes | either | you already run Kubernetes | no example in v0.1.0 | not verified |
+
+Both modes pass level 3 on the Tilt setup: on a local chain, every relay sent
+to every transport was served, claimed, proved and settled (304 claims, 3,024
+relays per mode).
 
 v0.1.0 ships no Kubernetes example or runbook. The Tilt setup in `tilt/` runs
 the relayer, the miner and Redis on a local kind cluster for development: it is
@@ -56,6 +86,8 @@ a starting point for your own manifests, not a production config. The
 [invariants](../../AGENTS.md#invariants) hold on any platform.
 
 ## How the pieces fit
+
+High-availability mode:
 
 ```
   gateways ──> relayer :8080 ──> your backends
@@ -76,7 +108,19 @@ a starting point for your own manifests, not a production config. The
 - **Redis**: holds all shared state. It is not a cache: a lost key is a claim
   that cannot be proved.
 
-**Topology: 1 Redis shared by the relayers and miners.** v0.1.0 was tested on
+Standalone mode: the same relayer and miner, in 1 process, with the embedded
+store where Redis is, and the queue between them inside the process:
+
+```
+  gateways ──> standalone :8080 ──> your backends
+                  │ relayer ──┐
+                  │           │ relays, block events (in the process)
+                  │ miner  <──┘ ────> the chain (claims, proofs)
+                  ▼
+           embedded store  (storage.path, local disk)
+```
+
+**Topology in high-availability mode: 1 Redis shared by the relayers and miners.** v0.1.0 was tested on
 1 relayer + 1 miner and on 2 relayers + 2 miners, the latter at lower load. The
 load tests and every capacity figure are from 1 relayer + 1 miner.
 
@@ -88,12 +132,12 @@ produces, where there is one.
 
 | # | Invariant | If broken |
 |---|---|---|
-| 1 | Relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.2`, or binaries built from tag `v0.1.2` | mixed versions are not supported |
-| 2 | Redis 8.10 or newer with `maxmemory` set and `maxmemory-policy noeviction` ([config.redis.example.conf](../../config.redis.example.conf)). Checked when the process starts, not by `validate` | Redis older than 8.10, `maxmemory` 0 or another policy: [both refuse to start](TROUBLESHOOTING.md#redis) |
+| 1 | High-availability mode: relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.2`, or binaries built from tag `v0.1.2`. Standalone mode runs 1 binary | mixed versions are not supported |
+| 2 | High-availability mode: Redis 8.10 or newer with `maxmemory` set and `maxmemory-policy noeviction` ([config.redis.example.conf](../../config.redis.example.conf)). Checked when the process starts, not by `validate`. Standalone mode: `storage.path` on local disk with room; new work stops below 1 GiB free | Redis older than 8.10, `maxmemory` 0 or another policy: [both refuse to start](TROUBLESHOOTING.md#redis). A full disk: [work stops](TROUBLESHOOTING.md#standalone-mode) |
 | 3 | `GOMEMLIMIT` and `GOMAXPROCS` set, or container / systemd memory and CPU limits | [each process sizes itself from the whole host](TROUBLESHOOTING.md#memory-and-cpu) |
 | 4 | Miner config has `block_time_seconds` and the right `pocket_node.chain_id`, and the node is reachable | [the miner exits](TROUBLESHOOTING.md#miner-does-not-start) |
 | 5 | The miner runs before relays are expected: the relayer's `/ready` is 503 until the miner publishes its service factor manifest | [relayer up, every relay refused](TROUBLESHOOTING.md#relayer-up-but-not-ready) |
-| 6 | `relayer validate` and `miner validate` exit 0 on the exact config files you start | [config rejected](TROUBLESHOOTING.md#config-rejected) |
+| 6 | `relayer validate` and `miner validate` (high-availability mode), or `standalone validate` (standalone mode), exit 0 on the exact config files you start | [config rejected](TROUBLESHOOTING.md#config-rejected) |
 
 ## Prerequisites
 
@@ -102,7 +146,8 @@ produces, where there is one.
 | A Pocket full node: CometBFT RPC and gRPC | both processes; the miner submits transactions through it | yours, or a provider's. The compose example uses the public Sauron endpoints |
 | At least 1 staked supplier and its private key (64 hex characters) | signing responses, claims and proofs | your staking process ([how, with `pocketd`](../SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it)). **A human provides it; an agent never generates or moves funds** |
 | A backend node for every service your suppliers are staked for, **with an active health check** ([why](#backend-health-checks-turn-them-on)) | answering relays | yours |
-| Redis 8.10 or newer (both processes refuse an older one at startup), `maxmemory` set, `noeviction` | shared state | [config.redis.example.conf](../../config.redis.example.conf) |
+| High-availability mode: Redis 8.10 or newer (both processes refuse an older one at startup), `maxmemory` set, `noeviction` | shared state | [config.redis.example.conf](../../config.redis.example.conf) |
+| Standalone mode: a directory on local disk, with free space | the embedded store | `storage.path` in the standalone config |
 | The supplier's account funded for transaction fees | claims and proofs cost fees | your wallet |
 
 What a relay pays, and every step between a served relay and the reward:
@@ -226,7 +271,9 @@ WebSocket server and a gRPC server with the standard health service). Leave
 | relayer | 6060 | pprof profiling (`pprof.addr`). The default is `127.0.0.1:6060`, loopback only; in a container that means `docker exec` or an explicit `pprof.addr: "0.0.0.0:6060"` to reach it. Never expose it publicly |
 | miner | 9092 | Prometheus metrics and `GET /health` (`metrics.addr`) |
 | miner | 6060 | pprof profiling (`pprof.addr`), off by default. When enabled with no `addr` it also listens on `127.0.0.1:6060`, the relayer's default: on 1 host, give one of them another port |
-| Redis | 6379 | never expose it outside the host or the compose network |
+| Redis | 6379 | high-availability mode only; never expose it outside the host or the compose network |
+| standalone | 8080, 8081, 6060 | as the relayer's above |
+| standalone | 9092 | Prometheus metrics of both sides, and `GET /health` |
 
 Relayer metrics on 9090 and a node's gRPC on 9090 collide when both run on the
 same host network. The host runbook binds metrics and pprof to `127.0.0.1`; move one of
@@ -235,6 +282,11 @@ them if your node is on the same host. Both binaries default pprof to
 the second one logs `pprof server failed` and keeps running without pprof.
 
 ## Startup order
+
+In standalone mode the process does this itself: the miner side first, then the
+relayer side; validate the config (`standalone validate`) and start it.
+
+In high-availability mode:
 
 1. Redis, and check `maxmemory-policy` is `noeviction`.
 2. Validate both configs: exit 0.

@@ -167,7 +167,7 @@ func (h *flushFailureHarness) inMemory(r flushFailureRelay) bool {
 // checkpoint.
 func (h *flushFailureHarness) orphanPending(r flushFailureRelay) bool {
 	h.t.Helper()
-	store, ok := h.tree.store.(*RedisMapStore)
+	store, ok := h.tree.store.(*nodeStore)
 	require.True(h.t, ok, "the tree must be backed by the real RedisMapStore")
 	store.pipelineMu.Lock()
 	defer store.pipelineMu.Unlock()

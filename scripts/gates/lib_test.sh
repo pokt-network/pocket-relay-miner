@@ -439,6 +439,26 @@ expect 2 "$(LC_ALL=C gate_spanish_hits "$(sp_repo f.md 'x')" /nonexistent/words.
 rm -rf "$sp_root"
 sp_root=''
 
+# gate_relay_miner_mode: the live gate picks every read from this answer, so a
+# wrong one points the whole run at objects that are not there.
+mode_of() { printf '%s\n' "$@" | gate_relay_miner_mode; }
+expect ha "$(mode_of deployment.apps/relayer deployment.apps/miner deployment.apps/validator)" "mode: relayer + miner is ha"
+expect standalone "$(mode_of deployment.apps/standalone deployment.apps/validator)" "mode: standalone alone is standalone"
+expect standalone "$(mode_of standalone validator path)" "mode: bare names are read too"
+expect 1 "$(mode_of standalone miner >/dev/null; echo $?)" "mode: a high-availability miner beside standalone is refused"
+expect 1 "$(mode_of standalone relayer miner >/dev/null; echo $?)" "mode: both sets at once is refused"
+expect 1 "$(mode_of relayer validator >/dev/null; echo $?)" "mode: a relayer with no miner is neither mode"
+expect 1 "$(mode_of validator >/dev/null; echo $?)" "mode: no relay miner at all is neither mode"
+expect 1 "$(printf '' | gate_relay_miner_mode >/dev/null; echo $?)" "mode: an empty listing is neither mode"
+expect 1 "$(mode_of standalone-old validator >/dev/null; echo $?)" "mode: names are matched whole -- standalone-old is not standalone"
+expect 1 "$(mode_of relayer-x miner-y >/dev/null; echo $?)" "mode: names are matched whole -- relayer-x and miner-y are not ha"
+
+expect relayer-config "$(gate_side_configmap ha relayer)" "configmap: ha relayer"
+expect miner-config "$(gate_side_configmap ha miner)" "configmap: ha miner"
+expect standalone-config "$(gate_side_configmap standalone relayer)" "configmap: standalone relayer"
+expect standalone-config "$(gate_side_configmap standalone miner)" "configmap: standalone miner"
+expect 1 "$(gate_side_configmap bogus miner >/dev/null; echo $?)" "configmap: an unknown mode is refused"
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1

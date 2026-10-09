@@ -42,6 +42,9 @@ type SessionCoordinator struct {
 	// This allows in-memory state to be updated atomically with Redis.
 	onSessionTerminal SessionTerminalCallback
 
+	// pricer prices a session's money in uPOKT for the money metrics.
+	pricer SessionPricer
+
 	// claimWindowClosedFn reports whether the claim window for a session ending
 	// at the given height has already closed. Injected rather than built from a
 	// block and a params client so this type keeps its two dependencies; nil
@@ -71,6 +74,33 @@ func (c *SessionCoordinator) SetOnSessionCreatedCallback(callback SessionCreated
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onSessionCreated = callback
+}
+
+// SetPricer sets what prices a session's money in uPOKT for the money metrics;
+// without one, every session counts as unpriced.
+func (c *SessionCoordinator) SetPricer(pricer SessionPricer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pricer = pricer
+}
+
+func (c *SessionCoordinator) price(ctx context.Context, snap *SessionSnapshot) Upokt {
+	c.mu.Lock()
+	pricer := c.pricer
+	c.mu.Unlock()
+	return quote(ctx, pricer, snap)
+}
+
+// creditClaimed counts snap's money in upokt_claimed_total when the flip that
+// put it in claimed is the one that credits it (CreditsClaimed), priced on the
+// root the claim carries.
+func (c *SessionCoordinator) creditClaimed(ctx context.Context, snap *SessionSnapshot, root []byte, r Reactivation) {
+	if !CreditsClaimed(r) {
+		return
+	}
+	priced := *snap
+	priced.ClaimedRootHash = root
+	RecordRevenueClaimed(snap.SupplierOperatorAddress, snap.ServiceID, snap.TotalComputeUnits, snap.RelayCount, c.price(ctx, &priced))
 }
 
 // SetClaimWindowClosedFn installs the predicate behind ClaimWindowClosed.
@@ -343,7 +373,9 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	}
 	c.mu.Unlock()
 
-	// Get current snapshot
+	// The weight, read before the write; the write is the atomic flip into
+	// claimed, which lets one caller through, so the claimed money is counted
+	// once even when the window close observes the same claim concurrently.
 	snapshot, err := c.sessionStore.Get(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get session snapshot: %w", err)
@@ -351,15 +383,11 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	if snapshot == nil {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-
-	// Update with claim root hash and TX hash
-	snapshot.ClaimedRootHash = claimRootHash
-	snapshot.ClaimTxHash = claimTxHash
-	snapshot.State = SessionStateClaimed
-
-	if err := c.sessionStore.Save(ctx, snapshot); err != nil {
-		return fmt.Errorf("failed to save session snapshot: %w", err)
+	reactivation, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimRootHash, claimTxHash)
+	if err != nil {
+		return fmt.Errorf("failed to save the claimed session: %w", err)
 	}
+	c.creditClaimed(ctx, snapshot, claimRootHash, reactivation)
 
 	c.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
@@ -421,11 +449,33 @@ func (c *SessionCoordinator) OnClaimObservedOnChain(
 		)
 	}
 
-	reactivated, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
+	// The weight is read before the flip; which book the failure was counted
+	// in comes from the flip itself, atomically, so a transition between this
+	// read and the flip cannot hide it. The flip lets one caller through.
+	before, beforeErr := c.sessionStore.Get(ctx, sessionID)
+	reactivation, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
 	if err != nil {
 		return fmt.Errorf("failed to reactivate session %s: %w", sessionID, err)
 	}
-	if !reactivated {
+	if CreditsClaimed(reactivation) {
+		if beforeErr == nil && before != nil {
+			c.creditClaimed(ctx, before, claimedRootHash, reactivation)
+		} else {
+			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
+				Msg("session reactivated but it could not be read to weigh it: its claimed money is not counted")
+		}
+	}
+	if book := ReinstatedBook(reactivation); book != "" {
+		if beforeErr == nil && before != nil {
+			RecordReinstated(before.SupplierOperatorAddress, before.ServiceID, string(reactivation.From), book,
+				before.RelayCount, int64(before.TotalComputeUnits), c.price(ctx, before))
+		} else {
+			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
+				Str("reactivated_from", string(reactivation.From)).
+				Msg("session reactivated but it could not be read to weigh it: its failure stays counted")
+		}
+	}
+	if reactivation.From == "" {
 		// Already at or past claimed. Not an error and not a no-op worth
 		// logging above Debug: a failed clear in the reconciler re-delivers
 		// the same observation on the next block.
@@ -534,6 +584,32 @@ func (c *SessionCoordinator) OnSessionProved(
 		Msg("session proved")
 
 	return nil
+}
+
+// OnProofObservedOnChain moves a session to proved after the chain was seen to
+// have validated its proof, whatever its submission reported: a proof can land
+// after a broadcast that reported failure, or after a process was killed
+// before it stored the proof hash. The write is the guarded atomic flip of
+// ReactivateProved, which lets one caller through; it returns what the session
+// was flipped from, so the caller credits the money once, and a zero
+// Reactivation when the session was already proved or cannot be corrected.
+func (c *SessionCoordinator) OnProofObservedOnChain(ctx context.Context, sessionID, proofTxHash string) (Reactivation, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return Reactivation{}, fmt.Errorf("session coordinator is closed")
+	}
+	terminalCallback := c.onSessionTerminal
+	c.mu.Unlock()
+
+	r, err := c.sessionStore.ReactivateProved(ctx, sessionID, proofTxHash)
+	if err != nil {
+		return Reactivation{}, fmt.Errorf("failed to move session %s to proved: %w", sessionID, err)
+	}
+	if r.From != "" && terminalCallback != nil {
+		terminalCallback(sessionID, SessionStateProved)
+	}
+	return r, nil
 }
 
 // OnClaimWindowClosed marks session as failed due to claim window timeout.
@@ -648,6 +724,9 @@ func (c *SessionCoordinator) OnClaimMissing(ctx context.Context, sessionID strin
 	if err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to read session state before marking claim_missing")
+	} else if current != nil && current.State == SessionStateClaimMissing {
+		// Already marked and counted: a session fails once.
+		return nil
 	} else if current != nil && current.State.IsSuccess() {
 		c.logger.Warn().
 			Str(logging.FieldSessionID, sessionID).
@@ -656,10 +735,26 @@ func (c *SessionCoordinator) OnClaimMissing(ctx context.Context, sessionID strin
 		return nil
 	}
 
-	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimMissing); err != nil {
+	// The verdict is written with the state, so a later reinstatement reverses
+	// exactly what this counts. Without the snapshot (its read failed above)
+	// there is no supplier, service or weight: nothing is counted or recorded.
+	verdict := ""
+	if current != nil {
+		verdict = ClaimMissingVerdictFor(current.State)
+	}
+	if err := c.sessionStore.MarkClaimMissing(ctx, sessionID, verdict); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_missing")
 		return err
+	}
+
+	// Counted once, on the transition.
+	if current != nil {
+		RecordClaimMissing(current.SupplierOperatorAddress, current.ServiceID, verdict,
+			current.RelayCount, int64(current.TotalComputeUnits), c.price(ctx, current))
+	} else {
+		c.logger.Warn().Str(logging.FieldSessionID, sessionID).
+			Msg("claim_missing not counted in sessions_failed_total: the session could not be read to weigh it")
 	}
 
 	if terminalCallback != nil {

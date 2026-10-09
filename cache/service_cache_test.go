@@ -8,9 +8,11 @@ import (
 	"time"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // frozenServiceQueryClient models the query layer's in-process cache: once it
@@ -43,7 +45,7 @@ func (f *frozenServiceQueryClient) InvalidateService(_ string) {
 func TestServiceCache_ForceRefresh_PicksUpCUPRChange(t *testing.T) {
 	client := newTestRedis(t)
 	fq := &frozenServiceQueryClient{chainCUPR: 6276}
-	sc := NewServiceCache(logging.NewLoggerFromConfig(logging.DefaultConfig()), client, fq)
+	sc := NewServiceCache(logging.NewLoggerFromConfig(logging.DefaultConfig()), kv.NewRedis(zerolog.Nop(), client), fq)
 
 	ctx := context.Background()
 	require.NoError(t, sc.Start(ctx))
@@ -78,7 +80,7 @@ func TestServiceCache_ForceRefresh_PicksUpCUPRChange(t *testing.T) {
 func TestServiceCache_L1RefreshesAfterTTL(t *testing.T) {
 	client := newTestRedis(t)
 	fq := &frozenServiceQueryClient{chainCUPR: 1000}
-	sc := NewServiceCache(logging.NewLoggerFromConfig(logging.DefaultConfig()), client, fq)
+	sc := NewServiceCache(logging.NewLoggerFromConfig(logging.DefaultConfig()), kv.NewRedis(zerolog.Nop(), client), fq)
 
 	ctx := context.Background()
 	require.NoError(t, sc.Start(ctx))

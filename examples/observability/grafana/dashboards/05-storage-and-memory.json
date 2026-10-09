@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Is Redis or process memory what is throttling me?",
+  "description": "Is Redis or process memory what is throttling me? In standalone mode the Redis rows stay empty: its embedded store is on dashboard 8 (Standalone store).",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -36,7 +36,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "0 means a gate is closed: the relayer refuses new work, or the miner pauses ingestion, until Redis has room again.",
+      "description": "0 means a gate is closed: the relayer refuses new work, or the miner pauses ingestion, until the store has room again.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -98,7 +98,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Gates close below 1 GiB free (or 1/8 of maxmemory if smaller) and reopen 512 MiB / 1 GiB above that.",
+      "description": "Redis maxmemory minus used memory in high-availability mode; free space on the disk of the embedded store in standalone mode. Gates close below 1 GiB free, or below 1/8 of maxmemory (in standalone mode 1/8 of the disk) when that is smaller, and reopen half that line (ingestion) or all of it (admission) above it: 512 MiB / 1 GiB at the full 1 GiB.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -156,7 +156,7 @@
           "refId": "A"
         }
       ],
-      "title": "Redis free (lowest seen by a process)",
+      "title": "Store free (lowest seen by a process)",
       "type": "stat"
     },
     {
@@ -1105,7 +1105,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (instance)(process_resident_memory_bytes{job=~\"relayers|miners\",instance=~\"$instance\"})",
+          "expr": "max by (instance)(process_resident_memory_bytes{job=~\"relayers|miners|standalone\",instance=~\"$instance\"})",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }

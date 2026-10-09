@@ -4,13 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
-	"os/signal"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/alitto/pond/v2"
@@ -20,6 +17,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+
 	// Aliased because runHARelayer binds a local variable named `config` to
 	// the relayer configuration, which would shadow the package name.
 	sharedconfig "github.com/pokt-network/pocket-relay-miner/config"
@@ -453,9 +452,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	}
 	if len(unknown) > 0 {
 		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
-			return fmt.Errorf(
-				"--strict-config: refusing to start, %d key(s) this relayer does not understand (listed above)",
-				len(unknown))
+			return strictConfigError("this relayer", unknown)
 		}
 	}
 
@@ -493,6 +490,26 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		logger.Info().Msg("runtime metrics collector started")
 	}
 
+	// The flag is applied to the config, so serveRelayer reads one value.
+	if cmd.Flags().Changed(flagRedisURL) {
+		config.Redis.URL, _ = cmd.Flags().GetString(flagRedisURL)
+	}
+
+	return serveRelayer(ctx, logger, config, sideHooks{
+		openKeys:      openOwnKeys(config.Keys),
+		started:       waitForSignal,
+		openPublisher: openRedisRelayPublisher,
+	})
+}
+
+// serveRelayer builds the relayer's components on a running process, serves
+// until hooks.started's channel delivers, and shuts them down in the reverse
+// order it built them (its defers). The caller owns config, logger, memory
+// limit and observability.
+func serveRelayer(parent context.Context, logger logging.Logger, config *relayer.Config, hooks sideHooks) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
 	// The relayer's concurrency budget, computed ONCE here and read by both the
 	// Redis pool below and the master worker pool further down. They describe
 	// the same thing -- how much of this process can be inside a Redis call at
@@ -503,102 +520,26 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// cgroup quota at startup, so this is what the runtime will schedule on.
 	sizing := relayer.ComputeWorkerSizingForProcess()
 
-	// An operator value wins; otherwise the pool follows the workers.
-	redisPoolSize := config.Redis.PoolSize
-	if redisPoolSize <= 0 {
-		redisPoolSize = sizing.RedisPoolSize()
-	}
-
-	// Use Redis URL from config, allow flag override
-	redisURL := config.Redis.URL
-	if cmd.Flags().Changed(flagRedisURL) {
-		redisURL, _ = cmd.Flags().GetString(flagRedisURL)
-	}
-
-	// Create wrapped Redis client with KeyBuilder for namespace-aware key construction
-	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
-		URL:                    redisURL,
-		PoolSize:               redisPoolSize,
-		MinIdleConns:           config.Redis.MinIdleConns,
-		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
-		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
-		Namespace:              config.Redis.Namespace,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create Redis client: %w", err)
-	}
-	defer func() { _ = redisClient.Close() }()
-	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
-
-	// Whether Redis can take writes, answered once for the whole relayer: every
-	// client this process writes through reports refused writes to it, and every
-	// admission path reads it.
-	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer", redistransport.StoreGateAdmission)
-	redisClient.AddHook(storeHealth.Hook())
-	// A Redis with no memory limit, or one that evicts, is refused here: the
-	// relayer would serve relays whose record the store drops or loses.
-	if err := storeHealth.Start(ctx); err != nil {
-		return fmt.Errorf("redis is not configured for this relayer: %w", err)
-	}
-
-	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
-	// files and the redis CLI build clients, and a repeated MustRegister panics.
-	// The collector is also the registry of pools, so a client per supplier can
-	// be added and removed as suppliers are adopted and released.
-	// What the pool ACTUALLY holds, published from the client. See
-	// RegisterEffectivePoolGauges: reading the config here would certify the
-	// request rather than what runs, and the pool timeout is precisely the
-	// value nobody sets and go-redis defaults behind our backs.
-	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
-		observability.SharedRegistry, "relayer", redisClient,
-	); gaugeErr != nil {
-		return fmt.Errorf("failed to register effective Redis pool gauges: %w", gaugeErr)
-	}
-
-	// The pool has to cover the workers that will use it. This compares the
-	// EFFECTIVE size -- what the client holds, not what we asked for -- against
-	// the bounded users, and refuses to start rather than discovering it under
-	// load as a queue nobody can explain.
-	//
-	// WHAT THIS GUARD DOES NOT COVER: in eager validation mode the relay meter
-	// runs inline in the HTTP handler, not inside a subpool, so its concurrency
-	// is whatever the HTTP server admits and no startup number can bound it.
-	// This guard covers the BOUNDED users; the pool metrics show the rest. Read
-	// it as "the floor is right", never as "the pool is sufficient".
-	if eff, ok := redisClient.EffectivePoolOptions(); ok {
-		needed := sizing.Validation + sizing.Publish
-		if eff.PoolSize < needed {
-			return fmt.Errorf(
-				"redis pool too small: the client holds %d connections but the bounded workers that use it "+
-					"need %d (validation %d + publish %d); raise redis.pool_size or lower the worker count",
-				eff.PoolSize, needed, sizing.Validation, sizing.Publish)
+	// Where the relayer keeps its state, and whether that store can take
+	// writes: Redis (high-availability mode), or what the process hands it.
+	openStore := hooks.openStore
+	if openStore == nil {
+		openStore = func(ctx context.Context, logger logging.Logger, _ string, _ redistransport.StoreGate) (sideStore, func(), error) {
+			return openRelayerRedisStore(ctx, logger, config, sizing)
 		}
-		logger.Info().
-			Int("pool_size_effective", eff.PoolSize).
-			Int("min_idle_conns_effective", eff.MinIdleConns).
-			Dur("pool_timeout_effective", eff.PoolTimeout).
-			Int("bounded_workers", needed).
-			Msg("Redis pool covers the bounded workers (the eager meter path is NOT bounded by this)")
-	} else {
-		logger.Warn().
-			Msg("could not read the effective Redis pool settings from this client type: " +
-				"the startup pool guard did NOT run")
 	}
-
-	// How long each Redis command really takes from here, pool wait and
-	// go-redis retries included. The pool's own wait series cannot answer that:
-	// they count only waits that ended in a connection, so their mean improves
-	// as the pool starts failing.
-	redisClient.AddHook(redistransport.NewCommandLatencyHook("relayer"))
-
-	redisPools := redistransport.NewPoolCollector("relayer")
-	redisPools.Add("shared", redisClient)
-	observability.SharedRegistry.MustRegister(redisPools)
+	st, closeStore, err := openStore(ctx, logger, "relayer", redistransport.StoreGateAdmission)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+	store, storeHealth, redisClient, redisPools := st.kv, st.health, st.redisClient, st.redisPools
+	redisURL := config.Redis.URL
 
 	// Create supplier cache for checking supplier staking state
 	supplierCache := cache.NewSupplierCache(
 		logger,
-		redisClient,
+		store,
 		cache.SupplierCacheConfig{},
 	)
 	// Start supplier cache for pub/sub subscription
@@ -651,7 +592,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create shared params cache with dynamic 2-session TTL
 	sharedParamsCache := cache.NewSharedParamsCache(
 		logger,
-		redisClient,
+		store,
 		queryClients.Shared(),
 		blockTimeSeconds,
 	)
@@ -663,7 +604,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create application cache
 	applicationCache := cache.NewApplicationCache(
 		logger,
-		redisClient,
+		store,
 		cache.NewApplicationQueryClientAdapter(queryClients.Application()),
 	)
 	if err := applicationCache.Start(ctx); err != nil {
@@ -674,7 +615,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create service cache
 	serviceCache := cache.NewServiceCache(
 		logger,
-		redisClient,
+		store,
 		cache.NewServiceQueryClientAdapter(queryClients.Service()),
 	)
 	if err := serviceCache.Start(ctx); err != nil {
@@ -686,7 +627,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// IMPORTANT: Public keys are immutable, so this cache has NO EXPIRY
 	accountCache := cache.NewAccountCache(
 		logger,
-		redisClient,
+		store,
 		queryClients.Account(),
 	)
 	if err := accountCache.Start(ctx); err != nil {
@@ -757,7 +698,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Relayers use Redis pub/sub for block synchronization (no WebSocket connections).
 	redisBlockSubscriber := cache.NewRedisBlockSubscriber(
 		logger,
-		redisClient,
+		store,
 		nil, // No direct blockchain client - events come from miner via Redis
 	)
 	if err := redisBlockSubscriber.Start(ctx); err != nil {
@@ -791,59 +732,18 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// The relayer's ApplicationCache.WarmupFromRedis() will populate L1 from L2 on startup.
 	// Discovery of apps/services happens on the miner side when processing relays from Redis streams.
 
-	// Create publisher for mined relays.
-	//
-	// No TTL is passed: relay streams do not expire. relay_meter.cache_ttl still
-	// governs the meter's own per-session keys further down; it used to double as
-	// the stream's lifetime, which deleted un-consumed relays mid-session.
-	//
-	// Always batched: one MULTI/EXEC per interval instead of one round trip per
-	// relay, which wakes the miner's blocked reader once per batch. Only the
-	// interval is configurable.
-	//
-	// The batches write through a Redis client of their own, so a busy cache or
-	// meter cannot hold the dispatch back on a shared pool: one connection per
-	// dispatch worker, plus one for the heartbeat PING sent while the queue is
-	// empty.
-	batchWorkers := relayer.BatchDispatchWorkers
-	batchRedisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
-		URL:                    redisURL,
-		PoolSize:               batchWorkers + 1,
-		MinIdleConns:           batchWorkers + 1,
-		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
-		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
-		Namespace:              config.Redis.Namespace,
+	// The publisher mined relays leave through: the batching publisher on
+	// Redis, or a standalone process's embedded queue. The batch client it may
+	// return is closed after the publisher: its final flush writes through it.
+	batcher, closeBatchClient, err := hooks.openPublisher(ctx, logger, relayPublisherDeps{
+		config: config, redisURL: redisURL, redisClient: redisClient,
+		storeHealth: storeHealth, redisPools: redisPools,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create the batch dispatch Redis client: %w", err)
+		return err
 	}
-	// Declared before the publisher's deferred Close, so it runs after it: the
-	// final flush writes through this client.
-	defer func() { _ = batchRedisClient.Close() }()
-	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
-		observability.SharedRegistry, "relayer_batch", batchRedisClient,
-	); gaugeErr != nil {
-		return fmt.Errorf("failed to register effective Redis pool gauges for the batch client: %w", gaugeErr)
-	}
-	if eff, ok := batchRedisClient.EffectivePoolOptions(); ok && eff.PoolSize < batchWorkers+1 {
-		return fmt.Errorf(
-			"batch dispatch redis pool too small: the client holds %d connections but %d dispatch workers need %d",
-			eff.PoolSize, batchWorkers, batchWorkers+1)
-	}
-	batchRedisClient.AddHook(redistransport.NewCommandLatencyHook("relayer_batch"))
-	batchRedisClient.AddHook(storeHealth.Hook())
-	redisPools.Add("batch", batchRedisClient)
-
-	batcher := redistransport.NewBatchingPublisher(
-		logger,
-		batchRedisClient.UniversalClient, // the dispatch's own client, not the shared pool
-		redisClient.KB().StreamPrefix(),  // Namespace-aware stream prefix (e.g., "ha:relays")
-		config.Redis.BatchPublishInterval(),
-		redistransport.WithDispatchWorkers(batchWorkers),
-		redistransport.WithStoreHealth(storeHealth),
-	)
+	defer closeBatchClient()
 	var publisher transport.MinedRelayPublisher = batcher
-	logger.Info().Dur("interval", config.Redis.BatchPublishInterval()).Msg("batched relay publishing")
 	// Before both Redis clients' deferred Close (declared earlier, so they run
 	// after this one): the final flush writes through the batch client, and
 	// closing it first would lose whatever the batch still held.
@@ -870,7 +770,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		Int("validation_workers", sizing.Validation).
 		Int("publish_workers", sizing.Publish).
 		Int("metrics_workers", sizing.Metrics).
-		Int("redis_pool_size", redisPoolSize).
 		Int("gomaxprocs", runtime.GOMAXPROCS(0)).
 		Int("num_cpu", runtime.NumCPU()).
 		Msg("created master worker pool (unbounded, non-blocking, 8x GOMAXPROCS)")
@@ -926,16 +825,11 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// names, put a key manager over them, load once, arm the watch and the
 	// reload timer, and refuse to continue with no keys. See keys.OpenManager
 	// for why that lives there and not here.
-	keyManager, err := keys.OpenManager(
-		ctx, logger,
-		config.Keys.KeysFile,
-		keyringSettings(config.Keys.Keyring),
-		config.Keys.HotReloadEnabled,
-	)
+	keyManager, releaseKeys, err := hooks.openKeys(ctx, logger)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = keyManager.Close() }()
+	defer releaseKeys()
 
 	loadedKeys := supplierSigningKeys(keyManager)
 
@@ -999,7 +893,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		simServiceIDs[svcID] = struct{}{}
 	}
 	simVerifier, simErr := relayer.NewSimulationVerifier(
-		logger, &config.Simulation, redisClient, responseSigner, simServiceIDs, nil,
+		logger, &config.Simulation, store, responseSigner, simServiceIDs, nil,
 	)
 	if simErr != nil {
 		return fmt.Errorf("failed to create simulation verifier: %w", simErr)
@@ -1069,7 +963,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create SharedParamCache for shared parameter caching
 	sharedParamCache := cache.NewRedisSharedParamCache(
 		logger,
-		redisClient,
+		store,
 		queryClients.Shared(),
 		blockSubscriber,
 		cacheConfig,
@@ -1083,7 +977,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create SessionCache for session validation caching
 	sessionCache := cache.NewRedisSessionCache(
 		logger,
-		redisClient,
+		store,
 		queryClients.Session(),
 		queryClients.Shared(),
 		blockSubscriber,
@@ -1166,7 +1060,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Service factors are published by the miner
 	serviceFactorClient := relayer.NewServiceFactorClient(
 		logger,
-		redisClient,
+		store,
 	)
 	if err := serviceFactorClient.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start service factor client: %w", err)
@@ -1183,7 +1077,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// plain cached client stubs GetParams to (nil, nil).
 	relayMeter := relayer.NewRelayMeter(
 		logger,
-		redisClient,
+		store,
 		cache.NewCachedApplicationQueryClientWithParams(applicationCache, queryClients.Application()),
 		queryClients.Shared(),
 		queryClients.Session(),
@@ -1282,9 +1176,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		Msg("HA Relayer started")
 
 	// Wait for shutdown signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	<-hooks.started()
 
 	logger.Info().Msg("shutdown signal received, stopping HA Relayer...")
 
@@ -1301,6 +1193,185 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	logger.Info().Msg("HA Relayer stopped")
 	return nil
+}
+
+// relayPublisher is what the relayer publishes mined relays through: the
+// batching publisher on Redis, or a standalone process's embedded queue.
+type relayPublisher interface {
+	transport.MinedRelayPublisher
+	QueuedBytes() int
+	DispatcherHealthy() (bool, error)
+	SetChargeLedger(ledger *redistransport.ChargeLedger)
+}
+
+// relayPublisherDeps are what the Redis publisher is built from.
+type relayPublisherDeps struct {
+	config      *relayer.Config
+	redisURL    string
+	redisClient *redistransport.Client
+	storeHealth *redistransport.StoreHealth
+	redisPools  *redistransport.PoolCollector
+}
+
+// openRedisRelayPublisher builds the batching publisher over a Redis client of
+// its own, and returns the function that closes that client: the caller runs it
+// AFTER the publisher's Close, whose final flush writes through it.
+//
+// No TTL is passed: relay streams do not expire. relay_meter.cache_ttl still
+// governs the meter's own per-session keys; it used to double as the stream's
+// lifetime, which deleted un-consumed relays mid-session.
+//
+// Always batched: one MULTI/EXEC per interval instead of one round trip per
+// relay, which wakes the miner's blocked reader once per batch. Only the
+// interval is configurable.
+//
+// The batches write through a Redis client of their own, so a busy cache or
+// meter cannot hold the dispatch back on a shared pool: one connection per
+// dispatch worker, plus one for the heartbeat PING sent while the queue is
+// empty.
+func openRedisRelayPublisher(ctx context.Context, logger logging.Logger, d relayPublisherDeps) (relayPublisher, func(), error) {
+	config := d.config
+	batchWorkers := relayer.BatchDispatchWorkers
+	batchRedisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
+		URL:                    d.redisURL,
+		PoolSize:               batchWorkers + 1,
+		MinIdleConns:           batchWorkers + 1,
+		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
+		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		Namespace:              config.Redis.Namespace,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create the batch dispatch Redis client: %w", err)
+	}
+	closeClient := func() { _ = batchRedisClient.Close() }
+	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
+		observability.SharedRegistry, "relayer_batch", batchRedisClient,
+	); gaugeErr != nil {
+		closeClient()
+		return nil, nil, fmt.Errorf("failed to register effective Redis pool gauges for the batch client: %w", gaugeErr)
+	}
+	if eff, ok := batchRedisClient.EffectivePoolOptions(); ok && eff.PoolSize < batchWorkers+1 {
+		closeClient()
+		return nil, nil, fmt.Errorf(
+			"batch dispatch redis pool too small: the client holds %d connections but %d dispatch workers need %d",
+			eff.PoolSize, batchWorkers, batchWorkers+1)
+	}
+	batchRedisClient.AddHook(redistransport.NewCommandLatencyHook("relayer_batch"))
+	batchRedisClient.AddHook(d.storeHealth.Hook())
+	d.redisPools.Add("batch", batchRedisClient)
+
+	batcher := redistransport.NewBatchingPublisher(
+		logger,
+		batchRedisClient.UniversalClient,  // the dispatch's own client, not the shared pool
+		d.redisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
+		config.Redis.BatchPublishInterval(),
+		redistransport.WithDispatchWorkers(batchWorkers),
+		redistransport.WithStoreHealth(d.storeHealth),
+	)
+	logger.Info().Dur("interval", config.Redis.BatchPublishInterval()).Msg("batched relay publishing")
+	return batcher, closeClient, nil
+}
+
+// openRelayerRedisStore is the relayer's store in high-availability mode: a
+// Redis client sized for the relayer's workers, the kv store over it, and the
+// health of that Redis. The returned func closes the client.
+func openRelayerRedisStore(ctx context.Context, logger logging.Logger, config *relayer.Config, sizing relayer.WorkerSizing) (sideStore, func(), error) {
+	// An operator value wins; otherwise the pool follows the workers.
+	redisPoolSize := config.Redis.PoolSize
+	if redisPoolSize <= 0 {
+		redisPoolSize = sizing.RedisPoolSize()
+	}
+
+	redisURL := config.Redis.URL
+
+	// Create wrapped Redis client with KeyBuilder for namespace-aware key construction
+	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
+		URL:                    redisURL,
+		PoolSize:               redisPoolSize,
+		MinIdleConns:           config.Redis.MinIdleConns,
+		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
+		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		Namespace:              config.Redis.Namespace,
+	})
+	if err != nil {
+		return sideStore{}, nil, fmt.Errorf("failed to create Redis client: %w", err)
+	}
+	closeClient := func() { _ = redisClient.Close() }
+	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
+
+	// The caches, the meter and the registries read and write through this:
+	// Redis, unless the process hands the relayer its own store.
+	store := kv.NewRedis(logger, redisClient)
+
+	// Whether Redis can take writes, answered once for the whole relayer: every
+	// client this process writes through reports refused writes to it, and every
+	// admission path reads it.
+	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer", redistransport.StoreGateAdmission)
+	redisClient.AddHook(storeHealth.Hook())
+	// A Redis with no memory limit, or one that evicts, is refused here: the
+	// relayer would serve relays whose record the store drops or loses.
+	if err := storeHealth.Start(ctx); err != nil {
+		closeClient()
+		return sideStore{}, nil, fmt.Errorf("redis is not configured for this relayer: %w", err)
+	}
+
+	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
+	// files and the redis CLI build clients, and a repeated MustRegister panics.
+	// The collector is also the registry of pools, so a client per supplier can
+	// be added and removed as suppliers are adopted and released.
+	// What the pool ACTUALLY holds, published from the client. See
+	// RegisterEffectivePoolGauges: reading the config here would certify the
+	// request rather than what runs, and the pool timeout is precisely the
+	// value nobody sets and go-redis defaults behind our backs.
+	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
+		observability.SharedRegistry, "relayer", redisClient,
+	); gaugeErr != nil {
+		closeClient()
+		return sideStore{}, nil, fmt.Errorf("failed to register effective Redis pool gauges: %w", gaugeErr)
+	}
+
+	// The pool has to cover the workers that will use it. This compares the
+	// EFFECTIVE size -- what the client holds, not what we asked for -- against
+	// the bounded users, and refuses to start rather than discovering it under
+	// load as a queue nobody can explain.
+	//
+	// WHAT THIS GUARD DOES NOT COVER: in eager validation mode the relay meter
+	// runs inline in the HTTP handler, not inside a subpool, so its concurrency
+	// is whatever the HTTP server admits and no startup number can bound it.
+	// This guard covers the BOUNDED users; the pool metrics show the rest. Read
+	// it as "the floor is right", never as "the pool is sufficient".
+	if eff, ok := redisClient.EffectivePoolOptions(); ok {
+		needed := sizing.Validation + sizing.Publish
+		if eff.PoolSize < needed {
+			closeClient()
+			return sideStore{}, nil, fmt.Errorf(
+				"redis pool too small: the client holds %d connections but the bounded workers that use it "+
+					"need %d (validation %d + publish %d); raise redis.pool_size or lower the worker count",
+				eff.PoolSize, needed, sizing.Validation, sizing.Publish)
+		}
+		logger.Info().
+			Int("pool_size_effective", eff.PoolSize).
+			Int("min_idle_conns_effective", eff.MinIdleConns).
+			Dur("pool_timeout_effective", eff.PoolTimeout).
+			Int("bounded_workers", needed).
+			Msg("Redis pool covers the bounded workers (the eager meter path is NOT bounded by this)")
+	} else {
+		logger.Warn().
+			Msg("could not read the effective Redis pool settings from this client type: " +
+				"the startup pool guard did NOT run")
+	}
+
+	// How long each Redis command really takes from here, pool wait and
+	// go-redis retries included. The pool's own wait series cannot answer that:
+	// they count only waits that ended in a connection, so their mean improves
+	// as the pool starts failing.
+	redisClient.AddHook(redistransport.NewCommandLatencyHook("relayer"))
+
+	redisPools := redistransport.NewPoolCollector("relayer")
+	redisPools.Add("shared", redisClient)
+	observability.SharedRegistry.MustRegister(redisPools)
+
+	return sideStore{kv: store, health: storeHealth, redisClient: redisClient, redisPools: redisPools}, closeClient, nil
 }
 
 // startHealthServer starts a simple HTTP server for health and readiness checks.
