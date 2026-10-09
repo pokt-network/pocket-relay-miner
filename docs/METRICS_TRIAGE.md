@@ -49,7 +49,11 @@ This is the money question, and only one pair of series answers it.
 `*_inclusion_outcome` is the only one written **after asking the chain** (the
 inclusion reconciler polls `GetClaim`), which is why it is the one that
 discriminates. Its other outcomes (`on_chain_missing`, `on_chain_rejected`,
-`poll_error`) are the real alarm.
+`poll_error`) are the real alarm. A claim's `poll_error` is recorded only after
+the chain could not be asked from the claim window's close until two blocks
+before the proof window's close: until then the miner keeps asking, since a
+claim found then still gets its proof. A proof's `poll_error` is recorded at
+its window's close, because the chain removes the claim in the next block.
 
 **Two different resend paths, and they are easy to confuse — this table confused
 them, twice, on 2026-09-18.** The FIRST is the restart resubmission: a miner that

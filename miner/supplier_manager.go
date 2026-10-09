@@ -3397,6 +3397,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 		claimPhase := reconcilePhase{
 			phase:             RebroadcastPhaseClaim,
 			windowCloseHeight: sharedtypes.GetClaimWindowCloseHeight,
+			pollRetryUntil:    claimPollRetryUntil,
 			verdict:           claimPhaseVerdict,
 			recordOutcome:     recordClaimOutcome,
 			recordRebroadcast: func(supplier, serviceID, result string) {
@@ -3771,6 +3772,14 @@ func resolveMissingCause(cause tx.TxInclusion, rebroadcasts int) tx.TxInclusion 
 		return tx.TxInclusionUnknown
 	}
 	return cause
+}
+
+// claimPollRetryUntil is the last height at which a claim found on chain can
+// still get its proof: the reconciler flips it to claimed at h, the lifecycle
+// moves it to proving at the next block, and a proof is accepted only below
+// the proof window close.
+func claimPollRetryUntil(p *sharedtypes.Params, sessionEnd int64) int64 {
+	return sharedtypes.GetProofWindowCloseHeight(p, sessionEnd) - 2
 }
 
 // markProvedSession moves a session whose proof the chain validated to proved,

@@ -312,6 +312,15 @@ func proofPhaseVerdict(state query.SessionProofState, _ bool) inclusionVerdict {
 type reconcilePhase struct {
 	phase             RebroadcastPhase
 	windowCloseHeight func(p *sharedtypes.Params, sessionEnd int64) int64
+	// pollRetryUntil is the last height at which an on-chain query that FAILED
+	// after the window closed is asked again next block instead of recorded as
+	// poll_error and cleared. Nil means never. The claim phase sets it: a
+	// claim stays on chain until the proof window closes (poktroll settles and
+	// removes it in the block after), and one found while its proof can still
+	// go out is a claim saved from a slash. The proof phase leaves it nil: a
+	// read after its window closes sees the claim already settled away and
+	// could not tell a validated proof from a missing one.
+	pollRetryUntil func(p *sharedtypes.Params, sessionEnd int64) int64
 	// verdict interprets one session's on-chain state FOR THIS PHASE. present is
 	// false when the supplier has no claim for that session at all, which the
 	// state alone cannot express -- the zero state is Unknown, and "absent" and
@@ -656,6 +665,15 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 					r.rebroadcast(ctx, rp, g, sessionID, entry, height, windowClose)
 				}
 			}
+			return
+		}
+		// Window closed and the chain still answerable: keep every entry and
+		// ask again next block. Nothing is resent (canRebroadcast refuses past
+		// the close); a later answer goes through the loop below as usual.
+		if rp.pollRetryUntil != nil && height <= rp.pollRetryUntil(params, g.SessionEnd) {
+			r.logger.Warn().Err(qErr).Str("phase", string(rp.phase)).Str("supplier", g.Supplier).
+				Int64("height", height).Int64("window_close", windowClose).
+				Msg("inclusion reconcile: on-chain query failed with window closed; keeping pending entries to ask again next block")
 			return
 		}
 		// Window closed and we still can't confirm — record poll_error so the
