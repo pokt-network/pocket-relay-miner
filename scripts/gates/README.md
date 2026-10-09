@@ -51,6 +51,7 @@ level 3 exercises the path that does.
 | `race.sh` | `go test -race -count=1`. `-count=1` defeats the result cache, which would otherwise satisfy the command with a PASS from a run without `-race`. |
 | `coverage.sh` | the coverage profile — what CI rejects on. |
 | `live.sh` | the money path on the Tilt localnet, per transport: serial load over every protocol through the relay CLI at `:8180`, then the settlement asserted **on-chain, per service, with exact accounting**. `--preflight-only` checks readiness and stops. |
+| `doc_versions.sh` | not a gate: the release workflow runs it on a `vX.Y.Z` tag, before any image is pushed. It fails when the docs install another version, and lists every doc line that still names it. Its self-test is in `lib_test.sh`. |
 | `all.sh` | runs the above up to a level. Fail-fast; `--keep-going` for the full picture. |
 
 **One gate, both modes.** `live.sh` reads the mode from the cluster's
