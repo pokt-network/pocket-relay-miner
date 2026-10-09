@@ -99,7 +99,7 @@ fi
 gate_step "go build"
 # -o /dev/null: without it, `go build` on a pattern that resolves to a SINGLE
 # main package writes the executable into the current directory. Measured
-# 2026-08-26 with PKG=scripts/ws-test: an 8 MB binary appeared at the repo root,
+# 2026-08-26 with PKG naming a single main package: an 8 MB binary appeared at the repo root,
 # untracked and NOT gitignored, so the next `git add` would have offered it.
 if build_out="$(go build -o /dev/null "$pkg" 2>&1)"; then
     gate_pass "root module builds"
@@ -251,7 +251,7 @@ fi
 gate_step "Tiltfile renders (both modes)"
 render_bin_dir="$(mktemp -d)"
 if build_out="$(go build -o "$render_bin_dir/pocket-relay-miner" . 2>&1)"; then
-    render_out="$(cd tilt/tiltcheck && PRM_BIN="$render_bin_dir/pocket-relay-miner" go test -count=1 -v ./... 2>&1)"
+    render_out="$(cd tilt/tiltcheck && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE PRM_BIN="$render_bin_dir/pocket-relay-miner" go test -count=1 -v ./... 2>&1)"
     render_rc=$?
     renders="$(printf '%s\n' "$render_out" | grep -c -- '^--- PASS: TestRender_' || true)"
     skips="$(printf '%s\n' "$render_out" | grep -c -- '--- SKIP' || true)"

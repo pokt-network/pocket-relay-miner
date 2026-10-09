@@ -193,8 +193,29 @@ func requireLocalnetConfigMaps(t *testing.T, res *Result) {
 	}
 }
 
+// redisDeployed reports whether the render deploys Redis: a Redis or
+// RedisCluster object, the operator's namespace, or the k8s_resource that
+// groups them.
+func redisDeployed(res *Result) bool {
+	if len(objects(res, "Redis")) > 0 || len(objects(res, "RedisCluster")) > 0 {
+		return true
+	}
+	if _, ok := objects(res, "Namespace")["redis-operator"]; ok {
+		return true
+	}
+	for _, r := range res.Resources {
+		if r.Name == "redis" || r.Name == "redis-cluster" {
+			return true
+		}
+	}
+	return false
+}
+
 func requireHA(t *testing.T, res *Result, tree string) {
 	t.Helper()
+	if !redisDeployed(res) {
+		t.Fatal("high-availability mode deployed no Redis: the relayer and the miner share it")
+	}
 	deps := objects(res, "Deployment")
 	for _, side := range []string{"relayer", "miner"} {
 		dep, ok := deps[side]
@@ -215,6 +236,9 @@ func requireHA(t *testing.T, res *Result, tree string) {
 
 func requireStandalone(t *testing.T, res *Result, tree string) {
 	t.Helper()
+	if redisDeployed(res) {
+		t.Fatal("standalone mode deployed Redis: its store is a local PVC and nothing connects to Redis")
+	}
 	deps := objects(res, "Deployment")
 	for _, side := range []string{"relayer", "miner"} {
 		if _, ok := deps[side]; ok {

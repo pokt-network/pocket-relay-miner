@@ -3,7 +3,7 @@
 This is the zero-to-running guide for the local test environment. Tilt spins up
 a full Pocket Network localnet in a **kind** Kubernetes cluster (context
 `kind-kind`): a validator, the relay miner under test in either mode (see
-"Choose the mode" below), demo backends, a gateway, and an observability stack. Once it is up you send relays with
+"Choose the mode" below), demo backends, and an observability stack. Once it is up you send relays with
 the `relay` CLI straight at a relayer ([DIRECT_CLI.md](DIRECT_CLI.md)) and run
 the HA/chaos suite against it.
 
@@ -67,17 +67,16 @@ gate reads the mode from the cluster, so both modes are validated with the same
 In standalone mode, a value the two config sections set differently in
 `pocket_node` or `keys` stops the Tiltfile with the key's name: a standalone
 config holds it once. The process runs with `--strict-config`, so a key it does
-not understand stops the pod rather than being ignored. Redis is still deployed
-when the gateway is enabled (it uses Redis); the standalone process never
-connects to it. Level 3 has passed on this setup in both modes. The static
+not understand stops the pod rather than being ignored. Standalone mode
+deploys no Redis. Level 3 has passed on this setup in both modes. The static
 gate adds `tilt/tiltcheck`: it executes the Tiltfiles of both modes with Tilt's builtins
 stubbed, asserts what they would deploy, and validates every rendered
 relay-miner config with the binary's own `validate`.
 
 ## 2. What you get (pods & replicas)
 
-With a `tilt_config.yaml` copied from `tilt_config.example.yaml` (gateway and
-observability both enabled) the cluster brings up the table below. The template
+With a `tilt_config.yaml` copied from `tilt_config.example.yaml` (observability
+enabled) the cluster brings up the table below. The template
 sets `count: 1` for the relayer and the miner, the topology the load tests and
 capacity figures come from; with no `count` at all the Tiltfile default is 2
 each (`tilt/k8s/defaults.Tiltfile`).
@@ -86,13 +85,12 @@ each (`tilt/k8s/defaults.Tiltfile`).
 |---|---|---|---|
 | `relayer` | Deployment | **1** (`relayer.count`) | stateless multi-transport proxy (under test) |
 | `miner` | Deployment | **1** (`miner.count`) | stateful claim/proof, leader-elected |
-| gateway | Deployment | 1 | the gateway that sends relays, centralized mode |
 | `validator` | Deployment | 1 | `pocketd` Shannon node (chain-id `pocket`) |
 | `redis` | StatefulSet | 1 | pod `redis-standalone-0` (via Redis operator) |
 | `redis-operator` | Deployment | 1 | Helm-installed operator |
 | `backend` / `backend-2` | Deployment | 1 each | demo RPC backends (multi-backend pool) |
 | `nginx-backend` | Deployment | 1 | nginx backend for pool testing |
-| `account-init` | Job | — | one-shot: funds the localnet accounts (apps, suppliers, gateway) |
+| `account-init` | Job | — | one-shot: funds the localnet accounts (apps, suppliers, gateway accounts) |
 | `standalone` | Deployment | 1, standalone mode only | replaces `relayer` and `miner`; a Service named `relayer` keeps the URL the suppliers are staked at |
 | `prometheus` | Deployment | 1 | metrics |
 | `grafana` | Deployment | 1 | dashboards |
@@ -119,8 +117,6 @@ ports are **not** the container ports.
 | What | Host URL / addr | Container port | Source |
 |---|---|---|---|
 | Tilt UI | <http://localhost:10350> | — | `Tiltfile` |
-| Gateway (relay entrypoint) | `http://localhost:3069/v1` | 3069 | the gateway's Tiltfile in `tilt/k8s/`, `defaults.Tiltfile` |
-| Gateway metrics | <http://localhost:9096> | 9096 | the gateway's Tiltfile in `tilt/k8s/` |
 | **Relayer relay port** (HTTP/WS/gRPC/SSE) | `http://localhost:8180` | 8080 | `relayer.Tiltfile` (`base_port` 8180) |
 | **Relayer metrics** | `http://localhost:9190/metrics` | 9090 | `relayer.Tiltfile` (`metrics_base_port` 9190) |
 | **Relayer health** | `http://localhost:8280/health`, `/ready` | 8081 | `relayer.Tiltfile` (`health_base_port` 8280) |
@@ -162,34 +158,6 @@ the signature and the backend's answer:
 # Expect: Status: ✅ SUCCESS
 pocket-relay-miner relay jsonrpc --localnet --service develop-http
 ```
-
-The requests below only confirm that the gateway is wired (gateway → relayer →
-miner-populated cache → backend). Do not judge a relay by their status: the
-gateway can answer `200` for a relay the relayer refused (see the end of this
-section and [§7](#7-sending-relays)). The service is selected with the
-`Target-Service-Id` header; `develop-http` is the localnet JSON-RPC service.
-
-```bash
-# Expect: 200
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:3069/v1 \
-  -H "Content-Type: application/json" \
-  -H "Target-Service-Id: develop-http" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-```
-
-```bash
-# Same request, but print the body so you can see the signed backend response
-curl -s -X POST http://localhost:3069/v1 \
-  -H "Content-Type: application/json" \
-  -H "Target-Service-Id: develop-http" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-```
-
-A healthy body looks like
-`{"id":1,"jsonrpc":"2.0","result":{"method":"eth_blockNumber","params":[],"status":"ok"}}`.
-If you get `200` with an empty body, the relayer likely returned a `503` that
-the gateway masked — test the relayer directly (see [DIRECT_CLI.md](DIRECT_CLI.md)) to
-see the real error.
 
 ## 5. HA / chaos / resilience suite
 
@@ -253,8 +221,7 @@ kubectl --context kind-kind logs -l app=standalone -f
 
 ```bash
 # Logs — Loki (localhost:3100) is the durable option; survives pod restarts.
-# Apps: relayer, miner, the gateway, validator, backend (`kubectl get pods`
-# shows the gateway's label). Example (last 10 min):
+# Apps: relayer, miner, standalone, validator, backend. Example (last 10 min):
 now_ns=$(date -d "now" +%s)000000000
 start_ns=$(date -d "10 minutes ago" +%s)000000000
 curl -sG 'http://localhost:3100/loki/api/v1/query_range' \
@@ -309,11 +276,6 @@ Once the smoke test passes, drive real traffic with the CLI:
 on `:8180`, verifies the supplier signature and the backend's own error field,
 and reports honest per-relay results — for single relays and for sustained load
 alike. See [DIRECT_CLI.md](DIRECT_CLI.md).
-
-The gateway runs in the localnet so the production routing path exists, but
-do **not** measure relays through it: the gateway answers a relayer `503` with `200`
-and an empty body, so a gateway-side load tool reports success for relays that
-were never mined.
 
 ## See also
 

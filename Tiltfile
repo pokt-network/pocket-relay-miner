@@ -8,12 +8,6 @@ allow_k8s_contexts('kind-kind')
 
 # Load Tilt extensions
 load("ext://restart_process", "docker_build_with_restart")
-k8s_yaml(blob("""
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: redis-operator
-"""))
 
 load("ext://secret", "secret_create_generic")
 
@@ -29,7 +23,6 @@ load("./tilt/k8s/standalone.Tiltfile", "deploy_standalone")
 load("./tilt/k8s/backend.Tiltfile", "deploy_backend")
 load("./tilt/k8s/nginx-backend.Tiltfile", "provision_nginx_backend")
 load("./tilt/k8s/observability.Tiltfile", "deploy_observability")
-load("./tilt/k8s/path.Tiltfile", "deploy_path")
 
 print("=" * 60)
 print("Pocket RelayMiner - Local Development Environment")
@@ -234,10 +227,8 @@ stringData:
 # Deploy infrastructure (order matters: Redis → Validator → Account Init → Miners → Relayers)
 print("Deploying infrastructure...")
 standalone_mode = config["relay_miner_mode"] == "standalone"
-path_enabled = config.get("path", {}).get("enabled", False)
-# Standalone mode uses no Redis. The PATH gateway does, so with PATH enabled
-# Redis is still deployed, for PATH alone: a standalone config cannot name one.
-if not standalone_mode or path_enabled:
+# Standalone mode uses no Redis; high-availability mode deploys one.
+if not standalone_mode:
     deploy_redis(config)
 deploy_validator(config)
 deploy_account_init(config, all_keys_path, genesis_path)
@@ -255,11 +246,6 @@ print("Deploying backend services...")
 deploy_backend(config)
 provision_nginx_backend()
 
-# Deploy PATH gateway (optional - routes relays to relayers)
-if config.get("path", {}).get("enabled", False):
-    print("Deploying PATH gateway...")
-    deploy_path(config)
-
 # Deploy observability (optional)
 if config["observability"]["enabled"]:
     print("Deploying observability stack...")
@@ -276,8 +262,6 @@ print("  - Grafana: http://localhost:{}".format(config["observability"]["grafana
 print("  - Validator Rest: http://localhost:{}".format(config["validator"]["ports"]["rest"]))
 print("  - Validator RPC: http://localhost:{}".format(config["validator"]["ports"]["rpc"]))
 print("  - Validator gRpc: http://localhost:{}".format(config["validator"]["ports"]["grpc"]))
-if config.get("path", {}).get("enabled", False):
-    print("  - PATH Gateway: http://localhost:{}".format(config["path"]["port"]))
 print()
 print("Commands:")
 print("  tilt up       - Start all services")

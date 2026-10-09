@@ -75,10 +75,28 @@ jobs:
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
           echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
 
+  # A final release tag must not ship with docs that install another version.
+  # It runs on every ref, so the builds that need it are never skipped, and
+  # checks only vX.Y.Z tags; it runs before any image is pushed.
+  docs-versions:
+    name: Docs Name The Released Version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Check the install pins against the tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ./scripts/gates/doc_versions.sh --expect "$GITHUB_REF_NAME"
+          else
+            echo "not a release tag: nothing to check"
+          fi
+
   build-amd64:
     name: Build AMD64
     runs-on: ubuntu-latest
-    needs: metadata
+    needs: [metadata, docs-versions]
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -124,7 +142,7 @@ jobs:
   build-arm64:
     name: Build ARM64
     runs-on: ubuntu-24.04-arm
-    needs: metadata
+    needs: [metadata, docs-versions]
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
