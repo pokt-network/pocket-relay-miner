@@ -2264,6 +2264,24 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						continue
 					}
 				}
+				// One NotFound is not a verdict: a node behind the chain, or
+				// another node of a pool, answers it for a claim that is there,
+				// and skipping the proof of a claim on chain costs a slash. The
+				// proof is deferred and the chain asked again next block; only
+				// the last pass that can still send a proof books claim_missing.
+				// Its height is read now, not the group's: the waits above can
+				// have taken blocks. A session that misses that pass ends as
+				// proof_window_closed, which loses the same money.
+				if claimErr != nil && isClaimNotFoundError(claimErr) &&
+					lc.blockClient.LastBlock(ctx).Height()+1 < proofWindowCloseHeight {
+					logger.Debug().
+						Str(logging.FieldSessionID, snapshot.SessionID).
+						Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+						Msg("pre-proof guard: no on-chain claim found yet; asking again next block")
+					RecordProofSkipped(snapshot.SupplierOperatorAddress, snapshot.ServiceID, ProofSkippedReasonClaimNotFoundYet)
+					lc.deferProof(ctx, snapshot)
+					continue
+				}
 				if claimErr != nil && isClaimNotFoundError(claimErr) {
 					logger.Warn().
 						Str(logging.FieldSessionID, snapshot.SessionID).

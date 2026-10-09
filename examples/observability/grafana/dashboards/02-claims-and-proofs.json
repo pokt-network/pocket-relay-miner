@@ -949,7 +949,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "claimed_root_unreadable alone is the deferral working; with proof_window_closed the window ran out.",
+      "description": "claimed_root_unreadable and claim_not_found_yet alone are the deferral working; with proof_window_closed or claim_missing_on_chain the window ran out.",
       "fieldConfig": {
         "defaults": {
           "color": {

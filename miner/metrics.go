@@ -2107,9 +2107,9 @@ func RecordProofRequirementCheckError(supplier, operation string) {
 // Bounded set prevents label explosion on the proofSkippedTotal counter.
 const (
 	// ProofSkippedReasonClaimMissingOnChain — pre-proof GetClaim guard found
-	// no on-chain claim for the session (tx accepted to mempool but never
-	// included, or DeliverTx rejected). Session transitions to
-	// SessionStateClaimMissing.
+	// no on-chain claim for the session on the last pass of the proof window
+	// (tx accepted to mempool but never included, or DeliverTx rejected).
+	// Session transitions to SessionStateClaimMissing.
 	ProofSkippedReasonClaimMissingOnChain = "claim_missing_on_chain"
 
 	// ProofSkippedReasonBuildFailed — ProveClosest or buildSessionHeader
@@ -2136,6 +2136,14 @@ const (
 	// of sessions that actually lost their proof is
 	// sessions_failed_total{reason="proof_window_closed"}.
 	ProofSkippedReasonClaimedRootUnreadable = "claimed_root_unreadable"
+
+	// ProofSkippedReasonClaimNotFoundYet — the pre-proof guard got NotFound
+	// for the session's claim before the last pass of the proof window. NOT
+	// terminal: the session is written back to claimed and the chain asked
+	// again next block; only a NotFound on the last pass is
+	// claim_missing_on_chain. Like claimed_root_unreadable it counts
+	// ATTEMPTS, not sessions.
+	ProofSkippedReasonClaimNotFoundYet = "claim_not_found_yet"
 )
 
 // RecordProofSkipped increments the proof-skipped counter with the given

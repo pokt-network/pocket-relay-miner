@@ -114,6 +114,12 @@ curl -s "localhost:26657/block_results?height=$H" | jq '
   deferral is doing its job. Both rising together means the window ran out.
   It counts **attempts, not sessions** — one session deferred for four blocks
   increments it four times — so it is not a denominator for anything.
+- **`proof_skipped_total{reason="claim_not_found_yet"}`** is the same kind of
+  deferral: the node answered that the session's claim does not exist, which a
+  node behind the chain also answers. The session goes back to `claimed` and the
+  chain is asked again next block; only a NotFound on the last pass of the proof
+  window books it `claim_missing` (`reason="claim_missing_on_chain"`). It
+  counts attempts, not sessions.
 - **`sessions_failed_total{reason="claim_missing"}`** and
   **`{reason="claim_window_closed"}`**: a session whose claim the chain did not
   hold at proof time, or whose claim window was marked closed. If the chain is

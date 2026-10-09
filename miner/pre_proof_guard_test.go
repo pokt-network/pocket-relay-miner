@@ -168,9 +168,10 @@ func (s *stubProofQueryClient) GetParams(_ context.Context) (pocktclient.ProofPa
 // running the full OnSessionsNeedProof pipeline. OnSessionsNeedProof requires
 // a block client, shared client, proof checker, smst manager, and a live
 // transaction client — all of which are covered by other tests. What matters
-// for WS-A is: (a) NotFound → mark missing + metric + skip; (b) Found →
-// proceed; (c) other RPC error → fail open. We test that decision logic by
-// calling the guard branches directly.
+// for WS-A is: (a) NotFound → skip; (b) Found → proceed; (c) other RPC error
+// → fail open. We test that decision logic by calling the guard branches
+// directly. What a NotFound does to the session runs through the real cycle in
+// pre_proof_notfound_test.go.
 
 // runGuard replicates the guard logic from OnSessionsNeedProof so we can
 // assert its behavior without spinning up the full pipeline. Keep this in
@@ -184,56 +185,7 @@ func runGuard(
 		return false
 	}
 	_, err := lc.proofQueryClient.GetClaim(ctx, snapshot.SupplierOperatorAddress, snapshot.SessionID)
-	if err != nil && isClaimNotFoundError(err) {
-		RecordProofSkipped(snapshot.SupplierOperatorAddress, snapshot.ServiceID, ProofSkippedReasonClaimMissingOnChain)
-		if lc.sessionCoordinator != nil {
-			_ = lc.sessionCoordinator.OnClaimMissing(ctx, snapshot.SessionID)
-		}
-		return true
-	}
-	return false
-}
-
-func TestPreProofGuard_NotFound_SkipsAndMarks(t *testing.T) {
-	coord, store, _ := setupTestCoordinator(t)
-	ctx := context.Background()
-
-	require.NoError(t, store.Save(ctx, &SessionSnapshot{
-		SessionID:               "sess-notfound",
-		SupplierOperatorAddress: "pokt1test",
-		ServiceID:               "svc-a",
-		ApplicationAddress:      "pokt1app",
-		SessionStartHeight:      100,
-		SessionEndHeight:        110,
-		State:                   SessionStateClaimed,
-	}))
-
-	stub := &stubProofQueryClient{
-		getClaimFn: func(ctx context.Context, supplier, sessionID string) (pocktclient.Claim, error) {
-			return nil, status.Error(codes.NotFound, "claim not found")
-		},
-	}
-
-	lc := &LifecycleCallback{
-		logger:             logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		config:             DefaultLifecycleCallbackConfig(),
-		sessionCoordinator: coord,
-		proofQueryClient:   stub,
-	}
-
-	snapshot := &SessionSnapshot{
-		SessionID:               "sess-notfound",
-		SupplierOperatorAddress: "pokt1test",
-		ServiceID:               "svc-a",
-	}
-
-	skipped := runGuard(ctx, lc, snapshot)
-	require.True(t, skipped, "NotFound must cause the guard to skip the session")
-	require.Equal(t, 1, stub.calls)
-
-	got, err := store.Get(ctx, "sess-notfound")
-	require.NoError(t, err)
-	assert.Equal(t, SessionStateClaimMissing, got.State)
+	return err != nil && isClaimNotFoundError(err)
 }
 
 func TestPreProofGuard_Found_Proceeds(t *testing.T) {

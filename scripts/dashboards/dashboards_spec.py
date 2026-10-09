@@ -136,7 +136,7 @@ def specs(g):
                 ts("Resends by result", [(R("ha_miner_claim_rebroadcasts_total", "result"), "claim {{result}}"), (R("ha_miner_proof_rebroadcasts_total", "result"), "proof {{result}}")], "short",
                    "window_closed is work lost to the window.", w=8),
                 ts("Proofs skipped by reason", [(R("ha_miner_proof_skipped_total", "reason"), "{{reason}}"), (R("ha_tx_proof_not_required_total"), "chain: not required")], "short",
-                   "claimed_root_unreadable alone is the deferral working; with proof_window_closed the window ran out.", w=8),
+                   "claimed_root_unreadable and claim_not_found_yet alone are the deferral working; with proof_window_closed or claim_missing_on_chain the window ran out.", w=8),
                 ts("Proof requirement", [(R("ha_miner_proof_requirement_required_total", "reason"), "required {{reason}}"), (R("ha_miner_proof_requirement_skipped_total"), "not required"),
                     (R("ha_miner_proof_requirement_checks_total"), "checks"), (R("ha_miner_proof_requirement_errors_total", "operation"), "error {{operation}}")], "short",
                    "Checks count decisions, not sessions: not a denominator.", w=8),
