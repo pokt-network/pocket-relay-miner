@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -65,9 +64,11 @@ func ExclusiveURL(t testing.TB) string {
 	// The generic container rather than the redis module: the module is a
 	// separate Go module, and one dependency is enough for this.
 	ctx := context.Background()
+	reapLeaked()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "redis:8.10.1-alpine",
+			Labels:       exclusiveLabels(),
 			ExposedPorts: []string{"6379/tcp"},
 			Cmd: []string{
 				"redis-server",
@@ -88,10 +89,9 @@ func ExclusiveURL(t testing.TB) string {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := container.Terminate(ctx); err != nil {
-			// Not fatal: Ryuk removes it when the session ends, which is the
-			// reason it stays enabled. A test binary killed with SIGKILL never
-			// reaches this cleanup at all, and this machine has killed two runs.
-			t.Logf("could not terminate the exclusive Redis (the reaper will): %v", err)
+			// Not fatal: the next run's reapLeaked removes it, as it removes
+			// the container of a test binary killed before this cleanup ran.
+			t.Logf("could not terminate the exclusive Redis (the next run removes it): %v", err)
 		}
 	})
 
@@ -128,11 +128,6 @@ func Exclusive(t testing.TB) *redis.Client {
 func requireDocker(t testing.TB) {
 	t.Helper()
 
-	if ryukDisabledOffCI(os.Getenv) {
-		t.Fatal("TESTCONTAINERS_RYUK_DISABLED is set: the reaper is what removes these containers " +
-			"when a test binary is killed, and a killed binary never runs its cleanup")
-	}
-
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker is not installed: this test configures a Redis server and needs one of its own")
 	}
@@ -146,12 +141,4 @@ func requireDocker(t testing.TB) {
 		}
 		t.Skipf("docker is installed but not usable -- daemon stopped, or this user is not in the docker group: %s", out)
 	}
-}
-
-// ryukDisabledOffCI reports a disabled reaper where the reaper matters. On
-// GitHub Actions the runner is discarded after the job, and every container
-// with it, so there the reaper protects nothing and CI turns it off: waiting
-// for it to report ready failed a CI run on its own.
-func ryukDisabledOffCI(getenv func(string) string) bool {
-	return getenv("TESTCONTAINERS_RYUK_DISABLED") == "true" && getenv("GITHUB_ACTIONS") != "true"
 }
