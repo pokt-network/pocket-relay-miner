@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -32,6 +33,16 @@ const ExclusiveMaxmemoryBytes = 512 << 20
 // storeEvictionPolicy because that constant is unexported and importing the
 // package under test from here would invert the dependency.
 const exclusiveEvictionPolicy = "noeviction"
+
+// exclusiveImage is the Redis image, from REDIS_TEST_IMAGE when set, as
+// scripts/gates/redis.sh reads it: CI points it at a mirror, because pulls
+// from Docker Hub without credentials hit its rate limit.
+func exclusiveImage() string {
+	if image := os.Getenv("REDIS_TEST_IMAGE"); image != "" {
+		return image
+	}
+	return "redis:8.10.1-alpine"
+}
 
 // ExclusiveURL starts a Redis that belongs to THIS TEST ALONE and returns its
 // URL. The container is torn down when the test ends.
@@ -67,7 +78,7 @@ func ExclusiveURL(t testing.TB) string {
 	reapLeaked()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "redis:8.10.1-alpine",
+			Image:        exclusiveImage(),
 			Labels:       exclusiveLabels(),
 			ExposedPorts: []string{"6379/tcp"},
 			Cmd: []string{
