@@ -459,6 +459,44 @@ expect standalone-config "$(gate_side_configmap standalone relayer)" "configmap:
 expect standalone-config "$(gate_side_configmap standalone miner)" "configmap: standalone miner"
 expect 1 "$(gate_side_configmap bogus miner >/dev/null; echo $?)" "configmap: an unknown mode is refused"
 
+# doc_versions.sh, on throwaway repos: each case is one tree, and the check
+# reads tracked files only, so each fixture is `git add`ed.
+dv_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/doc_versions.sh"
+dv_root="$(mktemp -d)"
+# dv_run NAME ARGS... -- reads "path<TAB>content" rows on stdin, builds the
+# repo, runs the check and prints "rc|output".
+dv_run() {
+    local d="$dv_root/$1" path content out rc
+    shift
+    mkdir -p "$d"
+    while IFS=$'\t' read -r path content; do
+        mkdir -p "$d/$(dirname "$path")"
+        printf '%s\n' "$content" >>"$d/$path"
+    done
+    out="$(cd "$d" && git init -q . && git add -A && "$dv_script" --min 2 "$@" 2>&1)"
+    rc=$?
+    printf '%s|%s' "$rc" "$out"
+}
+dv_ok=$'docs/a.md\timage: ghcr.io/pokt-network/pocket-relay-miner:v1.2.3\ndocs/b.md\tgit clone --branch v1.2.3 repo\nexamples/c.yaml\timage: ghcr.io/pokt-network/pocket-relay-miner:v1.2.3\ndocs/benchmarks/v1.0.0/r.md\tpocket-relay-miner:v1.0.0 measured'
+r="$(printf '%s\n' "$dv_ok" | dv_run agree)"
+expect 0 "${r%%|*}" "doc_versions: pins that agree pass (a benchmark of an old release is not a pin)"
+r="$(printf '%s\n' "$dv_ok" | dv_run expect-same --expect v1.2.3)"
+expect 0 "${r%%|*}" "doc_versions: --expect the version the docs install passes"
+r="$(printf '%s\n' "$dv_ok" | dv_run expect-rc --expect v1.2.4-rc.1)"
+expect 0 "${r%%|*}" "doc_versions: a pre-release is not checked"
+r="$(printf '%s\n' "$dv_ok" | dv_run expect-new --expect v1.2.4)"
+expect 1 "${r%%|*}" "doc_versions: --expect a new tag fails while the docs install the old one"
+case "$r" in *"docs/b.md:1:"*) ;; *) expect "names docs/b.md:1" "$r" "doc_versions: --expect lists prose naming the old version, not only pins" ;; esac
+r="$(printf '%s\n%s\n' "$dv_ok" $'docs/d.md\tdocker pull ghcr.io/pokt-network/pocket-relay-miner:v1.2.2' | dv_run disagree)"
+expect 1 "${r%%|*}" "doc_versions: pins naming two versions fail"
+case "$r" in *"docs/d.md:1:"*) ;; *) expect "names docs/d.md:1" "$r" "doc_versions: the failure names the stale pin" ;; esac
+r="$(printf '%s\n%s\n' "$dv_ok" $'docs/e.md\tdocker pull ghcr.io/pokt-network/pocket-relay-miner:latest' | dv_run latest)"
+expect 1 "${r%%|*}" "doc_versions: a moving tag in the docs fails"
+r="$(printf '%s\n' $'docs/a.md\tno pins here' | dv_run none)"
+expect 1 "${r%%|*}" "doc_versions: no pins is a broken matcher, not a clean tree"
+case "$r" in *"matcher is broken"*) ;; *) expect "the matcher is broken" "$r" "doc_versions: no pins says the matcher is broken" ;; esac
+rm -rf "$dv_root"
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1
