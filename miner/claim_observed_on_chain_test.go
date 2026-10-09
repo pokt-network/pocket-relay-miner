@@ -43,7 +43,8 @@ func TestResumedUnsentClaimFoundOnChainIsBookedClaimed(t *testing.T) {
 	cb := newResumeCallback()
 	cb.observeClaim = func(ctx context.Context, s *SessionSnapshot) (bool, error) {
 		// What LifecycleCallback.ObserveClaimOnChain does when GetClaim finds it.
-		return cb.store.ReactivateClaimed(ctx, s.SessionID, claimOnChainRoot(), s.ClaimTxHash)
+		r, err := cb.store.ReactivateClaimed(ctx, s.SessionID, claimOnChainRoot(), s.ClaimTxHash)
+		return r.From != "", err
 	}
 	snapshot := resumeSnapshot(SessionStateClaiming)
 	m, store, _ := startAfterRestartWith(t, cb, snapshot, claimClose+1)

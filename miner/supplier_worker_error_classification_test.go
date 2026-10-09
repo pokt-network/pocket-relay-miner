@@ -221,7 +221,7 @@ func (s *errorOnIncrementStore) MarkClaimMissing(ctx context.Context, sessionID 
 	return s.inner.MarkClaimMissing(ctx, sessionID, verdict)
 }
 
-func (s *errorOnIncrementStore) ReactivateClaimed(ctx context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (bool, error) {
+func (s *errorOnIncrementStore) ReactivateClaimed(ctx context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (Reactivation, error) {
 	return s.inner.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
 }
 func (s *errorOnIncrementStore) IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {

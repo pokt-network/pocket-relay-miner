@@ -541,10 +541,12 @@ func TestClaimMissing_AReinstatedForgoneSessionIsTakenBackFromForgone(t *testing
 func TestClaimMissing_AReactivationOfAnotherStateReversesNothing(t *testing.T) {
 	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
 		ctx := context.Background()
-		seedForClaimMissing(t, store, "sess-window", service, SessionStateClaimWindowClosed)
+		// claim_tx_error counted an attempt and no money: nothing to take back.
+		seedForClaimMissing(t, store, "sess-txerr", service, SessionStateClaimTxError)
 		back, _ := reinstatedProbe("pokt1test", service, ClaimMissingLost)
-		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-window", make([]byte, SMSTRootLen), "deadbeef"))
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-txerr", make([]byte, SMSTRootLen), "deadbeef"))
 		again, _ := reinstatedProbe("pokt1test", service, ClaimMissingLost)
 		require.Equal(t, back, again)
+		require.Zero(t, testutil.ToFloat64(sessionsReinstatedTotal.WithLabelValues("pokt1test", service, string(SessionStateClaimTxError))))
 	})
 }

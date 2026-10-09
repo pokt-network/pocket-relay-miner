@@ -114,12 +114,14 @@ curl -s "localhost:26657/block_results?height=$H" | jq '
   deferral is doing its job. Both rising together means the window ran out.
   It counts **attempts, not sessions** — one session deferred for four blocks
   increments it four times — so it is not a denominator for anything.
-- **`sessions_failed_total{reason="claim_missing"}`**: a session whose claim the
-  chain did not hold at proof time. If the chain is later seen to hold it after
-  all, the session comes back to `claimed` and is taken back in
-  `sessions_reinstated_total`, its money in `upokt_reinstated_total{from}`: the
-  net is the failed count minus the reinstated one. Counters never go down, so
-  every reader subtracts.
+- **`sessions_failed_total{reason="claim_missing"}`** and
+  **`{reason="claim_window_closed"}`**: a session whose claim the chain did not
+  hold at proof time, or whose claim window was marked closed. If the chain is
+  later seen to hold the claim after all, the session comes back to `claimed`
+  and is taken back in `sessions_reinstated_total{reason}`, its money in
+  `upokt_reinstated_total{reason,from}` (`from` the book it had been counted
+  in): the net is the failed count minus the reinstated one. Counters never go
+  down, so every reader subtracts.
 - **`sessions_failed_total{reason="proof_window_closed"}`**: includes sessions
   whose proof was already on chain before the process restarted.
 - **`proofs_submitted_total`** does not count a proof that landed on a rebroadcast,

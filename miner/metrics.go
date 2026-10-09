@@ -539,7 +539,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "sessions_reinstated_total",
-			Help:      "Failed sessions taken back because the chain was later seen to hold their claim, by the reason they had been counted under (claim_missing). Subtract from sessions_failed_total for the net count",
+			Help:      "Failed sessions taken back because the chain was later seen to hold their claim, by the reason they had been counted under (claim_missing, claim_window_closed). Subtract from sessions_failed_total for the net count",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -548,7 +548,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_reinstated_total",
-			Help:      "Relays taken back from relays_lost_total or relays_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing). Subtract from the series from names",
+			Help:      "Relays taken back from relays_lost_total or relays_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed). Subtract from the series from names",
 		},
 		[]string{"supplier", "service_id", "reason", "from"},
 	)
@@ -557,7 +557,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "compute_units_reinstated_total",
-			Help:      "Compute units taken back from compute_units_lost_total or compute_units_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing). Subtract from the series from names",
+			Help:      "Compute units taken back from compute_units_lost_total or compute_units_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed). Subtract from the series from names",
 		},
 		[]string{"supplier", "service_id", "reason", "from"},
 	)
@@ -566,7 +566,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "upokt_reinstated_total",
-			Help:      "uPOKT taken back from upokt_lost_total or upokt_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing). Subtract from the series from names: upokt_claimed_total = upokt_proved_total + (upokt_lost_total - this{from=lost}) + (upokt_unresolved_opened_total - upokt_unresolved_resolved_total)",
+			Help:      "uPOKT taken back from upokt_lost_total or upokt_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed). Subtract from the series from names: upokt_claimed_total = upokt_proved_total + (upokt_lost_total - this{from=lost}) + (upokt_unresolved_opened_total - upokt_unresolved_resolved_total)",
 		},
 		[]string{"supplier", "service_id", "reason", "from"},
 	)
@@ -1905,15 +1905,35 @@ func RecordClaimMissing(supplier, serviceID, verdict string, relays, computeUnit
 	recordSessionLoss(supplier, serviceID, "claim_missing", relays, computeUnits, upokt)
 }
 
-// RecordClaimMissingReinstated reverses RecordClaimMissing for a session the
-// chain was later seen to hold the claim of: it comes back to claimed and is
-// proved like any other, so it must not stay a failed session with lost money.
-func RecordClaimMissingReinstated(supplier, serviceID, verdict string, relays, computeUnits int64, upokt Upokt) {
+// ReinstatedBook is the book a reactivated session's failure was counted in,
+// "" when it counted no money: claim_missing by the verdict it carried,
+// claim_window_closed as RecordClaimWindowClosed decided it (lost with a claim
+// tx hash, forgone without). claim_tx_error is reactivated only by the
+// inclusion reconciler, which means an entry existed: RecordClaimTxError
+// counted an attempt and no money.
+func ReinstatedBook(r Reactivation) string {
+	switch r.From {
+	case SessionStateClaimMissing:
+		return r.ClaimMissingVerdict
+	case SessionStateClaimWindowClosed:
+		if r.ClaimTxHash != "" {
+			return ClaimMissingLost
+		}
+		return ClaimMissingForgone
+	}
+	return ""
+}
+
+// RecordReinstated reverses the failure of a session the chain was later seen
+// to hold the claim of, by the state it failed in (reason) and the book its
+// money went to (from): it comes back to claimed and is proved like any other,
+// so it must not stay a failed session with lost or forgone money.
+func RecordReinstated(supplier, serviceID, reason, from string, relays, computeUnits int64, upokt Upokt) {
 	cu := float64(computeUnits)
-	sessionsReinstatedTotal.WithLabelValues(supplier, serviceID, "claim_missing").Inc()
-	relaysReinstatedTotal.WithLabelValues(supplier, serviceID, "claim_missing", verdict).Add(float64(relays))
-	computeUnitsReinstatedTotal.WithLabelValues(supplier, serviceID, "claim_missing", verdict).Add(cu)
-	addUpokt(upoktReinstatedTotal.WithLabelValues(supplier, serviceID, "claim_missing", verdict), supplier, serviceID, "reinstated", cu, upokt)
+	sessionsReinstatedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
+	relaysReinstatedTotal.WithLabelValues(supplier, serviceID, reason, from).Add(float64(relays))
+	computeUnitsReinstatedTotal.WithLabelValues(supplier, serviceID, reason, from).Add(cu)
+	addUpokt(upoktReinstatedTotal.WithLabelValues(supplier, serviceID, reason, from), supplier, serviceID, "reinstated", cu, upokt)
 }
 
 // RecordClaimEjectedUnrecoverable records a claim the chain named inside a batch

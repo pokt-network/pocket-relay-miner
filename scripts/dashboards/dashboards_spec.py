@@ -80,7 +80,7 @@ def specs(g):
                 ),
             row("Taken back: a claim the chain held after all",
                 stat("Sessions reinstated", [T("ha_miner_sessions_reinstated_total")], "short", [(None, GREEN), (1, YELLOW)],
-                     "Sessions counted claim_missing that came back to claimed when the chain was seen to hold their claim. Above 0 means the pre-proof claim check was answered wrong.", w=6),
+                     "Failed sessions that came back to claimed when the chain was seen to hold their claim, by the reason they failed under (the sessions table above). claim_missing: the pre-proof claim check was answered wrong. claim_window_closed: the claim landed after the window was marked closed.", w=6),
                 ts("Taken back by book (POKT/s)", [(pokt(R("ha_miner_upokt_reinstated_total", "from")), "{{from}}")], "short", "Subtracted from the Lost and Forgone stats above.", w=6),
                 ts("Relays taken back", [(R("ha_miner_relays_reinstated_total", "from"), "{{from}}")], "short", "relays/s", w=6),
                 ts("Compute units taken back", [(R("ha_miner_compute_units_reinstated_total", "from"), "{{from}}")], "short", "compute units/s", w=6),

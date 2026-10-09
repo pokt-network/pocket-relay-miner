@@ -439,23 +439,25 @@ func (c *SessionCoordinator) OnClaimObservedOnChain(
 		)
 	}
 
-	// Read before the flip: a session counted claim_missing carries the verdict
-	// the flip clears. claim_missing is terminal, so only this flip can change
-	// it, and the flip lets one caller through.
+	// The weight is read before the flip; which book the failure was counted
+	// in comes from the flip itself, atomically, so a transition between this
+	// read and the flip cannot hide it. The flip lets one caller through.
 	before, beforeErr := c.sessionStore.Get(ctx, sessionID)
-	reactivated, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
+	reactivation, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
 	if err != nil {
 		return fmt.Errorf("failed to reactivate session %s: %w", sessionID, err)
 	}
-	if reactivated && beforeErr == nil && before != nil &&
-		before.State == SessionStateClaimMissing && before.ClaimMissingVerdict != "" {
-		RecordClaimMissingReinstated(before.SupplierOperatorAddress, before.ServiceID, before.ClaimMissingVerdict,
-			before.RelayCount, int64(before.TotalComputeUnits), c.price(ctx, before))
-	} else if reactivated && beforeErr != nil {
-		c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
-			Msg("session reactivated but its state before could not be read: a claim_missing verdict, if any, stays counted")
+	if book := ReinstatedBook(reactivation); book != "" {
+		if beforeErr == nil && before != nil {
+			RecordReinstated(before.SupplierOperatorAddress, before.ServiceID, string(reactivation.From), book,
+				before.RelayCount, int64(before.TotalComputeUnits), c.price(ctx, before))
+		} else {
+			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
+				Str("reactivated_from", string(reactivation.From)).
+				Msg("session reactivated but it could not be read to weigh it: its failure stays counted")
+		}
 	}
-	if !reactivated {
+	if reactivation.From == "" {
 		// Already at or past claimed. Not an error and not a no-op worth
 		// logging above Debug: a failed clear in the reconciler re-delivers
 		// the same observation on the next block.

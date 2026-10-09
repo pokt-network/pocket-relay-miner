@@ -67,7 +67,7 @@ func TestPebbleSessionStore_ReactivateClaimedOnlyFromAnUnclaimedState(t *testing
 
 	flipped, err := s.ReactivateClaimed(ctx, "s1", []byte("root"), "tx1")
 	require.NoError(t, err)
-	require.True(t, flipped)
+	require.NotEmpty(t, flipped.From)
 	snap, err := s.Get(ctx, "s1")
 	require.NoError(t, err)
 	require.Equal(t, SessionStateClaimed, snap.State)
@@ -76,7 +76,7 @@ func TestPebbleSessionStore_ReactivateClaimedOnlyFromAnUnclaimedState(t *testing
 
 	flipped, err = s.ReactivateClaimed(ctx, "s2", []byte("root"), "tx2")
 	require.NoError(t, err)
-	require.False(t, flipped, "a proved session is past claimed: nothing written")
+	require.Equal(t, Reactivation{}, flipped, "a proved session is past claimed: nothing written")
 }
 
 func TestPebbleSessionStore_IncrementRefusesATerminalSession(t *testing.T) {

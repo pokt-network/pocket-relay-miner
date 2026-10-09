@@ -408,26 +408,29 @@ func (s *pebbleSessionStore) updateState(sessionID string, newState SessionState
 	return err
 }
 
-func (s *pebbleSessionStore) ReactivateClaimed(_ context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (bool, error) {
-	done, needSync, err := s.reactivateClaimedLocked(sessionID, claimedRootHash, claimTxHash)
-	if err != nil || !done {
-		return false, err
+func (s *pebbleSessionStore) ReactivateClaimed(_ context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (Reactivation, error) {
+	from, needSync, err := s.reactivateClaimedLocked(sessionID, claimedRootHash, claimTxHash)
+	if err != nil || from.From == "" {
+		return Reactivation{}, err
 	}
-	return true, s.syncTx(needSync, sessionID)
+	if err := s.syncTx(needSync, sessionID); err != nil {
+		return Reactivation{}, err
+	}
+	return from, nil
 }
 
-func (s *pebbleSessionStore) reactivateClaimedLocked(sessionID string, claimedRootHash []byte, claimTxHash string) (done, needSync bool, err error) {
+func (s *pebbleSessionStore) reactivateClaimedLocked(sessionID string, claimedRootHash []byte, claimTxHash string) (from Reactivation, needSync bool, err error) {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 	snap, err := s.getLocked(sessionID)
 	if err != nil {
-		return false, false, err
+		return Reactivation{}, false, err
 	}
 	if snap == nil {
-		return false, false, fmt.Errorf("session not found: %s", sessionID)
+		return Reactivation{}, false, fmt.Errorf("session not found: %s", sessionID)
 	}
 	if !canReactivateClaimed(snap.State) {
-		return false, false, nil
+		return Reactivation{}, false, nil
 	}
 	prev := *snap
 	snap.State = SessionStateClaimed
@@ -438,7 +441,10 @@ func (s *pebbleSessionStore) reactivateClaimedLocked(sessionID string, claimedRo
 	}
 	snap.LastUpdatedAt = time.Now()
 	needSync, err = s.writeLocked(&prev, snap)
-	return err == nil, needSync, err
+	if err != nil {
+		return Reactivation{}, false, err
+	}
+	return Reactivation{From: prev.State, ClaimMissingVerdict: prev.ClaimMissingVerdict, ClaimTxHash: prev.ClaimTxHash}, needSync, nil
 }
 
 func (s *pebbleSessionStore) IncrementRelayCount(_ context.Context, sessionID string, computeUnits uint64) error {
