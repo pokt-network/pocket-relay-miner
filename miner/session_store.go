@@ -235,6 +235,13 @@ type SessionStore interface {
 	// counted reads it without racing a concurrent transition.
 	ReactivateClaimed(ctx context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (Reactivation, error)
 
+	// ReactivateProved atomically moves a session to SessionStateProved after
+	// the chain was observed to have validated its proof, filling the proof
+	// tx hash when the session has none. It flips only a session the chain's
+	// verdict can correct (canReactivateProved) and returns what it flipped
+	// from, a zero Reactivation when nothing was written, or an error.
+	ReactivateProved(ctx context.Context, sessionID string, proofTxHash string) (Reactivation, error)
+
 	// IncrementRelayCount atomically increments the relay count and compute units.
 	IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error
 
@@ -864,9 +871,6 @@ func (s *RedisSessionStore) updateState(ctx context.Context, sessionID string, n
 	return nil
 }
 
-// reindexState moves a session between the per-state index sets after its
-// state changed. Best-effort: the hash is the source of truth and the index
-// is a lookup accelerator, so a failure here is logged, not returned.
 // checkStateWrite returns why newState may not be written over snap, or nil.
 // The rules are updateStateScript's, which applies them atomically in Redis;
 // this is the same rules for a store that holds the session as one value.
@@ -899,6 +903,82 @@ func canReactivateClaimed(state SessionState) bool {
 	return false
 }
 
+// canReactivateProved reports whether ReactivateProved flips a session in this
+// state carrying this proof tx hash, as reactivateProvedScript decides: one
+// whose proof could have gone out (claimed, proving), whose submission reported
+// a failure (proof_tx_error), or whose window closed on a proof that was sent
+// (proof_window_closed with a hash). A proof_window_closed with no hash was
+// counted lost when it closed, and nothing that observes a proof reaches it.
+func canReactivateProved(state SessionState, proofTxHash string) bool {
+	switch state {
+	case SessionStateClaimed, SessionStateProving, SessionStateProofTxError:
+		return true
+	case SessionStateProofWindowClosed:
+		return proofTxHash != ""
+	}
+	return false
+}
+
+// luaCanReactivateProved is canReactivateProved for reactivateProvedScript;
+// TestLuaCanReactivateProvedMatchesGo fails if the two diverge.
+const luaCanReactivateProved = `
+local function can_reactivate_proved(state, proof_tx_hash)
+	if state == 'claimed' or state == 'proving' or state == 'proof_tx_error' then
+		return true
+	end
+	return state == 'proof_window_closed' and proof_tx_hash ~= ''
+end
+`
+
+var reactivateProvedScript = redis.NewScript(luaCanReactivateProved + `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+	return redis.error_reply('session not found')
+end
+if redis.call('TYPE', KEYS[1])['ok'] ~= 'hash' then
+	return redis.error_reply('legacy key')
+end
+local old_state = redis.call('HGET', KEYS[1], 'state')
+local old_proof = redis.call('HGET', KEYS[1], 'proof_tx_hash') or ''
+if not can_reactivate_proved(old_state, old_proof) then
+	return {'', '', '', ''}
+end
+redis.call('HSET', KEYS[1], 'state', 'proved', 'last_updated_at', ARGV[2])
+if old_proof == '' and ARGV[1] ~= '' then
+	redis.call('HSET', KEYS[1], 'proof_tx_hash', ARGV[1])
+end
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return {old_state, '', redis.call('HGET', KEYS[1], 'claim_tx_hash') or '', old_proof}
+`)
+
+// ReactivateProved implements SessionStore. See the interface for the contract
+// and reactivateProvedScript for the guard.
+func (s *RedisSessionStore) ReactivateProved(ctx context.Context, sessionID string, proofTxHash string) (Reactivation, error) {
+	res, err := reactivateProvedScript.Run(ctx, s.redisClient, []string{s.sessionKey(sessionID)},
+		proofTxHash, time.Now().Format(time.RFC3339Nano), int64(s.config.SessionTTL.Seconds()),
+	).StringSlice()
+	if err != nil {
+		if strings.Contains(err.Error(), "session not found") {
+			return Reactivation{}, fmt.Errorf("session not found: %s", sessionID)
+		}
+		return Reactivation{}, fmt.Errorf("failed to move session %s to proved: %w", sessionID, err)
+	}
+	if len(res) != 4 {
+		return Reactivation{}, fmt.Errorf("failed to move session %s to proved: script returned %d fields", sessionID, len(res))
+	}
+	if res[0] == "" {
+		return Reactivation{}, nil
+	}
+	s.reindexState(ctx, sessionID, SessionState(res[0]), SessionStateProved)
+	s.logger.Info().
+		Str("session_id", sessionID).
+		Str("old_state", res[0]).
+		Msg("session moved to proved: the chain validated its proof")
+	return Reactivation{From: SessionState(res[0]), ClaimTxHash: res[2], ProofTxHash: res[3]}, nil
+}
+
+// reindexState moves a session between the per-state index sets after its
+// state changed. Best-effort: the hash is the source of truth and the index
+// is a lookup accelerator, so a failure here is logged, not returned.
 func (s *RedisSessionStore) reindexState(ctx context.Context, sessionID string, oldState, newState SessionState) {
 	pipe := s.redisClient.TxPipeline()
 	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)
@@ -922,6 +1002,9 @@ type Reactivation struct {
 	ClaimMissingVerdict string
 	// ClaimTxHash is the claim tx hash the session carried before the flip.
 	ClaimTxHash string
+	// ProofTxHash is the proof tx hash the session carried before the flip
+	// (set by ReactivateProved only).
+	ProofTxHash string
 }
 
 // ReactivateClaimed implements SessionStore. See the interface for the

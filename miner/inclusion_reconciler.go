@@ -671,14 +671,14 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			}
 			// The discard is safe by STRUCTURE, not by luck, and there is no test holding
 			// it -- so this says what it rests on. recordOutcome returns a non-nil error
-			// only from reactivateClaimedSession, which sits inside `if outcome ==
-			// inclusionFound` in recordClaimOutcome; recordProofOutcome has no error path at
-			// all. This call passes inclusionPollErr, so the value is invariantly nil. The one
-			// caller that DOES pass inclusionFound checks it, keeps the entry and retries.
+			// only from inside its `if outcome == inclusionFound` branch, in both
+			// recordClaimOutcome (reactivateClaimedSession) and recordProofOutcome
+			// (markProvedSession). This call passes inclusionPollErr, so the value is
+			// invariantly nil. The one caller that DOES pass inclusionFound checks it,
+			// keeps the entry and retries.
 			//
-			// Three edits break that, and none of them would fail a test: moving the
-			// `return err` out of the inclusionFound branch, giving recordProofOutcome an
-			// error path (item 37 would), or a new caller passing inclusionFound here.
+			// Two edits break that, and neither would fail a test: moving a `return err`
+			// out of an inclusionFound branch, or a new caller passing inclusionFound here.
 			_ = rp.recordOutcome(ctx, e, g.Supplier, g.SessionEnd, sessionID, inclusionPollErr, 0) //nolint:errcheck // invariantly nil here; see above
 			r.clear(ctx, rp.phase, g, sessionID, e)
 		}
@@ -809,14 +809,14 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			}
 			// The discard is safe by STRUCTURE, not by luck, and there is no test holding
 			// it -- so this says what it rests on. recordOutcome returns a non-nil error
-			// only from reactivateClaimedSession, which sits inside `if outcome ==
-			// inclusionFound` in recordClaimOutcome; recordProofOutcome has no error path at
-			// all. This call passes inclusionMissing, so the value is invariantly nil. The one
-			// caller that DOES pass inclusionFound checks it, keeps the entry and retries.
+			// only from inside its `if outcome == inclusionFound` branch, in both
+			// recordClaimOutcome (reactivateClaimedSession) and recordProofOutcome
+			// (markProvedSession). This call passes inclusionMissing, so the value is
+			// invariantly nil. The one caller that DOES pass inclusionFound checks it,
+			// keeps the entry and retries.
 			//
-			// Three edits break that, and none of them would fail a test: moving the
-			// `return err` out of the inclusionFound branch, giving recordProofOutcome an
-			// error path (item 37 would), or a new caller passing inclusionFound here.
+			// Two edits break that, and neither would fail a test: moving a `return err`
+			// out of an inclusionFound branch, or a new caller passing inclusionFound here.
 			_ = rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionMissing, 0) //nolint:errcheck // invariantly nil here; see above
 			r.clear(ctx, rp.phase, g, sessionID, entry)
 			continue

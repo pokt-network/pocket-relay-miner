@@ -586,6 +586,32 @@ func (c *SessionCoordinator) OnSessionProved(
 	return nil
 }
 
+// OnProofObservedOnChain moves a session to proved after the chain was seen to
+// have validated its proof, whatever its submission reported: a proof can land
+// after a broadcast that reported failure, or after a process was killed
+// before it stored the proof hash. The write is the guarded atomic flip of
+// ReactivateProved, which lets one caller through; it returns what the session
+// was flipped from, so the caller credits the money once, and a zero
+// Reactivation when the session was already proved or cannot be corrected.
+func (c *SessionCoordinator) OnProofObservedOnChain(ctx context.Context, sessionID, proofTxHash string) (Reactivation, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return Reactivation{}, fmt.Errorf("session coordinator is closed")
+	}
+	terminalCallback := c.onSessionTerminal
+	c.mu.Unlock()
+
+	r, err := c.sessionStore.ReactivateProved(ctx, sessionID, proofTxHash)
+	if err != nil {
+		return Reactivation{}, fmt.Errorf("failed to move session %s to proved: %w", sessionID, err)
+	}
+	if r.From != "" && terminalCallback != nil {
+		terminalCallback(sessionID, SessionStateProved)
+	}
+	return r, nil
+}
+
 // OnClaimWindowClosed marks session as failed due to claim window timeout.
 // Updates state immediately in Redis for HA compatibility.
 func (c *SessionCoordinator) OnClaimWindowClosed(ctx context.Context, sessionID string) error {

@@ -447,6 +447,43 @@ func (s *pebbleSessionStore) reactivateClaimedLocked(sessionID string, claimedRo
 	return Reactivation{From: prev.State, ClaimMissingVerdict: prev.ClaimMissingVerdict, ClaimTxHash: prev.ClaimTxHash}, needSync, nil
 }
 
+func (s *pebbleSessionStore) ReactivateProved(_ context.Context, sessionID string, proofTxHash string) (Reactivation, error) {
+	from, needSync, err := s.reactivateProvedLocked(sessionID, proofTxHash)
+	if err != nil || from.From == "" {
+		return Reactivation{}, err
+	}
+	if err := s.syncTx(needSync, sessionID); err != nil {
+		return Reactivation{}, err
+	}
+	return from, nil
+}
+
+func (s *pebbleSessionStore) reactivateProvedLocked(sessionID string, proofTxHash string) (Reactivation, bool, error) {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	snap, err := s.getLocked(sessionID)
+	if err != nil {
+		return Reactivation{}, false, err
+	}
+	if snap == nil {
+		return Reactivation{}, false, fmt.Errorf("session not found: %s", sessionID)
+	}
+	if !canReactivateProved(snap.State, snap.ProofTxHash) {
+		return Reactivation{}, false, nil
+	}
+	prev := *snap
+	snap.State = SessionStateProved
+	if snap.ProofTxHash == "" {
+		snap.ProofTxHash = proofTxHash
+	}
+	snap.LastUpdatedAt = time.Now()
+	needSync, err := s.writeLocked(&prev, snap)
+	if err != nil {
+		return Reactivation{}, false, err
+	}
+	return Reactivation{From: prev.State, ClaimTxHash: prev.ClaimTxHash, ProofTxHash: prev.ProofTxHash}, needSync, nil
+}
+
 func (s *pebbleSessionStore) IncrementRelayCount(_ context.Context, sessionID string, computeUnits uint64) error {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()

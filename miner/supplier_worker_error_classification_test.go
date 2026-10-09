@@ -221,6 +221,10 @@ func (s *errorOnIncrementStore) MarkClaimMissing(ctx context.Context, sessionID 
 	return s.inner.MarkClaimMissing(ctx, sessionID, verdict)
 }
 
+func (s *errorOnIncrementStore) ReactivateProved(ctx context.Context, sessionID string, proofTxHash string) (Reactivation, error) {
+	return s.inner.ReactivateProved(ctx, sessionID, proofTxHash)
+}
+
 func (s *errorOnIncrementStore) ReactivateClaimed(ctx context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (Reactivation, error) {
 	return s.inner.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
 }

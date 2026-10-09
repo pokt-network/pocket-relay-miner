@@ -3340,13 +3340,33 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			return nil
 		}
 		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error {
+			// The chain validated this proof: the session is proved whatever
+			// its submission reported. This runs BEFORE the counter, as the
+			// claim side does: a failure keeps the entry and the observation is
+			// re-delivered next block.
+			settle := true
+			if outcome == inclusionFound {
+				flip, err := m.markProvedSession(ctx, supplier, sessionID, e)
+				if err != nil {
+					return err
+				}
+				// Settles once: only the delivery whose flip moved the session
+				// settles, so a re-delivered observation (a failed clear) counts
+				// nothing again. Which money settles is the entry's to say
+				// (OrigTxHash, in settleLedgerOutcome), not the state's: an
+				// OnProofTxError that failed to write leaves proving behind a
+				// balance RecordProofTxError already opened.
+				settle = flip.From != ""
+			}
 			proofInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
 			// Closes the `unresolved` balance this session's submission failure
 			// opened, and names where the money went. on_chain_rejected settles
 			// it as lost like on_chain_missing does: the chain executed the proof
 			// and refused it, so nothing further will answer, and without this
 			// branch a rejected proof's balance would never come down.
-			m.settleLedgerOutcome(ctx, RebroadcastPhaseProof, e, supplier, sessionID, outcome)
+			if settle {
+				m.settleLedgerOutcome(ctx, RebroadcastPhaseProof, e, supplier, sessionID, outcome)
+			}
 			if outcome == inclusionMissing {
 				m.recordMissingCause(ctx, RebroadcastPhaseProof, e, supplier, sessionID)
 			}
@@ -3371,12 +3391,6 @@ func (m *SupplierManager) ensureSharedTrackers() {
 						Msg("proof on-chain outcome observed but not recorded in the submission tracker")
 				}
 			}
-			// Metric + tracker only, and that is a GAP rather than a property:
-			// proof_tx_error has the same anatomy as claim_tx_error — the
-			// broadcast can report failure while the proof lands — and there IS
-			// a state to restore, `proved`. It does not cost a slash (the proof
-			// is on-chain), so it is not fixed here; it leaves the session in a
-			// failed state and the ledger counting it lost. Queue item 37.
 			return nil
 		}
 
@@ -3757,6 +3771,18 @@ func resolveMissingCause(cause tx.TxInclusion, rebroadcasts int) tx.TxInclusion 
 		return tx.TxInclusionUnknown
 	}
 	return cause
+}
+
+// markProvedSession moves a session whose proof the chain validated to proved,
+// through the owning supplier's coordinator, and returns what it flipped from.
+// Like reactivateClaimedSession, a supplier this replica no longer owns returns
+// an error so the entry is kept for its new owner.
+func (m *SupplierManager) markProvedSession(ctx context.Context, supplier, sessionID string, e rebroadcastEntry) (Reactivation, error) {
+	state, ok := m.suppliers.Load(supplier)
+	if !ok || state.SessionCoordinator == nil {
+		return Reactivation{}, fmt.Errorf("supplier %s no longer owned by this replica", supplier)
+	}
+	return state.SessionCoordinator.OnProofObservedOnChain(ctx, sessionID, e.TxHash)
 }
 
 // reactivateClaimedSession returns a session to `claimed` after the reconciler
