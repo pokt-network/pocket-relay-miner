@@ -150,6 +150,12 @@ Two things about HOW to read it, both measured on 2026-09-18:
   relay-mining difficulty at its start height, so `upokt_claimed_total` matches
   what settles: on the localnet, 100 uPOKT per compute unit. Every term adds whole
   uPOKT, so the identity closes exactly or names a session counted twice.
+- **A process that dies loses what it counted since its last scrape.** Counters
+  live in the process; an increment made in the seconds before a crash never
+  reaches Prometheus. Every book is written exactly once (claimed by the flip
+  into claimed, whichever path flips it), so a crash can leave an identity open,
+  never inflate it. What was paid is the chain's: `triage.sh` and the live gate
+  compare against its settlement, not against these series.
 - **`unpriced_compute_units_total` must be 0.** A session whose price could not be
   read (the node did not answer for its start height) adds its compute units
   there, under the book it is missing from, and nothing to the uPOKT series: no

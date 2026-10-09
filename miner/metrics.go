@@ -1924,6 +1924,24 @@ func ReinstatedBook(r Reactivation) string {
 	return ""
 }
 
+// CreditsClaimed reports whether the flip into claimed that r describes is the
+// one that puts the session's money in upokt_claimed_total. The flip is the
+// single writer of that book: it lets one caller through, so the credit is
+// counted once whichever path observed the claim -- the submission, the window
+// close asking the chain, or the inclusion reconciler. It credits a session
+// whose money is not in claimed yet: active, claiming, claim_tx_error (an
+// attempt, no money), and the forgone verdicts of claim_window_closed and
+// claim_missing. Their lost verdicts were in claimed already.
+func CreditsClaimed(r Reactivation) bool {
+	switch r.From {
+	case SessionStateActive, SessionStateClaiming, SessionStateClaimTxError:
+		return true
+	case SessionStateClaimWindowClosed, SessionStateClaimMissing:
+		return ReinstatedBook(r) == ClaimMissingForgone
+	}
+	return false
+}
+
 // RecordReinstated reverses the failure of a session the chain was later seen
 // to hold the claim of, by the state it failed in (reason) and the book its
 // money went to (from): it comes back to claimed and is proved like any other,

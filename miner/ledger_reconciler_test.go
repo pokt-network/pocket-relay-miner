@@ -127,14 +127,10 @@ func TestSettleLedgerOutcome_AConfirmedSubmissionIsNotCountedAgain(t *testing.T)
 		"and no balance was ever opened for it, so there is none to close")
 }
 
-// THE MISSING WRITE ON THE RECOVERY PATH.
-//
-// A claim whose submission never confirmed was never counted into `claimed`, yet
-// the reconciler reactivates it and the session goes on to be proved -- crediting
-// `proved` revenue the book never recorded as claimed. That asymmetry is the
-// other half of the measured residual, and this is where it is repaired: if the
-// chain HOLDS the claim, "uPOKT claimed" is literally true.
-func TestSettleLedgerOutcome_ClaimFoundOnRecovery_CreditsClaimed(t *testing.T) {
+// A claim the chain holds settles nothing more here: its money entered
+// claimed at the flip into claimed that the reconciler ran just before, the
+// single writer of that book (claimed_credit_test.go).
+func TestSettleLedgerOutcome_ClaimFound_LeavesTheCreditToTheFlip(t *testing.T) {
 	const service = "svc-1"
 	f := newHandlerTestFixture(t, "pokt1ledger_rec_claim")
 	supplier := f.supplierAddr
@@ -146,8 +142,7 @@ func TestSettleLedgerOutcome_ClaimFoundOnRecovery_CreditsClaimed(t *testing.T) {
 	mgr.settleLedgerOutcome(f.ctx, RebroadcastPhaseClaim, rebroadcastEntry{ServiceID: service},
 		supplier, "sess-rec-claim", inclusionFound)
 
-	require.Equal(t, claimedBefore+7, upoktClaimed(supplier, service),
-		"the chain holds the claim, so the book has to record it as claimed before anything proves it")
+	require.Equal(t, claimedBefore, upoktClaimed(supplier, service), "the flip credits claimed, not the settlement")
 	require.Equal(t, forgoneBefore,
 		testutil.ToFloat64(upoktForgoneTotal.WithLabelValues(supplier, service, inclusionFound)),
 		"a claim that landed is not forgone")

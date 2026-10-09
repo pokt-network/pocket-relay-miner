@@ -976,7 +976,7 @@ func (s *RedisSessionStore) ReactivateClaimed(
 		Str("old_state", oldStateStr).
 		Str("claim_tx_hash", claimTxHash).
 		Int("root_hash_len", len(claimedRootHash)).
-		Msg("session reactivated to claimed: the chain holds this claim")
+		Msg("session moved to claimed")
 
 	return Reactivation{From: SessionState(oldStateStr), ClaimMissingVerdict: res[1], ClaimTxHash: res[2]}, nil
 }

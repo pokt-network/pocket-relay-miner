@@ -1874,7 +1874,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				for _, snapshot := range validSnapshots {
 					RecordClaimSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount, lc.price(ctx, snapshot))
 
 					// Name the session as claimed. By ID, not by position: the
 					// root hash it just received is already on the snapshot

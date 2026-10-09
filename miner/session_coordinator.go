@@ -91,6 +91,18 @@ func (c *SessionCoordinator) price(ctx context.Context, snap *SessionSnapshot) U
 	return quote(ctx, pricer, snap)
 }
 
+// creditClaimed counts snap's money in upokt_claimed_total when the flip that
+// put it in claimed is the one that credits it (CreditsClaimed), priced on the
+// root the claim carries.
+func (c *SessionCoordinator) creditClaimed(ctx context.Context, snap *SessionSnapshot, root []byte, r Reactivation) {
+	if !CreditsClaimed(r) {
+		return
+	}
+	priced := *snap
+	priced.ClaimedRootHash = root
+	RecordRevenueClaimed(snap.SupplierOperatorAddress, snap.ServiceID, snap.TotalComputeUnits, snap.RelayCount, c.price(ctx, &priced))
+}
+
 // SetClaimWindowClosedFn installs the predicate behind ClaimWindowClosed.
 func (c *SessionCoordinator) SetClaimWindowClosedFn(fn func(sessionEndHeight int64) bool) {
 	c.mu.Lock()
@@ -361,7 +373,9 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	}
 	c.mu.Unlock()
 
-	// Get current snapshot
+	// The weight, read before the write; the write is the atomic flip into
+	// claimed, which lets one caller through, so the claimed money is counted
+	// once even when the window close observes the same claim concurrently.
 	snapshot, err := c.sessionStore.Get(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get session snapshot: %w", err)
@@ -369,15 +383,11 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	if snapshot == nil {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-
-	// Update with claim root hash and TX hash
-	snapshot.ClaimedRootHash = claimRootHash
-	snapshot.ClaimTxHash = claimTxHash
-	snapshot.State = SessionStateClaimed
-
-	if err := c.sessionStore.Save(ctx, snapshot); err != nil {
-		return fmt.Errorf("failed to save session snapshot: %w", err)
+	reactivation, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimRootHash, claimTxHash)
+	if err != nil {
+		return fmt.Errorf("failed to save the claimed session: %w", err)
 	}
+	c.creditClaimed(ctx, snapshot, claimRootHash, reactivation)
 
 	c.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
@@ -446,6 +456,14 @@ func (c *SessionCoordinator) OnClaimObservedOnChain(
 	reactivation, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
 	if err != nil {
 		return fmt.Errorf("failed to reactivate session %s: %w", sessionID, err)
+	}
+	if CreditsClaimed(reactivation) {
+		if beforeErr == nil && before != nil {
+			c.creditClaimed(ctx, before, claimedRootHash, reactivation)
+		} else {
+			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
+				Msg("session reactivated but it could not be read to weigh it: its claimed money is not counted")
+		}
 	}
 	if book := ReinstatedBook(reactivation); book != "" {
 		if beforeErr == nil && before != nil {

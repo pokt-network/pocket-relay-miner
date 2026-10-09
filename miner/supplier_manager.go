@@ -3675,11 +3675,10 @@ func (m *SupplierManager) settleLedgerOutcome(
 		// never in the book, so there was no balance to hold. The chain's answer
 		// decides whether it enters the book or is written off.
 		if outcome == inclusionFound {
-			// The chain HOLDS this claim, so "uPOKT claimed" is literally true.
-			// This is the write the recovery path was missing: the submission
-			// never confirmed, so nothing counted it, and the session goes on to
-			// be proved -- crediting `proved` revenue that `claimed` never had.
-			RecordRevenueClaimed(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays, upokt)
+			// The chain HOLDS this claim. Its money entered `claimed` at the
+			// flip into claimed that ran just before this (reactivateClaimed-
+			// Session), the single writer of that book; a flip that found the
+			// session already claimed means another path already counted it.
 			return
 		}
 		RecordRevenueForgone(supplier, snapshot.ServiceID, outcome, relays, computeUnits, upokt)
