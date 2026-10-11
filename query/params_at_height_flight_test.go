@@ -21,7 +21,7 @@ func countFlightJoins(t *testing.T, qc *Clients) *atomic.Int64 {
 	shared, ok := qc.Shared().(*sharedQueryClient)
 	require.True(t, ok, "the shared query client must be *sharedQueryClient")
 	var joins atomic.Int64
-	shared.onFlightJoin = func(int64) { joins.Add(1) }
+	shared.setFlightJoinHook(func() { joins.Add(1) })
 	return &joins
 }
 

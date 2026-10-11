@@ -734,6 +734,10 @@ func serveRelayer(parent context.Context, logger logging.Logger, config *relayer
 	defer func() { blockSubscriber.Close() }()
 	logger.Info().Msg("block client adapter started (Redis-backed)")
 
+	// The query clients' height caches serve an answer the node gave from below
+	// the asked height only until this process sees a new block.
+	queryClients.SetBlockHeightSource(func() int64 { return blockSubscriber.LastBlock(ctx).Height() })
+
 	// NOTE: Cache warmup is now handled by the miner's CacheOrchestrator.
 	// The relayer's ApplicationCache.WarmupFromRedis() will populate L1 from L2 on startup.
 	// Discovery of apps/services happens on the miner side when processing relays from Redis streams.

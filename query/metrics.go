@@ -119,3 +119,45 @@ func countLeadingZeroBits(b []byte) int {
 	}
 	return bits
 }
+
+var (
+	// queryCachePending counts the answers a height cache holds without reusing
+	// them as final: answers given from below the asked height (the node lagging,
+	// or a client ahead). Each is asked again once this process sees a new block.
+	queryCachePending = observability.SharedFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "ha",
+			Subsystem: "query",
+			Name:      "cache_pending",
+			Help:      "Answers held until the chain commits their height (not reused as final)",
+		},
+		[]string{"client", "cache_type"},
+	)
+
+	// queryCacheFinalAnswerChanged counts re-validations that found a different
+	// value at a height already answered as final. It must stay 0: anything else
+	// means the chain rewrote a past value (an upgrade handler can) and the
+	// cache served the old one until the floor.
+	queryCacheFinalAnswerChanged = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "ha",
+			Subsystem: "query",
+			Name:      "cache_final_answer_changed_total",
+			Help:      "Re-validations that found a different value at a height already answered as final (expected 0)",
+		},
+		[]string{"client", "cache_type"},
+	)
+
+	// queryCacheAnswerHeightMissing counts answers without the
+	// x-cosmos-block-height header. Without it no answer can be proven final,
+	// so the cache re-asks once per block.
+	queryCacheAnswerHeightMissing = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "ha",
+			Subsystem: "query",
+			Name:      "cache_answer_height_missing_total",
+			Help:      "Chain answers without the x-cosmos-block-height header (none can be cached as final)",
+		},
+		[]string{"client", "cache_type"},
+	)
+)

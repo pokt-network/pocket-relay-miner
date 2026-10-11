@@ -299,7 +299,7 @@ type ServiceDifficultyQueryClient interface {
 
 // QueryDifficultyProvider is a thin pass-through to the query layer for difficulty lookups.
 // Caching of successful responses is handled by the query layer
-// (serviceQueryClient.heightDifficultyCache) — no duplicate caching here.
+// (serviceQueryClient.difficultyAtHeight) — no duplicate caching here.
 type QueryDifficultyProvider struct {
 	logger      logging.Logger
 	queryClient ServiceDifficultyQueryClient

@@ -76,7 +76,6 @@ var testPackageVarAllowlist = map[string]int{
 	"miner: processIdentityOnce":        2,
 	"miner: processIdentityValue":       2,
 	"miner: shutdownDrainWindow":        2,
-	"query: immutableCacheTTLFloor":     6,
 	"query: liveEntityCacheTTL":         9,
 	"query: liveParamsCacheTTL":         13,
 	"query: serviceCacheTTL":            3,

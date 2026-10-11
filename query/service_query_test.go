@@ -4,7 +4,6 @@ package query
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -675,21 +674,21 @@ func TestGetServiceRelayDifficultyAtHeight_CacheEviction(t *testing.T) {
 	}
 
 	// After eviction, cache size should be <= maxHeightDifficultyCacheEntries.
-	cacheSize := serviceClient.heightDifficultyCacheSize.Load()
+	cacheSize := int64(serviceClient.difficultyAtHeight.final.Size())
 	require.LessOrEqual(t, cacheSize, int64(maxHeightDifficultyCacheEntries),
 		"cache size %d exceeds max %d after eviction", cacheSize, maxHeightDifficultyCacheEntries)
 
 	// Recent entries (highest heights) should still be in cache.
 	for _, svc := range services {
-		key := fmt.Sprintf("%s@%d", svc, heightsPerService)
-		_, ok := serviceClient.heightDifficultyCache.Load(key)
+		key := heightKey{id: svc, height: heightsPerService}
+		_, ok := serviceClient.difficultyAtHeight.final.Load(key)
 		require.True(t, ok, "recent entry %s should still be cached", key)
 	}
 
 	// Oldest entries (height 1) should have been evicted.
 	for _, svc := range services {
-		key := fmt.Sprintf("%s@%d", svc, 1)
-		_, ok := serviceClient.heightDifficultyCache.Load(key)
+		key := heightKey{id: svc, height: 1}
+		_, ok := serviceClient.difficultyAtHeight.final.Load(key)
 		require.False(t, ok, "old entry %s should have been evicted", key)
 	}
 }

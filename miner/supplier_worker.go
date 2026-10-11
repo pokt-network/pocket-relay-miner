@@ -273,6 +273,10 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start redis block client adapter: %w", err)
 	}
 	w.logger.Info().Msg("redis block client adapter started")
+	// The query clients' height caches serve an answer the node gave from below
+	// the asked height only until this process sees a new block.
+	blockAdapter := w.redisBlockClientAdapter
+	w.queryClients.SetBlockHeightSource(func() int64 { return blockAdapter.LastBlock(ctx).Height() })
 
 	// Seeded here, before the supplier manager starts and so before any relay is
 	// consumed. Not by waiting for a block event: in the process that wins the
