@@ -162,6 +162,20 @@ func (qc *Clients) Shared() client.SharedQueryClient {
 	return qc.sharedClient
 }
 
+// SharedQueryClient is poktroll's shared query client plus the at-height read
+// that says whether its answer is final, for a cache that keeps answers beyond
+// this process (an answer that is not final must not be shared).
+type SharedQueryClient interface {
+	client.SharedQueryClient
+	GetParamsAtHeightWithFinality(ctx context.Context, queryHeight int64) (*sharedtypes.Params, bool, error)
+}
+
+// SharedWithFinality returns the shared module query client with
+// GetParamsAtHeightWithFinality.
+func (qc *Clients) SharedWithFinality() SharedQueryClient {
+	return qc.sharedClient
+}
+
 // Session returns the session module query client.
 func (qc *Clients) Session() client.SessionQueryClient {
 	return qc.sessionClient
@@ -500,6 +514,21 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
 	}
 	return params, nil
+}
+
+// GetParamsAtHeightWithFinality is GetParamsAtHeight, also saying whether the
+// params are final: the node answered from queryHeight or above, so no block it
+// has not committed can still change them.
+func (c *sharedQueryClient) GetParamsAtHeightWithFinality(ctx context.Context, queryHeight int64) (*sharedtypes.Params, bool, error) {
+	if queryHeight <= 0 {
+		params, err := c.GetParams(ctx)
+		return params, false, err
+	}
+	params, final, err := c.paramsAtHeight.getWithFinality(ctx, heightKey{height: queryHeight})
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
+	}
+	return params, final, nil
 }
 
 func (c *sharedQueryClient) fetchParamsAtHeight(ctx context.Context, key heightKey) (*sharedtypes.Params, int64, error) {

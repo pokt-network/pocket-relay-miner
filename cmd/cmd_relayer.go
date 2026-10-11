@@ -974,7 +974,7 @@ func serveRelayer(parent context.Context, logger logging.Logger, config *relayer
 	sharedParamCache := cache.NewRedisSharedParamCache(
 		logger,
 		store,
-		queryClients.Shared(),
+		queryClients.SharedWithFinality(),
 		blockSubscriber,
 		cacheConfig,
 	)
