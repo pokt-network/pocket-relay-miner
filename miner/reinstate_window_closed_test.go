@@ -48,6 +48,25 @@ func TestClaimWindowClosed_AReactivatedForgoneSessionIsTakenBackOnce(t *testing.
 	})
 }
 
+// A claim submission that lands after the window close marked the session
+// claim_window_closed flips it to claimed and credits claimed: the forgone it
+// was counted in is taken back too, as when the reconciler finds the claim.
+func TestClaimWindowClosed_ALateSubmissionTakesBackTheForgone(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		seedWindowClosed(t, store, "sess-cwc-late", service, "")
+		sessions, upokt := windowClosedProbe(service, ClaimMissingForgone)
+		claimed := claimedProbe(service)
+
+		require.NoError(t, coord.OnSessionClaimed(ctx, "sess-cwc-late", make([]byte, SMSTRootLen), "TXLATE"))
+
+		gotSessions, gotUpokt := windowClosedProbe(service, ClaimMissingForgone)
+		require.InDelta(t, claimed+3, claimedProbe(service), 1e-9, "premise: the late submission credits claimed")
+		require.Equal(t, sessions+1, gotSessions, "the session is taken back from claim_window_closed")
+		require.InDelta(t, upokt+3, gotUpokt, 1e-9, "its forgone money is taken back")
+	})
+}
+
 // The defensive branch: a claim_window_closed session that carried a claim tx
 // hash was counted lost, and is taken back from lost.
 func TestClaimWindowClosed_AReactivatedLostSessionIsTakenBackFromLost(t *testing.T) {

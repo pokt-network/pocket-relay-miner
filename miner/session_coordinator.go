@@ -103,6 +103,31 @@ func (c *SessionCoordinator) creditClaimed(ctx context.Context, snap *SessionSna
 	RecordRevenueClaimed(snap.SupplierOperatorAddress, snap.ServiceID, snap.TotalComputeUnits, snap.RelayCount, c.price(ctx, &priced))
 }
 
+// bookReactivation counts a flip into claimed, whichever path made it (the
+// submission or the claim observed on chain): its claimed money, and the
+// failure it reverses from the book it was counted in. before is the session
+// read ahead of the flip; without it nothing can be weighed.
+func (c *SessionCoordinator) bookReactivation(ctx context.Context, sessionID string, before *SessionSnapshot, beforeErr error, root []byte, r Reactivation) {
+	if CreditsClaimed(r) {
+		if beforeErr == nil && before != nil {
+			c.creditClaimed(ctx, before, root, r)
+		} else {
+			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
+				Msg("session reactivated but it could not be read to weigh it: its claimed money is not counted")
+		}
+	}
+	if book := ReinstatedBook(r); book != "" {
+		if beforeErr == nil && before != nil {
+			RecordReinstated(before.SupplierOperatorAddress, before.ServiceID, string(r.From), book,
+				before.RelayCount, int64(before.TotalComputeUnits), c.price(ctx, before))
+		} else {
+			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
+				Str("reactivated_from", string(r.From)).
+				Msg("session reactivated but it could not be read to weigh it: its failure stays counted")
+		}
+	}
+}
+
 // SetClaimWindowClosedFn installs the predicate behind ClaimWindowClosed.
 func (c *SessionCoordinator) SetClaimWindowClosedFn(fn func(sessionEndHeight int64) bool) {
 	c.mu.Lock()
@@ -387,7 +412,7 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	if err != nil {
 		return fmt.Errorf("failed to save the claimed session: %w", err)
 	}
-	c.creditClaimed(ctx, snapshot, claimRootHash, reactivation)
+	c.bookReactivation(ctx, sessionID, snapshot, nil, claimRootHash, reactivation)
 
 	c.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
@@ -457,24 +482,7 @@ func (c *SessionCoordinator) OnClaimObservedOnChain(
 	if err != nil {
 		return fmt.Errorf("failed to reactivate session %s: %w", sessionID, err)
 	}
-	if CreditsClaimed(reactivation) {
-		if beforeErr == nil && before != nil {
-			c.creditClaimed(ctx, before, claimedRootHash, reactivation)
-		} else {
-			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
-				Msg("session reactivated but it could not be read to weigh it: its claimed money is not counted")
-		}
-	}
-	if book := ReinstatedBook(reactivation); book != "" {
-		if beforeErr == nil && before != nil {
-			RecordReinstated(before.SupplierOperatorAddress, before.ServiceID, string(reactivation.From), book,
-				before.RelayCount, int64(before.TotalComputeUnits), c.price(ctx, before))
-		} else {
-			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
-				Str("reactivated_from", string(reactivation.From)).
-				Msg("session reactivated but it could not be read to weigh it: its failure stays counted")
-		}
-	}
+	c.bookReactivation(ctx, sessionID, before, beforeErr, claimedRootHash, reactivation)
 	if reactivation.From == "" {
 		// Already at or past claimed. Not an error and not a no-op worth
 		// logging above Debug: a failed clear in the reconciler re-delivers
