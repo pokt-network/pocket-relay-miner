@@ -438,7 +438,7 @@ def specs(g):
                 ts("Query height caches: not final / changed / no height header", [(G("ha_query_cache_pending", "max", "client,cache_type"), "not final {{client}} {{cache_type}}"),
                     (R("ha_query_cache_final_answer_changed_total", "client,cache_type"), "final changed {{client}} {{cache_type}}"),
                     (R("ha_query_cache_answer_height_missing_total", "client,cache_type"), "no height header {{client}} {{cache_type}}")], "short",
-                   "Final changed and no height header stay at 0. Not final: answers the node gave from below the asked height, a few at a session boundary when the node lags.", w=8),
+                   "Final changed and no height header stay at 0. Not final: answers the node gave from below the asked height and still held; each is asked again at the next block, but one for a height nobody asks again stays until it is evicted, so the line need not return to 0 after a lag.", w=8),
                 ts("gRPC stream queue p95", [(P("ha_grpc_stream_queue_seconds", 0.95, "conn"), "{{conn}}")], "s", w=8),
                 ts("Panics recovered / log messages dropped", [(R("ha_panic_recoveries_total", "component"), "panic {{component}}"), (R("ha_log_messages_dropped_total"), "log messages dropped")], "short",
                    "Both stay at 0.", w=8),

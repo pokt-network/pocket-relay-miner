@@ -625,3 +625,34 @@ func TestHeightCache_BlockDuringTheRPCIsNotCoveredByItsAnswer(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), rpcs.Load(), "the block that arrived during the RPC asks the answer again")
 }
+
+// Standalone mode builds two caches of each type, one per side, on the same
+// gauge series: the size and pending gauges are the sum of both, not the count
+// of whichever stored last.
+func TestHeightCache_SizeAndPendingGaugesSumTheCachesOfOneType(t *testing.T) {
+	const client, cacheType = "gauge-sum-test", "difficulty"
+	fetch := func(context.Context, heightKey) (int, int64, error) { return 0, 0, nil }
+	equal := func(a, b int) bool { return a == b }
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	a := newHeightCache(logger, client, cacheType, 100, time.Second, &blockHeightSource{}, fetch, equal)
+	b := newHeightCache(logger, client, cacheType, 100, time.Second, &blockHeightSource{}, fetch, equal)
+	size := testutil.ToFloat64(queryCacheSize.WithLabelValues(client, cacheType))
+	pending := testutil.ToFloat64(queryCachePending.WithLabelValues(client, cacheType))
+
+	for i := 0; i < 2; i++ {
+		require.True(t, a.store(heightKey{id: "svc", height: int64(10 + i)}, i, 100, 0))
+	}
+	for i := 0; i < 3; i++ {
+		require.True(t, b.store(heightKey{id: "svc", height: int64(20 + i)}, i, 100, 0))
+	}
+	require.False(t, a.store(heightKey{id: "svc", height: 500}, 0, 100, 0), "premise: answered from below 500")
+	require.False(t, b.store(heightKey{id: "svc", height: 600}, 0, 100, 0))
+	require.False(t, b.store(heightKey{id: "svc", height: 601}, 0, 100, 0))
+
+	require.Equal(t, size+5, testutil.ToFloat64(queryCacheSize.WithLabelValues(client, cacheType)), "2 final in one cache, 3 in the other")
+	require.Equal(t, pending+3, testutil.ToFloat64(queryCachePending.WithLabelValues(client, cacheType)), "1 not final in one cache, 2 in the other")
+
+	a.unpublish()
+	require.Equal(t, size+3, testutil.ToFloat64(queryCacheSize.WithLabelValues(client, cacheType)), "a closed cache takes its share out")
+	require.Equal(t, pending+2, testutil.ToFloat64(queryCachePending.WithLabelValues(client, cacheType)))
+}

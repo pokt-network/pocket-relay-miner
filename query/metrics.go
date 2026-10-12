@@ -123,13 +123,15 @@ func countLeadingZeroBits(b []byte) int {
 var (
 	// queryCachePending counts the answers a height cache holds without reusing
 	// them as final: answers given from below the asked height (the node lagging,
-	// or a client ahead). Each is asked again once this process sees a new block.
+	// or a client ahead). Each is asked again once this process sees a new block;
+	// one for a height nobody asks again is held until evicted. Summed across the
+	// caches of the same type in the process.
 	queryCachePending = observability.SharedFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ha",
 			Subsystem: "query",
 			Name:      "cache_pending",
-			Help:      "Answers held until the chain commits their height (not reused as final)",
+			Help:      "Answers held as not final, from below the asked height (held until asked again at a new block, replaced, or evicted)",
 		},
 		[]string{"client", "cache_type"},
 	)

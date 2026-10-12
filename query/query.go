@@ -268,6 +268,16 @@ func (qc *Clients) Close() error {
 	}
 	qc.closed = true
 
+	// The height caches share their gauge series with the other clients of
+	// the process: a closed one takes its share back out.
+	if qc.sharedClient != nil {
+		qc.sharedClient.paramsAtHeight.unpublish()
+	}
+	if qc.serviceClient != nil {
+		qc.serviceClient.difficultyAtHeight.unpublish()
+		qc.serviceClient.cuprAtHeight.unpublish()
+	}
+
 	if qc.grpcConn != nil {
 		if err := qc.grpcConn.Close(); err != nil {
 			return fmt.Errorf("failed to close gRPC connection: %w", err)

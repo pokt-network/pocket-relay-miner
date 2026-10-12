@@ -1382,7 +1382,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Final changed and no height header stay at 0. Not final: answers the node gave from below the asked height, a few at a session boundary when the node lags.",
+      "description": "Final changed and no height header stay at 0. Not final: answers the node gave from below the asked height and still held; each is asked again at the next block, but one for a height nobody asks again stays until it is evicted, so the line need not return to 0 after a lag.",
       "fieldConfig": {
         "defaults": {
           "color": {

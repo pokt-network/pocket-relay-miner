@@ -86,6 +86,11 @@ type heightCache[V any] struct {
 	hits, misses, changed, heightMissing prometheus.Counter
 	size, pendingSize                    prometheus.Gauge
 	heightMissingOnce                    sync.Once
+	// published and publishedPending are this cache's share of the size and
+	// pending gauges. Standalone mode holds two caches of each type (one per
+	// side) on the same series, so each adds the change of its own count
+	// instead of setting the series to it.
+	published, publishedPending atomic.Int64
 
 	// onFlightJoin, when set, is called once a caller has joined the RPC for a
 	// key. Tests use it to know every caller shares the RPC before it answers.
@@ -226,15 +231,28 @@ func (c *heightCache[V]) store(key heightKey, v V, answeredAt, seenAt int64) boo
 		if c.final.Size() > c.maxFinal {
 			c.evict(c.final, c.maxFinal, false)
 		}
-		c.size.Set(float64(c.final.Size()))
+		publish(c.size, &c.published, c.final.Size())
 	} else {
 		c.pending.Store(key, e)
 		if c.pending.Size() > c.maxPending {
 			c.evict(c.pending, c.maxPending, true)
 		}
 	}
-	c.pendingSize.Set(float64(c.pending.Size()))
+	publish(c.pendingSize, &c.publishedPending, c.pending.Size())
 	return final
+}
+
+// unpublish takes this cache's share out of the gauges, when its client closes.
+func (c *heightCache[V]) unpublish() {
+	publish(c.size, &c.published, 0)
+	publish(c.pendingSize, &c.publishedPending, 0)
+}
+
+// publish moves a gauge this cache shares with others of its type by the
+// change of the cache's own count n since it last published: the series is the
+// sum of the caches' counts, however their publishes interleave.
+func publish(g prometheus.Gauge, last *atomic.Int64, n int) {
+	g.Add(float64(int64(n) - last.Swap(int64(n))))
 }
 
 // claimRevalidation starts one re-validation of a final entry past the floor.
