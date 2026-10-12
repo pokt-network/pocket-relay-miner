@@ -629,15 +629,14 @@ var (
 	)
 
 	// difficultyQueryFailures counts failures to resolve a service's mining
-	// difficulty. The path FAILS OPEN (the relay is treated as applicable), so
-	// without this counter a broken difficulty query silently mines every
-	// relay against the wrong target with no visible signal.
+	// difficulty. Each such relay is served and not mined, so without this
+	// counter a broken difficulty query silently stops mining with no signal.
 	difficultyQueryFailures = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "difficulty_query_failures_total",
-			Help:      "Failures to query a service's relay mining difficulty (fails open: relay treated as applicable)",
+			Help:      "Failures to resolve a service's relay mining difficulty (each such relay is served and not mined)",
 		},
 		[]string{"service_id"},
 	)

@@ -274,7 +274,7 @@ def specs(g):
             row("Metering",
                 ts("Charges by result", [(R("ha_relayer_relay_meter_consumptions_total", "result"), "{{result}}"), (R("ha_relayer_relay_meter_errors_total", "operation"), "error {{operation}}")], "short", w=8),
                 ts("Sessions metered", [(G("ha_relayer_relay_meter_sessions_active", "sum", "service_id"), "{{service_id}}")], "short", w=8),
-                ts("Difficulty lookups that failed", [(R("ha_relayer_difficulty_query_failures_total", "service_id"), "{{service_id}}")], "short", "The relay is still served: it fails open.", w=8),
+                ts("Difficulty lookups that failed", [(R("ha_relayer_difficulty_query_failures_total", "service_id"), "{{service_id}}")], "short", "The relay is still served, and not mined.", w=8),
                 ),
             row("Transports",
                 ts("WebSocket", [(G("ha_relayer_websocket_connections_active", "sum"), "open"), (R("ha_relayer_websocket_connections_total"), "opened/s"),
