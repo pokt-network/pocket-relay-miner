@@ -134,6 +134,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(PathMeter, s.meter)
 	mux.HandleFunc(PathSubmissions, s.submissions)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The listener is loopback only, but a page in a local browser can
+		// still reach it under a name it resolves to 127.0.0.1 (DNS
+		// rebinding): such a request carries that name in Host.
+		if !loopbackHost(r.Host) {
+			http.Error(w, "inspect: the Host header must name a loopback address", http.StatusForbidden)
+			return
+		}
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			http.Error(w, "read-only: GET only", http.StatusMethodNotAllowed)
@@ -141,6 +148,20 @@ func (s *Server) Handler() http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// loopbackHost reports whether a Host header names this machine's loopback:
+// localhost, or a loopback IP, with or without a port.
+func loopbackHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) miner(w http.ResponseWriter) Miner {

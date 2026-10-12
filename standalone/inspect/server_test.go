@@ -195,6 +195,31 @@ func TestServer_RefusesEveryMethodButGet(t *testing.T) {
 	}
 }
 
+// A request that reached the loopback listener under a name other than a
+// loopback one (a local browser page after DNS rebinding) is refused; the
+// loopback names are served.
+func TestServer_RefusesANonLoopbackHost(t *testing.T) {
+	f := newFixture(t)
+	for _, host := range []string{"attacker.example", "attacker.example:9094", "10.0.0.1:9094", "localhost.attacker.example"} {
+		req, err := http.NewRequest(http.MethodGet, f.srv.URL+PathSessions+"?supplier="+supplierA, nil)
+		require.NoError(t, err)
+		req.Host = host
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusForbidden, resp.StatusCode, "Host %s", host)
+	}
+	for _, host := range []string{"127.0.0.1:9094", "localhost:9094", "LOCALHOST", "[::1]:9094"} {
+		req, err := http.NewRequest(http.MethodGet, f.srv.URL+PathHealth, nil)
+		require.NoError(t, err)
+		req.Host = host
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode, "Host %s", host)
+	}
+}
+
 // Until the miner has built its state, its routes answer 503, never an empty
 // list a caller would read as "no sessions".
 func TestServer_MinerRoutesWaitForTheMiner(t *testing.T) {
