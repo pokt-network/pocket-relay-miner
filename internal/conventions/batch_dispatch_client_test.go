@@ -40,6 +40,14 @@ func TestTheBatchingPublisherWritesThroughItsOwnClient(t *testing.T) {
 	if !closesInFuncLit(f, "closeClient", "batchRedisClient") {
 		t.Fatalf("%s: closeClient, the close openRedisRelayPublisher returns, must close batchRedisClient", path)
 	}
+	// And that closer is the one closeBatchClient holds: openRedisRelayPublisher
+	// returns closeClient, and it is the high-availability openPublisher hook.
+	if !returnsIdentAt(f, "openRedisRelayPublisher", 1, "closeClient") {
+		t.Fatalf("%s: openRedisRelayPublisher must return closeClient as the batch client's closer", path)
+	}
+	if !setsField(f, "openPublisher", "openRedisRelayPublisher") {
+		t.Fatalf("%s: the high-availability hooks must set openPublisher: openRedisRelayPublisher", path)
+	}
 	closed := deferredCallOf(f, "closeBatchClient")
 	publisher := deferredCloseOf(f, "publisher")
 	if closed == token.NoPos {
@@ -61,6 +69,19 @@ func deferredCallOf(f *ast.File, name string) token.Pos {
 		return pos == token.NoPos
 	})
 	return pos
+}
+
+// setsField reports whether a composite literal in f sets field to the
+// identifier value.
+func setsField(f *ast.File, field, value string) bool {
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		if kv, ok := n.(*ast.KeyValueExpr); ok && isIdentNamed(kv.Key, field) && isIdentNamed(kv.Value, value) {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // closesInFuncLit reports whether `name := func() { ... v.Close() ... }` is in f.
