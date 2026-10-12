@@ -34,6 +34,9 @@ const sharedParamsLocalKeepHeights = 64
 
 // maxPendingLocalReuse bounds how long an L1 answer that is not final is reused
 // when no new block arrives: a stalled block feed must not make it permanent.
+// The query layer may have served that answer from its own cache under the same
+// bound before it reached L1, so with the feed stalled one answer can be reused
+// for up to twice this.
 const maxPendingLocalReuse = 30 * time.Second
 
 // sharedParamLocalEntry is an L1-cached shared params value plus its height (for
