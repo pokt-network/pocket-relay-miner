@@ -36,7 +36,7 @@ RUN CGO_ENABLED=0 go build \
     -o pocket-relay-miner .
 
 # Runtime stage
-FROM mirror.gcr.io/library/alpine:latest
+FROM mirror.gcr.io/library/alpine:3.24.2
 
 # TARGETARCH is automatically set by buildx (amd64, arm64, etc.)
 ARG TARGETARCH

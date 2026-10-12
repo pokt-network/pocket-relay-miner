@@ -101,10 +101,11 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     env:
-      # The runner is discarded after the job, and every container with it, so
-      # the testcontainers reaper protects nothing here; waiting for it to
-      # report ready failed a run on its own. Off CI it stays required
-      # (internal/testredis/exclusive.go).
+      # The testcontainers reaper is off everywhere, not only here:
+      # internal/testredis/exclusive_reaper.go turns it off, because its
+      # lifecycle across test processes is a race testcontainers does not
+      # survive, and removes what a killed run left behind itself. Set here too
+      # so it holds before any test package is loaded.
       TESTCONTAINERS_RYUK_DISABLED: "true"
     services:
       # Real Redis, because miniredis is not Redis where it matters. The
@@ -176,10 +177,11 @@ jobs:
     name: Race Detector
     runs-on: ubuntu-latest
     env:
-      # The runner is discarded after the job, and every container with it, so
-      # the testcontainers reaper protects nothing here; waiting for it to
-      # report ready failed a run on its own. Off CI it stays required
-      # (internal/testredis/exclusive.go).
+      # The testcontainers reaper is off everywhere, not only here:
+      # internal/testredis/exclusive_reaper.go turns it off, because its
+      # lifecycle across test processes is a race testcontainers does not
+      # survive, and removes what a killed run left behind itself. Set here too
+      # so it holds before any test package is loaded.
       TESTCONTAINERS_RYUK_DISABLED: "true"
     services:
       # Real Redis, because miniredis is not Redis where it matters. The
@@ -234,6 +236,15 @@ jobs:
       - name: Verify version command
         run: ./bin/pocket-relay-miner version
 
+      # The Tiltfiles of both modes, run with Tilt's builtins stubbed, and every
+      # config they render validated with this binary (scripts/gates/static.sh
+      # runs the same). The tests skip without the binary: a skip fails here.
+      - name: Render the Tiltfiles of both modes
+        run: |
+          out="$(cd tilt/tiltcheck && PRM_BIN="$GITHUB_WORKSPACE/bin/pocket-relay-miner" go test -count=1 -v ./... 2>&1)" || { printf '%s\n' "$out"; exit 1; }
+          if printf '%s\n' "$out" | grep -q -- '--- SKIP'; then printf '%s\n' "$out"; echo "a Tiltfile render test skipped"; exit 1; fi
+          printf '%s\n' "$out" | grep -c -- '^--- PASS: TestRender_'
+
   docker-build-amd64:
     name: Docker Build (AMD64)
     runs-on: ubuntu-latest
@@ -248,7 +259,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           # BuildKit itself is an image; from the mirror, as the Dockerfile's are.
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          driver-opts: image=mirror.gcr.io/moby/buildkit:v0.33.1
 
       - name: Extract version metadata
         id: meta
@@ -288,7 +299,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           # BuildKit itself is an image; from the mirror, as the Dockerfile's are.
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          driver-opts: image=mirror.gcr.io/moby/buildkit:v0.33.1
 
       - name: Extract version metadata
         id: meta
