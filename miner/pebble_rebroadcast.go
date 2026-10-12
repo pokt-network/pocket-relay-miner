@@ -75,7 +75,21 @@ func (s *pebbleRebroadcastStore) dropGroup(batch *pebble.Batch, phase Rebroadcas
 	_ = batch.Delete(s.groupKey(phase, supplier, sessionEnd), nil)
 }
 
-func (s *pebbleRebroadcastStore) Put(_ context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64, sessionID string, payload []byte) error {
+// Put is fsynced before it returns, outside s.mu: the session's tx hash is
+// fsynced when it is recorded, and a session that carries a hash is resent
+// only from this entry, so an OS crash must not keep the hash and lose the
+// payload. One fsync per claim or proof broadcast.
+func (s *pebbleRebroadcastStore) Put(ctx context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64, sessionID string, payload []byte) error {
+	if err := s.put(ctx, phase, supplier, sessionEnd, sessionID, payload); err != nil {
+		return err
+	}
+	if err := s.store.Sync(); err != nil {
+		return fmt.Errorf("failed to persist rebroadcast payload (%s/%s/%d/%s): %w", phase, supplier, sessionEnd, sessionID, err)
+	}
+	return nil
+}
+
+func (s *pebbleRebroadcastStore) put(_ context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64, sessionID string, payload []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
