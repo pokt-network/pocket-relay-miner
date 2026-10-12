@@ -621,6 +621,8 @@ gate_settle_timeout_min() {
 # calls gate_fail; the caller does, on the status.
 gate_spanish_hits() {
     local dir="$1" words_file="$2" mode="${3:-}" words accents out rc hits=''
+    # Expanded as ${src[@]+"${src[@]}"}: bash before 4.4 (3.2 is stock macOS)
+    # treats an empty array as unbound under set -u.
     local -a src=()
     local exclude=':(exclude)scripts/gates/spanish-words.txt'
     [ "$mode" = --cached ] && src=(--cached)
@@ -636,11 +638,11 @@ gate_spanish_hits() {
 
     [ "$(gate_spanish_scanned "$dir")" -gt 0 ] || return 2
 
-    out="$(git -C "$dir" grep --no-color -I -n "${src[@]}" -E "$accents" -- . "$exclude" 2>&1)"
+    out="$(git -C "$dir" grep --no-color -I -n ${src[@]+"${src[@]}"} -E "$accents" -- . "$exclude" 2>&1)"
     rc=$?
     case "$rc" in 0) hits="$out" ;; 1) ;; *) return 2 ;; esac
 
-    out="$(git -C "$dir" grep --no-color -I -n "${src[@]}" -w -i -E "$words" -- . "$exclude" 2>&1)"
+    out="$(git -C "$dir" grep --no-color -I -n ${src[@]+"${src[@]}"} -w -i -E "$words" -- . "$exclude" 2>&1)"
     rc=$?
     case "$rc" in 0) hits="${hits:+$hits$'\n'}$out" ;; 1) ;; *) return 2 ;; esac
 
