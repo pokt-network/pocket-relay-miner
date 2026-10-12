@@ -340,3 +340,15 @@ func TestPebble_TheJanitorKeepsAKeyWrittenAfterItsScan(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, n)
 }
+
+// Ping is what standalone readiness asks: the store's health, so a closed
+// store is not ready.
+func TestPebble_PingReportsTheStoresHealth(t *testing.T) {
+	store, err := pebblestore.Open(zerolog.Nop(), pebblestore.Config{Path: t.TempDir(), SyncInterval: time.Hour})
+	require.NoError(t, err)
+	p := NewPebble(zerolog.Nop(), store, redisutil.NewKeyBuilder(config.RedisNamespaceConfig{}))
+	defer func() { _ = p.Close() }()
+	require.NoError(t, p.Ping(context.Background()))
+	require.NoError(t, store.Close())
+	require.Error(t, p.Ping(context.Background()), "a closed store is not ready")
+}

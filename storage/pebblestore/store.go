@@ -72,6 +72,10 @@ type Store struct {
 	openMu sync.RWMutex
 	closed bool
 
+	// syncErr is the last fsync's failure, nil once one succeeds: Health.
+	syncMu  sync.Mutex
+	syncErr error
+
 	// syncSeconds and syncFailures describe every fsync of the log. They are
 	// the store's own, not package-level, so they are served only where a
 	// store is open (standalone mode), through Collector.
@@ -179,11 +183,30 @@ func (s *Store) Sync() error {
 	err := s.wal.syncAll()
 	s.syncSeconds.Observe(time.Since(start).Seconds())
 	if err != nil {
+		err = fmt.Errorf("pebblestore: sync: %w", err)
 		s.syncFailures.Inc()
 		s.dirty.Store(true)
-		return fmt.Errorf("pebblestore: sync: %w", err)
 	}
-	return nil
+	s.syncMu.Lock()
+	s.syncErr = err
+	s.syncMu.Unlock()
+	return err
+}
+
+// Health is what readiness reads: an error once the store is closed, or while
+// the last fsync of the log failed (a disk that stopped taking writes). Every
+// read and write of an open store is in-process, so there is nothing else to
+// reach.
+func (s *Store) Health() error {
+	s.openMu.RLock()
+	closed := s.closed
+	s.openMu.RUnlock()
+	if closed {
+		return errors.New("pebblestore: closed")
+	}
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	return s.syncErr
 }
 
 func (s *Store) syncLoop(interval time.Duration) {

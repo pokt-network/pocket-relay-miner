@@ -445,7 +445,8 @@ func (p *Pebble) Subscribe(_ context.Context, channels ...string) (Subscription,
 	return p.bus.Subscribe(channels...), nil
 }
 
-func (p *Pebble) Ping(context.Context) error { return nil }
+// Ping is the store's health: closed, or its last fsync failed.
+func (p *Pebble) Ping(context.Context) error { return p.store.Health() }
 
 // deleteExpired deletes the strings and sets past their expiry.
 // expiredChunk is how many keys the janitor deletes per hold of the lock.

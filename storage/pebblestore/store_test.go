@@ -1,16 +1,20 @@
 package pebblestore
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/cockroachdb/pebble/vfs/errorfs"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -209,3 +213,32 @@ func TestCrash_AKilledProcessLosesNoCommit(t *testing.T) {
 }
 
 const crashChildCommits = 100
+
+// Health, which standalone readiness reads, reports a failed fsync of the log
+// until one succeeds again, and a closed store.
+func TestHealth_ReportsAFailedSyncUntilOneSucceeds(t *testing.T) {
+	var failSync atomic.Bool
+	mem := vfs.NewMem()
+	fs := errorfs.Wrap(mem, errorfs.InjectorFunc(func(op errorfs.Op, path string) error {
+		if failSync.Load() && op == errorfs.OpFileSync && strings.HasSuffix(path, ".log") {
+			return errors.New("injected fsync failure")
+		}
+		return nil
+	}))
+	require.NoError(t, mem.MkdirAll("db", 0o755))
+	s, err := Open(zerolog.Nop(), Config{Path: "db", FS: fs, SyncInterval: time.Hour})
+	require.NoError(t, err)
+	require.NoError(t, s.Health(), "an open store that never synced is healthy")
+
+	put(t, s, "k", "v")
+	failSync.Store(true)
+	require.Error(t, s.Sync())
+	require.ErrorContains(t, s.Health(), "injected fsync failure")
+
+	failSync.Store(false)
+	require.NoError(t, s.Sync())
+	require.NoError(t, s.Health(), "the next successful fsync clears it")
+
+	require.NoError(t, s.Close())
+	require.ErrorContains(t, s.Health(), "closed")
+}
