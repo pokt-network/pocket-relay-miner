@@ -656,3 +656,9 @@ func TestHeightCache_SizeAndPendingGaugesSumTheCachesOfOneType(t *testing.T) {
 	require.Equal(t, size+3, testutil.ToFloat64(queryCacheSize.WithLabelValues(client, cacheType)), "a closed cache takes its share out")
 	require.Equal(t, pending+2, testutil.ToFloat64(queryCachePending.WithLabelValues(client, cacheType)))
 }
+
+// The relayer's compute-units provider reads a hit through this method by
+// name; renaming it would silently send every relay down the miss path.
+var _ interface {
+	CachedServiceComputeUnitsPerRelayAtHeight(serviceID string, blockHeight int64) (uint64, bool)
+} = (*serviceQueryClient)(nil)

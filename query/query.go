@@ -1571,6 +1571,14 @@ func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.
 	return cupr, nil
 }
 
+// CachedServiceComputeUnitsPerRelayAtHeight returns the compute units per relay
+// at blockHeight when the cache holds an answer it reuses, without asking the
+// chain: a caller on the relay path then needs no deadline for the hit.
+func (c *serviceQueryClient) CachedServiceComputeUnitsPerRelayAtHeight(serviceId string, blockHeight int64) (uint64, bool) {
+	cupr, _, ok := c.cuprAtHeight.cached(heightKey{id: serviceId, height: blockHeight})
+	return cupr, ok
+}
+
 func (c *serviceQueryClient) fetchCUPRAtHeight(ctx context.Context, key heightKey) (uint64, int64, error) {
 	var md metadata.MD
 	res, err := c.queryClient.ComputeUnitsPerRelayAtHeight(ctx, &servicetypes.QueryComputeUnitsPerRelayAtHeightRequest{
