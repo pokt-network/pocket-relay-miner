@@ -75,11 +75,13 @@ declared() { # <full metric name> -> 0 when the source declares it
 }
 
 # The run total of one series over the window, as the dashboards' T() computes
-# it: its last value minus its last value before the window, unless it was born
-# or restarted inside the window, then its last value. A pod that died inside
-# the window adds only what it did inside it. scripts/dashboards/test_totals.py
-# evaluates this template on promtool; @M@ is the selector, @W@ the window.
-RUN_TOTAL='((last_over_time(@M@[@W@]) - last_over_time(@M@[@W@] offset @W@)) >= 0 and resets(@M@[@W@]) == 0) or last_over_time(@M@[@W@])'
+# it: its last value minus its last value before the window; the sum of its
+# minute steps when it restarted inside the window; its last value when it was
+# born inside the window or restarted at its start, or in a scrape gap there. A
+# pod that died inside the window adds only what it did inside it.
+# scripts/dashboards/test_totals.py evaluates this template on promtool; @M@ is
+# the selector, @W@ the window.
+RUN_TOTAL='((last_over_time(@M@[@W@]) - last_over_time(@M@[@W@] offset @W@)) >= 0 and resets(@M@[@W@]) == 0 and min_over_time(@M@[@W@]) >= last_over_time(@M@[@W@] offset @W@)) or (sum_over_time((((@M@ - @M@ offset 1m) >= 0) or @M@ * 1)[@W@:1m]) and resets(@M@[@W@]) > 0) or last_over_time(@M@[@W@])'
 
 run_total() { # <selector> -> sum of the run totals of its series over $W
   local e=${RUN_TOTAL//@M@/$1}

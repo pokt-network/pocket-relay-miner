@@ -97,17 +97,26 @@ def T(name, extra="", by=""):
     """Run total over the dashboard range: the work each series did inside it.
 
     Per series: its last value minus its last value before the range, when it
-    was alive before the range and did not reset; otherwise its last value (a
-    series born inside the range, or restarted in it). A plain
+    was alive before the range and did not reset (no value inside the range
+    below the one before it either: a restart hidden in a scrape gap at the
+    start shows only as that); the sum of its minute steps, a drop counting the
+    value after it, when it restarted inside the range; otherwise its last
+    value (a series born inside the range, or restarted at its start). A plain
     last_over_time would add a pod's whole lifetime, work done before the
     range included, so a range spanning a restart doubled; increase() would
-    miss series born inside the range. Ungrouped, a counter that never fired
-    has no series; "or vector(0)" makes it 0, so an identity that subtracts it
-    still has a value."""
+    miss series born inside the range. A restart inside a minute step loses
+    what that run did inside the step, and one hidden in a scrape gap whose
+    first sample already passes the old value reads as no restart. Ungrouped,
+    a counter that never fired has no series; "or vector(0)" makes it 0, so an
+    identity that subtracts it still has a value."""
     sel = q(name, extra)
     last = "last_over_time(%s[$__range])" % sel
     before = "last_over_time(%s[$__range] offset $__range)" % sel
-    inner = "((%s - %s) >= 0 and resets(%s[$__range]) == 0) or %s" % (last, before, sel, last)
+    # "* 1" drops the metric name, as the subtraction does: a step taken from
+    # either side then belongs to the same series.
+    steps = "sum_over_time((((%s - %s offset 1m) >= 0) or %s * 1)[$__range:1m])" % (sel, sel, sel)
+    inner = ("((%s - %s) >= 0 and resets(%s[$__range]) == 0 and min_over_time(%s[$__range]) >= %s)"
+             " or (%s and resets(%s[$__range]) > 0) or %s") % (last, before, sel, sel, before, steps, sel, last)
     if by:
         return "sum by (%s)(%s)" % (by, inner)
     return "(sum(%s) or vector(0))" % inner

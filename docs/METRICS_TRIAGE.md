@@ -15,13 +15,21 @@ Two rules before any series:
 
 All counters are per process and reset on restart, and a restart is normal (HA
 failover, rollout, OOM). So a run total is, per series, its last value minus its
-last value before the window, or its last value when it was born or restarted
-inside the window, summed and evaluated at the END of the run:
+last value before the window; the sum of its minute steps (a drop counts the
+value after it) when it restarted inside the window; or its last value when it
+was born inside the window or restarted at its start, a restart hidden in a
+scrape gap there included. Summed and evaluated at the END of the run:
 
 ```
-sum(((last_over_time(m[W]) - last_over_time(m[W] offset W)) >= 0 and resets(m[W]) == 0)
+sum(((last_over_time(m[W]) - last_over_time(m[W] offset W)) >= 0
+        and resets(m[W]) == 0 and min_over_time(m[W]) >= last_over_time(m[W] offset W))
+    or (sum_over_time((((m - m offset 1m) >= 0) or m * 1)[W:1m]) and resets(m[W]) > 0)
     or last_over_time(m[W]))
 ```
+
+A restart inside a minute step loses what that run did inside the step. A
+restart hidden in a scrape gap whose first sample already passes the old value
+cannot be told from an outage, and is read as one.
 
 Never `increase()`: a counter born inside the window is invisible to it. A plain
 `last_over_time` adds a pod's whole lifetime, work done before the window

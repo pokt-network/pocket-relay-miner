@@ -6,7 +6,8 @@ promtool runs the very expressions T() writes into the dashboards, over series
 shaped as the relay miner exports them, and checks each total counts only the
 work done inside the dashboard range: a pod that died inside it, one born
 inside it, one alive across it, a scrape gap at its start, a restart inside a
-pod, a restart at its start, and a counter that never fired.
+pod, a restart at its start, a restart hidden in a scrape gap at its start, and
+a counter that never fired.
 
     python3 scripts/dashboards/test_totals.py
 
@@ -39,10 +40,14 @@ SERIES = [
     # No sample from minute 50 to 64, longer than the 5m lookback, across the
     # start: 500 before the range, 1100 at minute 115.
     ("relayer-b", "pokt1s2", "500x49 _x15 600+10x50", 600),
-    # Restarted inside the pod at minute 62: counts from the restart, 30 x 57.
-    ("miner-a", "pokt1s3", "0+20x59 1200 1220 0+30x57", 1710),
+    # Restarted inside the pod at minute 62: 40 before the restart, 30 x 57 after.
+    ("miner-a", "pokt1s3", "0+20x59 1200 1220 0+30x57", 1750),
     # Restarted at the start of the range: 900 before it, 590 after.
     ("miner-b", "pokt1s3", "900x59 0+10x60", 590),
+    # Restarted inside a scrape gap across the start: 1080 before it, then no
+    # sample until minute 65, where the new run starts from 0 and passes the
+    # old value: all 1620 are inside the range.
+    ("miner-c", "pokt1s3", "0+20x54 _x10 0+30x54", 1620),
 ]
 
 
