@@ -87,6 +87,7 @@ Example:
 			}
 			configPath, _ := cmd.Flags().GetString(flagStandaloneConfig)
 			fmt.Printf("config OK: %s would start\n", configPath)
+			printSimulationWarnings(cmd.OutOrStdout(), &cfg.Relayer.Simulation)
 
 			checkStake, _ := cmd.Flags().GetBool(flagCheckStake)
 			if !checkStake {

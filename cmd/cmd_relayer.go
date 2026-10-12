@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"runtime"
 	"sort"
@@ -123,6 +124,37 @@ const (
 // for but have no backend to serve is an ERROR (you earn nothing on it,
 // silently); a backend you configured that no supplier stakes is surplus,
 // reported as info.
+// printSimulationWarnings is what validate reports about the simulation block
+// beyond the checks that would stop the process. Advisory only: the exit
+// status stays 0.
+func printSimulationWarnings(w io.Writer, sim *relayer.SimulationConfig) {
+	// A disabled simulation block is skipped by Validate, by design. Report
+	// what enabling it would do anyway: otherwise the operator finds out on
+	// the deploy that flips the switch, when the relayer refuses to boot and
+	// stops serving real traffic.
+	//
+	// Only when identities are actually pinned: the shipped default is
+	// disabled with none, and warning about that would fire on every correct
+	// config.
+	if !sim.Enabled && len(sim.Identities) > 0 {
+		if simErr := sim.ValidateAsIfEnabled(); simErr != nil {
+			_, _ = fmt.Fprintf(w, "warning: simulation is disabled, so its config was not checked; "+
+				"it would be REJECTED if you set simulation.enabled: true: %v\n", simErr)
+		}
+	}
+
+	// An expired identity is valid config that serves nothing. Report it here
+	// rather than let a health-check pipeline go quiet with no explanation.
+	// Advisory by design — see ExpiredIdentities. Not gated on
+	// simulation.enabled: this command is a look-ahead, and an identity that
+	// is already dead is worth knowing about before the deploy that switches
+	// the feature on, not after.
+	if expired := sim.ExpiredIdentities(time.Now()); len(expired) > 0 {
+		_, _ = fmt.Fprintf(w, "warning: simulation identities are past their not_after and will reject every relay: %s\n",
+			strings.Join(expired, ", "))
+	}
+}
+
 func relayerValidateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "validate",
@@ -165,33 +197,7 @@ Examples:
 			}
 
 			fmt.Printf("config OK: %s would start\n", configPath)
-
-			// A disabled simulation block is skipped by Validate, by design.
-			// Report what enabling it would do anyway: otherwise the operator
-			// finds out on the deploy that flips the switch, when the relayer
-			// refuses to boot and stops serving real traffic. Advisory only —
-			// exit status stays 0.
-			//
-			// Only when identities are actually pinned: the shipped default is
-			// disabled with none, and warning about that would fire on every
-			// correct config.
-			if !config.Simulation.Enabled && len(config.Simulation.Identities) > 0 {
-				if simErr := config.Simulation.ValidateAsIfEnabled(); simErr != nil {
-					fmt.Printf("warning: simulation is disabled, so its config was not checked; "+
-						"it would be REJECTED if you set simulation.enabled: true: %v\n", simErr)
-				}
-			}
-
-			// An expired identity is valid config that serves nothing. Report
-			// it here rather than let a health-check pipeline go quiet with no
-			// explanation. Advisory by design — see ExpiredIdentities. Not
-			// gated on simulation.enabled: this command is a look-ahead, and
-			// an identity that is already dead is worth knowing about before
-			// the deploy that switches the feature on, not after.
-			if expired := config.Simulation.ExpiredIdentities(time.Now()); len(expired) > 0 {
-				fmt.Printf("warning: simulation identities are past their not_after and will reject every relay: %s\n",
-					strings.Join(expired, ", "))
-			}
+			printSimulationWarnings(cmd.OutOrStdout(), &config.Simulation)
 
 			checkStake, _ := cmd.Flags().GetBool(flagCheckStake)
 			if !checkStake {
