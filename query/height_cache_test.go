@@ -566,3 +566,62 @@ func TestHeightCache_Difficulty_ACancelledCallerDoesNotFailTheOthers(t *testing.
 	require.NoError(t, <-secondErr, "the other caller gets the shared answer")
 	require.Equal(t, int64(1), rpcs.Load())
 }
+
+// TestHeightCache_NotFinalAnswerIsNotReusedPastItsBound: when no block arrives (a
+// stalled block feed), an answer that is not final must not become permanent.
+func TestHeightCache_NotFinalAnswerIsNotReusedPastItsBound(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+	qc := newHeightCacheTestClients(t, address)
+	var block atomic.Int64
+	block.Store(100)
+	qc.SetBlockHeightSource(block.Load)
+
+	var rpcs atomic.Int64
+	mock.getRelayMiningDifficultyAtHeightFunc = difficultyAnswer(&rpcs, func() []byte { return hashOf(1) })
+	mock.answeredHeight.Store(99)
+
+	ctx := context.Background()
+	key := heightKey{id: "svc", height: 100}
+	_, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, key.id, key.height)
+	require.NoError(t, err)
+
+	cache := qc.serviceClient.difficultyAtHeight
+	e, ok := cache.pending.Load(key)
+	require.True(t, ok)
+	e.fetchedAt = time.Now().Add(-maxPendingReuse)
+	cache.pending.Store(key, e)
+
+	_, err = qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, key.id, key.height)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), rpcs.Load(), "a not-final answer past its bound is asked again with no new block")
+}
+
+// TestHeightCache_BlockDuringTheRPCIsNotCoveredByItsAnswer: an answer the node
+// gave while this process moved to a new block was computed before that block,
+// so it must not be reused for it.
+func TestHeightCache_BlockDuringTheRPCIsNotCoveredByItsAnswer(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+	qc := newHeightCacheTestClients(t, address)
+	var block atomic.Int64
+	block.Store(100)
+	qc.SetBlockHeightSource(block.Load)
+
+	var rpcs atomic.Int64
+	answer := difficultyAnswer(&rpcs, func() []byte { return hashOf(1) })
+	mock.answeredHeight.Store(99)
+	mock.getRelayMiningDifficultyAtHeightFunc = func(c context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
+		if rpcs.Load() == 0 {
+			block.Store(101) // a block arrives while the first RPC is in flight
+		}
+		return answer(c, req)
+	}
+
+	ctx := context.Background()
+	_, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "svc", 102)
+	require.NoError(t, err)
+	_, err = qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "svc", 102)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), rpcs.Load(), "the block that arrived during the RPC asks the answer again")
+}

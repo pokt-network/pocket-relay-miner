@@ -162,17 +162,17 @@ func (qc *Clients) Shared() client.SharedQueryClient {
 	return qc.sharedClient
 }
 
-// SharedQueryClient is poktroll's shared query client plus the at-height read
+// SharedFinalityClient is poktroll's shared query client plus the at-height read
 // that says whether its answer is final, for a cache that keeps answers beyond
 // this process (an answer that is not final must not be shared).
-type SharedQueryClient interface {
+type SharedFinalityClient interface {
 	client.SharedQueryClient
 	GetParamsAtHeightWithFinality(ctx context.Context, queryHeight int64) (*sharedtypes.Params, bool, error)
 }
 
 // SharedWithFinality returns the shared module query client with
 // GetParamsAtHeightWithFinality.
-func (qc *Clients) SharedWithFinality() SharedQueryClient {
+func (qc *Clients) SharedWithFinality() SharedFinalityClient {
 	return qc.sharedClient
 }
 

@@ -27,11 +27,8 @@ type heightKey struct {
 // heightEntry is a chain answer for a heightKey.
 type heightEntry[V any] struct {
 	value V
-	// answeredAt is the height the node answered from (the
-	// x-cosmos-block-height response header); 0 when the header was absent.
-	answeredAt int64
-	// seenAt is this process's block height when the answer was stored. An
-	// answer that is not final is asked again once that height moves.
+	// seenAt is this process's block height when the RPC that answered was
+	// sent. An answer that is not final is asked again once that height moves.
 	seenAt    int64
 	fetchedAt time.Time
 }
@@ -125,6 +122,10 @@ func newHeightCache[V any](
 	}
 }
 
+// maxPendingReuse bounds how long an answer that is not final is reused when no
+// new block arrives: a stalled block feed must not turn it into a permanent one.
+const maxPendingReuse = 30 * time.Second
+
 // maxPendingHeightCacheEntries bounds the answers held as not final. Legit
 // callers ask at most a block or two above the committed height, so a few per
 // key in use is all a healthy process holds; the bound is for callers asking
@@ -148,7 +149,8 @@ func (c *heightCache[V]) getWithFinality(ctx context.Context, key heightKey) (V,
 
 // cached returns key's value when the cache may serve it: a final answer, or an
 // answer that is not final while this process has seen no newer block since it
-// arrived. Allocation-free: it runs on every relay.
+// was asked for (and for at most maxPendingReuse). Allocation-free: it runs on
+// every relay.
 func (c *heightCache[V]) cached(key heightKey) (v V, final bool, ok bool) {
 	if e, found := c.final.Load(key); found {
 		c.hits.Inc()
@@ -158,7 +160,7 @@ func (c *heightCache[V]) cached(key heightKey) (v V, final bool, ok bool) {
 		return e.value, true, true
 	}
 	if e, found := c.pending.Load(key); found {
-		if b := c.blockHeight.current(); b > 0 && b <= e.seenAt {
+		if b := c.blockHeight.current(); b > 0 && b <= e.seenAt && time.Since(e.fetchedAt) < maxPendingReuse {
 			c.hits.Inc()
 			return e.value, false, true
 		}
@@ -182,11 +184,12 @@ func (c *heightCache[V]) ask(ctx context.Context, key heightKey) (V, bool, error
 	ch := c.flight.DoChan(flightKey(key), func() (any, error) {
 		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.queryTimeout)
 		defer cancel()
+		seenAt := c.blockHeight.current()
 		v, answeredAt, err := c.fetch(queryCtx, key)
 		if err != nil {
 			return nil, err
 		}
-		return heightAnswer[V]{value: v, final: c.store(key, v, answeredAt)}, nil
+		return heightAnswer[V]{value: v, final: c.store(key, v, answeredAt, seenAt)}, nil
 	})
 	if c.onFlightJoin != nil {
 		c.onFlightJoin()
@@ -204,8 +207,10 @@ func (c *heightCache[V]) ask(ctx context.Context, key heightKey) (V, bool, error
 	}
 }
 
-// store keeps an answer and reports whether it is final.
-func (c *heightCache[V]) store(key heightKey, v V, answeredAt int64) bool {
+// store keeps an answer and reports whether it is final. seenAt is this
+// process's block height when the RPC was sent: an answer from before a block
+// that arrived during the RPC is not reused for that block.
+func (c *heightCache[V]) store(key heightKey, v V, answeredAt, seenAt int64) bool {
 	if answeredAt <= 0 {
 		c.heightMissing.Inc()
 		c.heightMissingOnce.Do(func() {
@@ -213,7 +218,7 @@ func (c *heightCache[V]) store(key heightKey, v V, answeredAt int64) bool {
 				Msg("the full node's answers carry no x-cosmos-block-height header (a proxy may strip it); no answer can be cached as final, so each is asked again once per block")
 		})
 	}
-	e := heightEntry[V]{value: v, answeredAt: answeredAt, seenAt: c.blockHeight.current(), fetchedAt: time.Now()}
+	e := heightEntry[V]{value: v, seenAt: seenAt, fetchedAt: time.Now()}
 	final := answeredAt >= key.height
 	if final {
 		c.final.Store(key, e)
@@ -258,14 +263,18 @@ func (c *heightCache[V]) revalidate(key heightKey) {
 	c.flight.DoChan(flightKey(key), func() (any, error) {
 		queryCtx, cancel := context.WithTimeout(context.Background(), c.queryTimeout)
 		defer cancel()
+		seenAt := c.blockHeight.current()
 		v, answeredAt, err := c.fetch(queryCtx, key)
 		if err != nil {
+			// The entry keeps being served and is tried again after another floor.
+			c.logger.Warn().Err(err).Str("cache_type", c.cacheType).Str("id", key.id).Int64("height", key.height).
+				Msg("re-validating a final cache entry failed; serving it until the next try")
 			return nil, fmt.Errorf("re-validate %s at height %d: %w", c.cacheType, key.height, err)
 		}
 		cur, ok := c.final.Load(key)
 		if !ok {
 			// Evicted while the RPC was in flight: keep it like any other answer.
-			return heightAnswer[V]{value: v, final: c.store(key, v, answeredAt)}, nil
+			return heightAnswer[V]{value: v, final: c.store(key, v, answeredAt, seenAt)}, nil
 		}
 		if answeredAt < key.height {
 			// A node behind a final height is behind, not a correction.
@@ -277,7 +286,7 @@ func (c *heightCache[V]) revalidate(key heightKey) {
 				Int64("answered_at", answeredAt).
 				Msg("the chain answered a different value at a height already answered as final; serving the new one")
 		}
-		c.final.Store(key, heightEntry[V]{value: v, answeredAt: answeredAt, fetchedAt: time.Now()})
+		c.final.Store(key, heightEntry[V]{value: v, fetchedAt: time.Now()})
 		return heightAnswer[V]{value: v, final: true}, nil
 	})
 }
@@ -315,7 +324,13 @@ func (c *heightCache[V]) evict(m *xsync.Map[heightKey, heightEntry[V]], max int,
 		}
 		return a.fetchedAt.Before(b.fetchedAt)
 	})
-	for _, cand := range candidates[:len(candidates)-max/2] {
+	// The size read above is not the Range's: entries can be deleted between the
+	// two, so the count to drop is taken from what Range collected.
+	drop := len(candidates) - max/2
+	if drop <= 0 {
+		return
+	}
+	for _, cand := range candidates[:drop] {
 		m.Delete(cand.key)
 	}
 }

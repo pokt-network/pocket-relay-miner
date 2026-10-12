@@ -100,3 +100,31 @@ func TestGetSharedParams_NotFinalAnswerIsReusedUntilTheNextBlock(t *testing.T) {
 	_, atHeight = client.snapshot()
 	require.Len(t, atHeight, 2, "a new block asks the not-final answer again")
 }
+
+// TestGetSharedParams_NotFinalAnswerIsNotReusedPastItsBound: when no block
+// arrives, an L1 answer that is not final must not become permanent.
+func TestGetSharedParams_NotFinalAnswerIsNotReusedPastItsBound(t *testing.T) {
+	client := &recordingSharedQueryClient{
+		liveParams: &sharedtypes.Params{NumBlocksPerSession: 10},
+		notFinal:   true,
+	}
+	c := NewRedisSharedParamCache(logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		kv.NewRedis(zerolog.Nop(), newTestRedis(t)), client, &stubBlockClient{height: 499}, CacheConfig{})
+	t.Cleanup(func() { _ = c.Close() })
+
+	ctx := context.Background()
+	const height = int64(500)
+	_, err := c.GetSharedParams(ctx, height)
+	require.NoError(t, err)
+
+	key := c.store.KB().ParamsSharedAtHeightKey(height)
+	e, ok := c.localCache.Load(key)
+	require.True(t, ok)
+	e.cachedAt = time.Now().Add(-maxPendingLocalReuse)
+	c.localCache.Store(key, e)
+
+	_, err = c.GetSharedParams(ctx, height)
+	require.NoError(t, err)
+	_, atHeight := client.snapshot()
+	require.Len(t, atHeight, 2, "a not-final answer past its bound is asked again with no new block")
+}
