@@ -410,3 +410,9 @@ func generateTestRelayMiningDifficulty(serviceID string) *servicetypes.RelayMini
 		TargetHash:   make([]byte, 32),
 	}
 }
+
+// AnsweredAt is err as GetClaim returns it when the node answered from height:
+// what callers read with AnsweredHeight. Tests only.
+func AnsweredAt(err error, height int64) error {
+	return &answeredError{height: height, err: err}
+}

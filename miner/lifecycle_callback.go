@@ -2282,6 +2282,22 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					lc.deferProof(ctx, snapshot)
 					continue
 				}
+				// On the last pass a NotFound books claim_missing only when the
+				// node answered from the claim window's close or later, where
+				// no claim can still be on its way. From an earlier height (a
+				// node behind the chain), or with no height at all, it is not a
+				// verdict: the proof is sent, and a claim that is truly absent
+				// costs a rejected proof transaction, not a slash.
+				if claimErr != nil && isClaimNotFoundError(claimErr) &&
+					query.AnsweredHeight(claimErr) < sharedtypes.GetClaimWindowCloseHeight(sharedParams, sessionEndHeight) {
+					logger.Warn().
+						Err(claimErr).
+						Str(logging.FieldSessionID, snapshot.SessionID).
+						Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+						Int64("answered_height", query.AnsweredHeight(claimErr)).
+						Msg("pre-proof guard: claim not found by a node behind the claim window's close -- sending the proof anyway")
+					claimErr = nil
+				}
 				if claimErr != nil && isClaimNotFoundError(claimErr) {
 					logger.Warn().
 						Str(logging.FieldSessionID, snapshot.SessionID).

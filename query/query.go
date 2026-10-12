@@ -33,6 +33,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -1214,12 +1215,13 @@ func (c *proofQueryClient) GetClaim(ctx context.Context, supplierOperatorAddress
 		func() (*prooftypes.Claim, error) {
 			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
 			defer cancel()
+			var md metadata.MD
 			res, err := c.queryClient.Claim(queryCtx, &prooftypes.QueryGetClaimRequest{
 				SupplierOperatorAddress: supplierOperatorAddress,
 				SessionId:               sessionId,
-			})
+			}, grpc.Header(&md))
 			if err != nil {
-				return nil, fmt.Errorf("failed to query claim: %w", err)
+				return nil, &answeredError{height: answeredHeight(md), err: fmt.Errorf("failed to query claim: %w", err)}
 			}
 			return &res.Claim, nil
 		},
