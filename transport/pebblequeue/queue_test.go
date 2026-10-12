@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -464,4 +465,50 @@ func TestQueue_AFailedReadIsRetriedWithoutANewPublish(t *testing.T) {
 
 	require.Len(t, got, 1)
 	require.GreaterOrEqual(t, reads.Load(), int32(2), "premise: the first read failed")
+}
+
+// corruptCounter leaves a meter counter the broker cannot read, so every
+// commit that carries a charge for it fails, and returns how to repair it.
+func corruptCounter(t *testing.T, f *fixture, key string) (repair func()) {
+	t.Helper()
+	raw := kv.StringKey(key)
+	require.NoError(t, f.store.DB().Set(raw, kv.EncodeValue(time.Time{}, []byte("not-a-number")), pebble.Sync))
+	return func() { require.NoError(t, f.store.DB().Delete(raw, pebble.Sync)) }
+}
+
+// After one failed commit, admission reopens once the store takes writes
+// again, even though nothing publishes: the eager meter refuses every relay
+// while DispatcherHealthy is false, so no publish and no charge is left to
+// write. Before the probe, the relayer refused every relay until a restart.
+func TestQueue_HealthRecoversWithNoPublishAfterAFailedCommit(t *testing.T) {
+	f, _, ledger, written := chargeFixture(t, 0)
+	f.broker.probeInterval = 0
+	repair := corruptCounter(t, f, "meter:s1:sup")
+
+	ledger.Add("meter:s1:sup", testSupplier, 7, time.Hour)
+	require.Error(t, f.pub.Publish(context.Background(), relay("s1", 0)))
+	alive, err := f.pub.DispatcherHealthy()
+	require.False(t, alive, "a failed commit closes admission")
+	require.Error(t, err)
+
+	repair()
+	alive, err = f.pub.DispatcherHealthy()
+	require.NoError(t, err)
+	require.True(t, alive, "the store takes writes again: admission reopens with no publish")
+	require.Equal(t, int64(7), <-written, "the probe wrote the charge the failed publish left")
+}
+
+// A failed write of charges alone, with no publish, closes admission as a
+// failed publish does: those charges are the budget the meter checks.
+func TestQueue_AFailedChargeWriteClosesAdmission(t *testing.T) {
+	f, _, ledger, _ := chargeFixture(t, 0)
+	f.broker.probeInterval = time.Hour
+	corruptCounter(t, f, "meter:s1:sup")
+
+	ledger.Add("meter:s1:sup", testSupplier, 7, time.Hour)
+	require.Error(t, f.broker.flushCharges())
+
+	alive, err := f.pub.DispatcherHealthy()
+	require.False(t, alive)
+	require.Error(t, err)
 }

@@ -39,6 +39,7 @@ import (
 const (
 	entryPrefix  = "q\x00"     // q\x00<stream>\x00<ms BE8><seq BE8> -> encoded relay
 	lastIDPrefix = "qlast\x00" // qlast\x00<stream> -> <ms BE8><seq BE8>
+	probeKey     = "qprobe"    // qprobe -> nothing; written to find out whether the store takes writes again
 	idLen        = 16
 )
 
@@ -67,7 +68,24 @@ type Broker struct {
 	// afterCountersRead, when set, runs between the counters' read and their
 	// write, with b.mu held. Tests only.
 	afterCountersRead func()
+
+	// healthMu guards what DispatcherHealthy reads, apart from b.mu, which a
+	// commit holds: admission must not wait on a write in flight.
+	healthMu sync.Mutex
+	// commitErr is the last commit's failure, nil once a commit succeeds.
+	commitErr error
+	// lastProbe is when DispatcherHealthy last wrote probeKey to find out
+	// whether a failed store takes writes again; probeInterval apart at most.
+	lastProbe     time.Time
+	probeInterval time.Duration
 }
+
+// defaultProbeInterval bounds how often a relayer refusing relays because a
+// commit failed tries a write of its own. While it refuses, nothing publishes
+// and, with no relay served, no charge is left to write: without the probe no
+// commit would ever succeed again to reopen admission. The Redis publisher
+// has the same need and meets it with its heartbeat PING.
+const defaultProbeInterval = time.Second
 
 // stream is one supplier's queue.
 type stream struct {
@@ -83,12 +101,13 @@ type stream struct {
 // streamPrefix names the queues the way the Redis transport names its streams.
 func NewBroker(logger logging.Logger, store *pebblestore.Store, counters *kv.Pebble, streamPrefix string) *Broker {
 	return &Broker{
-		store:        store,
-		counters:     counters,
-		streamPrefix: streamPrefix,
-		logger:       logging.ForComponent(logger, "pebble_queue"),
-		streams:      make(map[string]*stream),
-		consumers:    make(map[string]*Consumer),
+		store:         store,
+		counters:      counters,
+		streamPrefix:  streamPrefix,
+		logger:        logging.ForComponent(logger, "pebble_queue"),
+		streams:       make(map[string]*stream),
+		consumers:     make(map[string]*Consumer),
+		probeInterval: defaultProbeInterval,
 	}
 }
 
@@ -151,8 +170,6 @@ type Publisher struct {
 	b      *Broker
 	mu     sync.Mutex
 	closed bool
-	// lastErr is the last commit's failure, nil once a commit succeeds again.
-	lastErr error
 
 	stop      chan struct{}
 	closeOnce sync.Once
@@ -211,9 +228,6 @@ func (p *Publisher) Publish(_ context.Context, msg *transport.MinedRelayMessage)
 	}
 
 	st, err := p.b.publish(name, data)
-	p.mu.Lock()
-	p.lastErr = err
-	p.mu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -227,6 +241,7 @@ func (b *Broker) publish(name string, data []byte) (*stream, error) {
 	defer b.mu.Unlock()
 	st, err := b.streamLocked(name)
 	if err != nil {
+		b.noteCommit(err)
 		return nil, err
 	}
 	prevMS, prevSeq := st.lastMS, st.lastSeq
@@ -255,9 +270,10 @@ func (b *Broker) flushCharges() error {
 
 // commitWithCharges commits one batch holding what fill writes and the meter
 // charges served so far, read and rewritten under the counters' lock. With
-// nothing to write it commits nothing. Called with b.mu held.
+// nothing to write it commits nothing. Its outcome is what DispatcherHealthy
+// reports. Called with b.mu held.
 func (b *Broker) commitWithCharges(fill func(*pebble.Batch)) error {
-	write := func() error {
+	write := func() (err error) {
 		var charges []redistransport.Charge
 		if b.ledger != nil {
 			charges = b.ledger.TakeAll()
@@ -265,6 +281,7 @@ func (b *Broker) commitWithCharges(fill func(*pebble.Batch)) error {
 		if fill == nil && len(charges) == 0 {
 			return nil
 		}
+		defer func() { b.noteCommit(err) }()
 		batch := b.store.DB().NewBatch()
 		if fill != nil {
 			fill(batch)
@@ -338,14 +355,42 @@ func (b *Broker) counterLocked(key string, now time.Time) (int64, time.Time, err
 // returns. The relayer's publish-queue gate reads it.
 func (p *Publisher) QueuedBytes() int { return 0 }
 
-// DispatcherHealthy reports whether the last publish reached the store.
+// DispatcherHealthy reports whether the last commit reached the store. After a
+// failed one it writes probeKey, at most once per probeInterval, so admission
+// reopens once the store takes writes again even when nothing publishes.
 func (p *Publisher) DispatcherHealthy() (bool, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.lastErr != nil {
-		return false, p.lastErr
+	b := p.b
+	probe, err := b.commitHealth(time.Now())
+	if probe {
+		b.mu.Lock()
+		_ = b.commitWithCharges(func(batch *pebble.Batch) { _ = batch.Set([]byte(probeKey), nil, nil) })
+		b.mu.Unlock()
+		_, err = b.commitHealth(time.Time{})
+	}
+	if err != nil {
+		return false, err
 	}
 	return true, nil
+}
+
+// noteCommit records the outcome of a commit for DispatcherHealthy.
+func (b *Broker) noteCommit(err error) {
+	b.healthMu.Lock()
+	b.commitErr = err
+	b.healthMu.Unlock()
+}
+
+// commitHealth returns whether the caller should probe the store now (the last
+// commit failed and no probe ran in the last probeInterval) and the last
+// commit's failure. A zero now never claims a probe.
+func (b *Broker) commitHealth(now time.Time) (bool, error) {
+	b.healthMu.Lock()
+	defer b.healthMu.Unlock()
+	if b.commitErr == nil || now.IsZero() || now.Sub(b.lastProbe) < b.probeInterval {
+		return false, b.commitErr
+	}
+	b.lastProbe = now
+	return true, b.commitErr
 }
 
 // Close refuses later publishes and writes the charges no publish carried.
