@@ -75,9 +75,10 @@ jobs:
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
           echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
 
-  # A final release tag must not ship with docs that install another version.
-  # It runs on every ref, so the builds that need it are never skipped, and
-  # checks only vX.Y.Z tags; it runs before any image is pushed.
+  # A release tag must not ship with docs that install another version. It
+  # runs on every ref, so the builds that need it are never skipped, and checks
+  # every v* tag: on a pre-release only that the pins agree and name no moving
+  # tag, on a vX.Y.Z also that they name it. It runs before any image is pushed.
   docs-versions:
     name: Docs Name The Released Version
     runs-on: ubuntu-latest

@@ -477,7 +477,13 @@ dv_run() {
     rc=$?
     printf '%s|%s' "$rc" "$out"
 }
-dv_ok=$'docs/a.md\timage: ghcr.io/pokt-network/pocket-relay-miner:v1.2.3\ndocs/b.md\tgit clone --branch v1.2.3 repo\nexamples/c.yaml\timage: ghcr.io/pokt-network/pocket-relay-miner:v1.2.3\ndocs/benchmarks/v1.0.0/r.md\tpocket-relay-miner:v1.0.0 measured'
+dv_ok=$'docs/a.md\timage: ghcr.io/pokt-network/pocket-relay-miner:v1.2.3\ndocs/b.md\tgit clone --branch v1.2.3 https://github.com/pokt-network/pocket-relay-miner.git\nexamples/c.yaml\timage: ghcr.io/pokt-network/pocket-relay-miner:v1.2.3\ndocs/f.md\tcurl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v1.2.3/pocket-relay-miner_v1.2.3_linux_amd64.tar.gz\ndocs/g.md\tgit checkout v1.2.3\ndocs/benchmarks/v1.0.0/r.md\tpocket-relay-miner:v1.0.0 measured'
+# dv_bumped is dv_ok with every pin on v1.2.4 and one line left on v1.2.3,
+# given as "path<TAB>content": what a partial bump before a release looks like.
+dv_bumped() {
+    printf '%s\n' "$dv_ok" | sed 's/v1\.2\.3/v1.2.4/g' | grep -v "^${1%%$'\t'*}"$'\t'
+    printf '%s\n' "$1"
+}
 r="$(printf '%s\n' "$dv_ok" | dv_run agree)"
 expect 0 "${r%%|*}" "doc_versions: pins that agree pass (a benchmark of an old release is not a pin)"
 r="$(printf '%s\n' "$dv_ok" | dv_run expect-same --expect v1.2.3)"
@@ -487,6 +493,30 @@ expect 0 "${r%%|*}" "doc_versions: a pre-release is not checked"
 r="$(printf '%s\n' "$dv_ok" | dv_run expect-new --expect v1.2.4)"
 expect 1 "${r%%|*}" "doc_versions: --expect a new tag fails while the docs install the old one"
 case "$r" in *"docs/b.md:1:"*) ;; *) expect "names docs/b.md:1" "$r" "doc_versions: --expect lists prose naming the old version, not only pins" ;; esac
+# A partial bump: each shape the docs name the release in, left alone on the
+# old version while every other pin moved, fails the tag.
+for stale in $'docs/b.md\tgit clone --branch v1.2.3 https://github.com/pokt-network/pocket-relay-miner.git' \
+    $'docs/g.md\tgit checkout v1.2.3' \
+    $'docs/f.md\tcurl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v1.2.3/pocket-relay-miner_v1.2.4_linux_amd64.tar.gz' \
+    $'docs/f.md\tcurl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v1.2.4/pocket-relay-miner_v1.2.3_linux_amd64.tar.gz'; do
+    r="$(dv_bumped "$stale" | dv_run "partial-${stale%%$'\t'*}-$RANDOM" --expect v1.2.4)"
+    expect 1 "${r%%|*}" "doc_versions: a partial bump fails ($stale)"
+done
+# A pre-release of the version is another version, not that version.
+r="$(printf '%s\n%s\n' "$dv_ok" $'docs/h.md\timage: ghcr.io/pokt-network/pocket-relay-miner:v1.2.3-rc.1' | dv_run rc-pin --expect v1.2.3)"
+expect 1 "${r%%|*}" "doc_versions: a pre-release pin is not the release's pin"
+# The listing names every line with the old version, the tarball's _vX_ too,
+# and not a longer version that starts with it.
+r="$(printf '%s\n%s\n%s\n' "$dv_ok" $'docs/i.md\tpocket-relay-miner v1.2.30 is unrelated' $'docs/j.md\ttar -xzf pocket-relay-miner_v1.2.3_linux_amd64.tar.gz' | dv_run listing --expect v1.2.4)"
+case "$r" in *"docs/j.md:1:"*) ;; *) expect "names docs/j.md:1" "$r" "doc_versions: the listing names the tarball line" ;; esac
+case "$r" in *"docs/i.md:1:"*) expect "does not name docs/i.md:1" "$r" "doc_versions: v1.2.30 is not v1.2.3" ;; esac
+# A flag without its value, or a value of the wrong shape, is a usage error,
+# never a loop or a check silently skipped.
+for args in "--expect" "--min" "--min abc" "--expect 1.2.3"; do
+    # shellcheck disable=SC2086 # the words are the arguments
+    r="$(printf '%s\n' "$dv_ok" | ( ulimit -t 5; dv_run "args-$RANDOM" $args ))"
+    expect 2 "${r%%|*}" "doc_versions: $args is a usage error"
+done
 r="$(printf '%s\n%s\n' "$dv_ok" $'docs/d.md\tdocker pull ghcr.io/pokt-network/pocket-relay-miner:v1.2.2' | dv_run disagree)"
 expect 1 "${r%%|*}" "doc_versions: pins naming two versions fail"
 case "$r" in *"docs/d.md:1:"*) ;; *) expect "names docs/d.md:1" "$r" "doc_versions: the failure names the stale pin" ;; esac
