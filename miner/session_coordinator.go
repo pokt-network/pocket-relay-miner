@@ -756,7 +756,10 @@ func (c *SessionCoordinator) OnClaimMissing(ctx context.Context, sessionID strin
 		return err
 	}
 
-	// Counted once, on the transition.
+	// Counted once: the read above returns early for a session already
+	// claim_missing, and the only caller, the leader's proof pass, marks a
+	// session from one pass at a time. The write itself does not report
+	// whether it moved the session, so two concurrent callers would both count.
 	if current != nil {
 		RecordClaimMissing(current.SupplierOperatorAddress, current.ServiceID, verdict,
 			current.RelayCount, int64(current.TotalComputeUnits), c.price(ctx, current))
