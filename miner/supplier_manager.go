@@ -3643,7 +3643,7 @@ func (m *SupplierManager) startReconcilerBlockLoop() {
 // may report its accounting -- otherwise two replicas report the same money.
 //
 // KNOWN GAP, deliberately not closed here: a CONFIRMED proof the chain turns out
-// not to hold was already counted into upokt_proved_total at submission. This
+// not to hold was already counted into chain_upokt_proved_total at submission. This
 // function cannot subtract it -- a counter does not go down -- so `proved`
 // overstates by that amount and proof_inclusion_outcome_total is what reveals
 // it. That is the success side of the ledger and it is a separate change.

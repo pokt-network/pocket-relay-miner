@@ -26,7 +26,7 @@ func seedClaimable(t *testing.T, store SessionStore, id, service string, state S
 	require.True(t, created)
 }
 
-// The money of a claim enters upokt_claimed_total once, at the flip into
+// The money of a claim enters chain_upokt_claimed_total once, at the flip into
 // claimed, whichever path flips it: the submission, the window close asking the
 // chain after a process died between its broadcast and its claimed write, or
 // the inclusion reconciler. A path that finds the session already claimed

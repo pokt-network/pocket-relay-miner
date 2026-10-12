@@ -230,7 +230,7 @@ fi
 note "claims the chain did NOT have" "$(v ha_miner_claim_inclusion_outcome_total '{outcome!="on_chain_found"}')" 0
 note "proofs the chain did NOT have" "$(v ha_miner_proof_inclusion_outcome_total '{outcome!="on_chain_found"}')" 0
 echo "  (decoys, NOT loss: relays_lost=$(v ha_miner_relays_lost_total)"
-echo "   sessions_failed=$(v ha_miner_sessions_failed_total) upokt_lost_uPOKT=$(vu ha_miner_upokt_lost_total) — see METRICS_TRIAGE.md section 1)"
+echo "   sessions_failed=$(v ha_miner_sessions_failed_total) upokt_lost_uPOKT=$(vu ha_miner_chain_upokt_lost_total) — see METRICS_TRIAGE.md section 1)"
 
 # The ledger identity. A session leaves the book through exactly one door, so the
 # doors must sum. Measured 2026-09-17 BEFORE this was enforced: claimed 6742.81,
@@ -246,15 +246,15 @@ echo
 # claimed and has not reached any door yet. Measured 2026-09-18 during a gate run:
 # 304 claims on chain, claimed 384000 uPOKT, every door still 0.
 echo "1b. Does the money ledger close?  (a run-END reading: see the note in the source)"
-cl=$(vu ha_miner_upokt_claimed_total); pr=$(vu ha_miner_upokt_proved_total)
-lo=$(vu ha_miner_upokt_lost_total)
+cl=$(vu ha_miner_chain_upokt_claimed_total); pr=$(vu ha_miner_chain_upokt_proved_total)
+lo=$(vu ha_miner_chain_upokt_lost_total)
 # Unresolved is a PAIR of counters, not a gauge, and the reason is the restart: a
 # gauge resets with the process, so a session left unresolved by one replica and
 # resolved by another reads wrong from either side. Two counters summed across
 # instances give the right outstanding count across a restart, which is the exact
 # scenario this system is built for.
-uo=$(vu ha_miner_upokt_unresolved_opened_total)
-ur=$(vu ha_miner_upokt_unresolved_resolved_total)
+uo=$(vu ha_miner_chain_upokt_unresolved_opened_total)
+ur=$(vu ha_miner_chain_upokt_unresolved_resolved_total)
 [ "$uo" = BAD-NAME ] && uo=0
 [ "$ur" = BAD-NAME ] && ur=0
 un=$((uo-ur))

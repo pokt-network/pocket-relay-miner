@@ -462,7 +462,7 @@ var (
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "upokt_claimed_total",
+			Name:      "chain_upokt_claimed_total",
 			Help:      "Total uPOKT successfully claimed, priced as the chain settles it (shared params and relay-mining difficulty at the session start height)",
 		},
 		[]string{"supplier", "service_id"},
@@ -473,7 +473,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "unpriced_compute_units_total",
-			Help:      "Compute units of sessions that could not be priced in uPOKT (the chain's params or difficulty at the session start height were not readable), by the upokt_*_total book they are missing from (claimed, proved, lost, forgone, unresolved_opened, unresolved_resolved, reinstated). Above 0, that book's uPOKT is short by this work and its identity does not close.",
+			Help:      "Compute units of sessions that could not be priced in uPOKT (the chain's params or difficulty at the session start height were not readable), by the chain_upokt_*_total book they are missing from (claimed, proved, lost, forgone, unresolved_opened, unresolved_resolved, reinstated). Above 0, that book's uPOKT is short by this work and its identity does not close.",
 		},
 		[]string{"supplier", "service_id", "book"},
 	)
@@ -482,7 +482,7 @@ var (
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "upokt_proved_total",
+			Name:      "chain_upokt_proved_total",
 			Help:      "Total uPOKT successfully proved (revenue that will be settled)",
 		},
 		[]string{"supplier", "service_id"},
@@ -492,8 +492,8 @@ var (
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "upokt_lost_total",
-			Help:      "uPOKT that entered the claim book and will not be paid, priced as the chain settles it, by reason (see sessions_failed_total for the session-level reasons). A RETRIED claim_tx_error or proof_tx_error no longer reaches this series: the loss is counted once, either when the window closes with nothing submitted, or when the inclusion reconciler gets the chain's answer -- which arrives here as on_chain_missing or on_chain_rejected. Work whose claim never reached the chain is in upokt_forgone_total instead, so upokt_claimed_total = upokt_proved_total + this + (upokt_unresolved_opened_total - upokt_unresolved_resolved_total)",
+			Name:      "chain_upokt_lost_total",
+			Help:      "uPOKT that entered the claim book and will not be paid, priced as the chain settles it, by reason (see sessions_failed_total for the session-level reasons). A RETRIED claim_tx_error or proof_tx_error no longer reaches this series: the loss is counted once, either when the window closes with nothing submitted, or when the inclusion reconciler gets the chain's answer -- which arrives here as on_chain_missing or on_chain_rejected. Work whose claim never reached the chain is in chain_upokt_forgone_total instead, so chain_upokt_claimed_total = chain_upokt_proved_total + this + (chain_upokt_unresolved_opened_total - chain_upokt_unresolved_resolved_total)",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -565,8 +565,8 @@ var (
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "upokt_reinstated_total",
-			Help:      "uPOKT taken back from upokt_lost_total or upokt_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed). Subtract from the series from names: upokt_claimed_total = upokt_proved_total + (upokt_lost_total - this{from=lost}) + (upokt_unresolved_opened_total - upokt_unresolved_resolved_total)",
+			Name:      "chain_upokt_reinstated_total",
+			Help:      "uPOKT taken back from chain_upokt_lost_total or chain_upokt_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed). Subtract from the series from names: chain_upokt_claimed_total = chain_upokt_proved_total + (chain_upokt_lost_total - this{from=lost}) + (chain_upokt_unresolved_opened_total - chain_upokt_unresolved_resolved_total)",
 		},
 		[]string{"supplier", "service_id", "reason", "from"},
 	)
@@ -603,8 +603,8 @@ var (
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "upokt_unresolved_opened_total",
-			Help:      "uPOKT that left through a retryable submission failure and is awaiting the chain's answer (opened). Subtract upokt_unresolved_resolved_total for the pending balance.",
+			Name:      "chain_upokt_unresolved_opened_total",
+			Help:      "uPOKT that left through a retryable submission failure and is awaiting the chain's answer (opened). Subtract chain_upokt_unresolved_resolved_total for the pending balance.",
 		},
 		[]string{"supplier", "service_id", "phase"},
 	)
@@ -613,7 +613,7 @@ var (
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "upokt_unresolved_resolved_total",
+			Name:      "chain_upokt_unresolved_resolved_total",
 			Help:      "uPOKT previously counted unresolved that the inclusion reconciler has since settled into proved or lost.",
 		},
 		[]string{"supplier", "service_id", "phase"},
@@ -675,7 +675,7 @@ var (
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "upokt_forgone_total",
+			Name:      "chain_upokt_forgone_total",
 			Help:      "uPOKT for work that never entered the claim book (no claim ever reached the chain), by reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, on_chain_missing, on_chain_rejected). OUTSIDE the claimed/proved/lost/unresolved identity by construction: claimed only rises on a claim the chain accepted, so this can never be subtracted from it.",
 		},
 		[]string{"supplier", "service_id", "reason"},
@@ -686,7 +686,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "compute_units_forgone_total",
-			Help:      "Compute units for work that never entered the claim book, by reason (see upokt_forgone_total). OUTSIDE the ledger identity by construction.",
+			Help:      "Compute units for work that never entered the claim book, by reason (see chain_upokt_forgone_total). OUTSIDE the ledger identity by construction.",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -696,7 +696,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_forgone_total",
-			Help:      "Relays served whose work never entered the claim book, by reason (see upokt_forgone_total). OUTSIDE the ledger identity by construction.",
+			Help:      "Relays served whose work never entered the claim book, by reason (see chain_upokt_forgone_total). OUTSIDE the ledger identity by construction.",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -1763,7 +1763,7 @@ func RecordSessionProbabilisticProved(supplier, serviceID string) {
 //
 //	attempt    -> nowhere. The outcome is genuinely unknown and something exists
 //	              that will answer it. Putting uPOKT on an attempt is what made
-//	              upokt_lost_total read 45% of revenue on a run that lost nothing.
+//	              chain_upokt_lost_total read 45% of revenue on a run that lost nothing.
 //	lost       -> the money WAS in the book (the chain accepted its claim) and
 //	              will not be paid.
 //	unresolved -> the money is in the book and the chain has not answered yet.
@@ -1925,7 +1925,7 @@ func ReinstatedBook(r Reactivation) string {
 }
 
 // CreditsClaimed reports whether the flip into claimed that r describes is the
-// one that puts the session's money in upokt_claimed_total. The flip is the
+// one that puts the session's money in chain_upokt_claimed_total. The flip is the
 // single writer of that book: it lets one caller through, so the credit is
 // counted once whichever path observed the claim -- the submission, the window
 // close asking the chain, or the inclusion reconciler. It credits a session
@@ -1995,7 +1995,7 @@ func RecordClaimTxError(supplier, serviceID string, resolvable bool, relays, com
 // proofTxHash is the discriminator, read off the snapshot. Empty means no proof
 // transaction ever went out: the session IS in the book (its claim was accepted)
 // and will never be paid, which is a real loss. Non-empty means the proof was
-// submitted, and a submitted proof was ALREADY counted into upokt_proved_total
+// submitted, and a submitted proof was ALREADY counted into chain_upokt_proved_total
 // at submission -- so counting anything here would be the session leaving the
 // book through a second door. Whether that proof actually landed is a question
 // about the SUCCESS side, and proof_inclusion_outcome_total is the series that

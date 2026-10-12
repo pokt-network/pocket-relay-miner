@@ -10,8 +10,8 @@ Two rules before any series:
 2. **A counter named after a loss is not evidence of a loss.** Several of ours
    count a failed *attempt*. They are listed as decoys, with what to read instead.
    Measured 2026-09-17: a run that settled 500 of 500 claims with zero expired and
-   zero slash reported `upokt_lost_total` = 3034.77 against
-   `upokt_claimed_total` = 6742.81 — 45% of the value "lost", none of it real.
+   zero slash reported `chain_upokt_lost_total` = 3034.77 against
+   `chain_upokt_claimed_total` = 6742.81 — 45% of the value "lost", none of it real.
 
 All counters are per process and reset on restart, and a restart is normal (HA
 failover, rollout, OOM). So a run total is, per series, its last value minus its
@@ -137,7 +137,7 @@ curl -s "localhost:26657/block_results?height=$H" | jq '
   hold at proof time, or whose claim window was marked closed. If the chain is
   later seen to hold the claim after all, the session comes back to `claimed`
   and is taken back in `sessions_reinstated_total{reason}`, its money in
-  `upokt_reinstated_total{reason,from}` (`from` the book it had been counted
+  `chain_upokt_reinstated_total{reason,from}` (`from` the book it had been counted
   in): the net is the failed count minus the reinstated one. Counters never go
   down, so every reader subtracts.
 - **`sessions_failed_total{reason="proof_window_closed"}`**: includes sessions
@@ -165,7 +165,7 @@ Two things about HOW to read it, both measured on 2026-09-18:
   hunts.
 - **The series are uPOKT, as the chain pays them.** Each session is priced with
   the chain's own formula (`Claim.GetClaimeduPOKT`) under the shared params and
-  relay-mining difficulty at its start height, so `upokt_claimed_total` matches
+  relay-mining difficulty at its start height, so `chain_upokt_claimed_total` matches
   what settles: on the localnet, 100 uPOKT per compute unit. Every term adds whole
   uPOKT, so the identity closes exactly or names a session counted twice.
 - **A process that dies loses what it counted since its last scrape.** Counters
@@ -181,7 +181,7 @@ Two things about HOW to read it, both measured on 2026-09-18:
 
 | Identity | Series |
 |---|---|
-| Nothing vanished and nothing was counted twice | `upokt_claimed_total` == `upokt_proved_total` + (`upokt_lost_total` − `upokt_reinstated_total{from="lost"}`) + (`upokt_unresolved_opened_total` − `upokt_unresolved_resolved_total`) |
+| Nothing vanished and nothing was counted twice | `chain_upokt_claimed_total` == `chain_upokt_proved_total` + (`chain_upokt_lost_total` − `chain_upokt_reinstated_total{from="lost"}`) + (`chain_upokt_unresolved_opened_total` − `chain_upokt_unresolved_resolved_total`) |
 
 `unresolved` is a session that left through a retryable submission failure and has
 not been answered yet. It is a real series rather than an absence on purpose: a
@@ -196,7 +196,7 @@ instances give the right outstanding count across a restart, which is the scenar
 this system exists to survive.
 
 **Work that never entered the book is counted separately**, in
-`upokt_forgone_total{reason}` (and its `relays_` and `compute_units_` siblings), and
+`chain_upokt_forgone_total{reason}` (and its `relays_` and `compute_units_` siblings), and
 it is deliberately OUTSIDE this identity: the ledger measures what entered the
 ledger. A claim window that closed before anything was submitted never reached
 `claimed`, so counting it as a loss would drive the residual negative. It is still

@@ -91,7 +91,7 @@ func (c *SessionCoordinator) price(ctx context.Context, snap *SessionSnapshot) U
 	return quote(ctx, pricer, snap)
 }
 
-// creditClaimed counts snap's money in upokt_claimed_total when the flip that
+// creditClaimed counts snap's money in chain_upokt_claimed_total when the flip that
 // put it in claimed is the one that credits it (CreditsClaimed), priced on the
 // root the claim carries.
 func (c *SessionCoordinator) creditClaimed(ctx context.Context, snap *SessionSnapshot, root []byte, r Reactivation) {

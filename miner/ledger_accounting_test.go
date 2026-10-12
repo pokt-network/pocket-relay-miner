@@ -81,7 +81,7 @@ func relaysForgone(supplier, service, reason string) float64 {
 // A retryable claim submission failure is an ATTEMPT. It counts the session and
 // NO money: the claim never reached the chain, so the money was never in the
 // book, and the reconciler will either put it there (on_chain_found) or write it
-// off (on_chain_missing). Putting uPOKT here is what made upokt_lost_total read
+// off (on_chain_missing). Putting uPOKT here is what made chain_upokt_lost_total read
 // 45% of revenue on a run that lost nothing.
 func TestClaimTxError_Resolvable_CountsTheSessionAndNoMoney(t *testing.T) {
 	const supplier, service = "pokt1ledger_claim_attempt", "svc-1"
@@ -115,7 +115,7 @@ func TestClaimTxError_NoResolver_IsForgoneNotAnAttempt(t *testing.T) {
 	require.Equal(t, before.forgone+4, after.forgone,
 		"no resolver exists, so this is final: count it where work that never entered the book is counted")
 	require.Equal(t, before.lost, after.lost,
-		"forgone and not lost: it was never in upokt_claimed_total, so subtracting it from claimed is wrong")
+		"forgone and not lost: it was never in chain_upokt_claimed_total, so subtracting it from claimed is wrong")
 	require.Equal(t, before.unresolvedOpen, after.unresolvedOpen,
 		"a balance nothing can close must never be opened: that is the signal this family exists to avoid faking")
 }
@@ -168,7 +168,7 @@ func TestProofTxError_NoResolver_IsLostNotUnresolved(t *testing.T) {
 
 // The claim tx hash is read off the snapshot, never inferred. Empty means no
 // claim transaction ever went out, so this session was never in
-// upokt_claimed_total: counting it lost is exactly what drove the residual
+// chain_upokt_claimed_total: counting it lost is exactly what drove the residual
 // negative. Non-empty means the claim was accepted, the money IS in the book,
 // and a window closing on it now means it will never be proved.
 func TestClaimWindowClosed_TheTxHashDecidesForgoneOrLost(t *testing.T) {
@@ -207,7 +207,7 @@ func TestClaimWindowClosed_TheTxHashDecidesForgoneOrLost(t *testing.T) {
 
 // The proof side reads ProofTxHash, and its non-empty case is NOT a loss for a
 // reason that is easy to get backwards: a submitted proof was already counted
-// into upokt_proved_total at submission, so counting anything here would be the
+// into chain_upokt_proved_total at submission, so counting anything here would be the
 // session leaving the book through a second door. Measured 2026-09-17: 12
 // proof_window_closed sessions whose proof was already on chain.
 func TestProofWindowClosed_TheTxHashDecidesLostOrAttempt(t *testing.T) {
@@ -237,7 +237,7 @@ func TestProofWindowClosed_TheTxHashDecidesLostOrAttempt(t *testing.T) {
 		require.Equal(t, before.sessions+1, after.sessions,
 			"the operator still sees the window closed")
 		require.Equal(t, before.lost, after.lost,
-			"this proof was submitted, so upokt_proved_total already counted it; "+
+			"this proof was submitted, so chain_upokt_proved_total already counted it; "+
 				"counting it lost too is the double count that read 108.4%")
 		require.Equal(t, before.unresolvedOpen, after.unresolvedOpen,
 			"and it must not open a balance either, for the same reason: proved already took it")
@@ -330,7 +330,7 @@ func TestMarkAndCountProofWindowClosed_ASubmittedProofIsNotCountedLost(t *testin
 	}
 	require.NoError(t, f.coordinator.OnSessionCreated(f.ctx, sessionID, supplier, service, "pokt1app", 1, 10))
 
-	// The proof WAS submitted: upokt_proved_total already counted this session at
+	// The proof WAS submitted: chain_upokt_proved_total already counted this session at
 	// submission, so the window closing on it must not name a second exit.
 	snapshot := &SessionSnapshot{
 		SessionID:               sessionID,

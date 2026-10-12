@@ -1639,7 +1639,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// through markAndCount*WindowClosed. lastErr stays set (the submission DID
 		// fail, and the tracker and the returned error both need it), so without
 		// this the block after the loop counts the SAME sessions a second time --
-		// relays_lost_total, compute_units_lost_total and upokt_lost_total doubled
+		// relays_lost_total, compute_units_lost_total and chain_upokt_lost_total doubled
 		// for one session -- and overwrites the accurate window-closed state in
 		// Redis with the vaguer tx_error one.
 		windowClosed := false
@@ -2754,7 +2754,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// through markAndCount*WindowClosed. lastErr stays set (the submission DID
 		// fail, and the tracker and the returned error both need it), so without
 		// this the block after the loop counts the SAME sessions a second time --
-		// relays_lost_total, compute_units_lost_total and upokt_lost_total doubled
+		// relays_lost_total, compute_units_lost_total and chain_upokt_lost_total doubled
 		// for one session -- and overwrites the accurate window-closed state in
 		// Redis with the vaguer tx_error one.
 		windowClosed := false
@@ -3393,7 +3393,7 @@ func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *
 	// which decides the timeout purely on height and recorded nothing -- so a
 	// session that simply ran out of window had its tree deleted and its lock
 	// released while sessions_failed_total, relays_lost_total,
-	// compute_units_lost_total and upokt_lost_total all stayed silent. The
+	// compute_units_lost_total and chain_upokt_lost_total all stayed silent. The
 	// pre-submission aborts take a different route and cannot double count,
 	// for two independent reasons: marking the session terminal through the
 	// coordinator fires the terminal callback, which calls

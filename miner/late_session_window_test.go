@@ -233,7 +233,7 @@ func TestMarkAndCountClaimWindowClosed_RecordsWhenTheMarkTakes(t *testing.T) {
 // cleanup pass through, so the verdict is recorded there.
 //
 // With no claim tx hash on the snapshot the verdict is FORGONE: no claim ever
-// reached the chain, so this work was never in upokt_claimed_total and counting
+// reached the chain, so this work was never in chain_upokt_claimed_total and counting
 // it lost would break the ledger identity by exactly its weight.
 func TestOnClaimWindowClosed_RecordsTheLoss(t *testing.T) {
 	const supplier = "pokt1window_metric_claim"
