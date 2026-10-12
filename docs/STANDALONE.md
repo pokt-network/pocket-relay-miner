@@ -136,9 +136,10 @@ there is no election, the bus is in-process, and nothing here writes.
 - On SIGINT or SIGTERM the relayer stops first and the miner after it. Each
   has the same 30 s drain window as its subcommand (the relayer's proxy drain,
   the miner's supplier worker close); the closes that follow those windows are
-  not bounded by them. Give the process a stop timeout of at least 60 s
-  (`TimeoutStopSec`, or the container's grace period), more if you measure
-  longer. A signal while a side is still starting cancels that startup.
+  not bounded by them. Give the process a stop timeout above 60 s, so the
+  closes have time after both windows (`TimeoutStopSec`, or the container's
+  grace period: the compose example gives 75 s, the host unit 120 s), more if
+  you measure longer. A signal while a side is still starting cancels that startup.
 - The relayer's health server (`relayer.health_check`) works as it does in the
   `relayer` subcommand. The observability server's `/ready` answers once the
   miner side is up.

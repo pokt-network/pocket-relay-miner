@@ -128,6 +128,9 @@ spec:
         # pods by itself, and the process reads its config only at startup.
         pocket-relay-miner/config-hash: "{config_hash}"
     spec:
+      # The relayer side drains, then the miner side, up to 30 s each, then the
+      # store closes: the default 30 s would kill the miner side mid-drain.
+      terminationGracePeriodSeconds: 75
 {keyring_init}
       containers:
       - name: standalone

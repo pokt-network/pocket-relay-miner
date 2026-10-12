@@ -62,8 +62,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
-    # Give the relayer's and the miner's drains their time on stop.
-    stop_grace_period: 60s
+    # The relayer side drains, then the miner side, up to 30 s each, then the
+    # store closes: 60 s left no time for the close.
+    stop_grace_period: 75s
     # Exits if it cannot read the chain at startup.
     restart: unless-stopped
 
