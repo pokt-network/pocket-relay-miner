@@ -47,8 +47,9 @@ response; the **miner** builds the claim and the proof from the served relays
 and submits them to the chain. It runs in 1 of 2 modes:
 
 - **High-availability mode**: 2 processes from 1 binary (`relayer`, `miner`),
-  sharing 1 Redis; relayers and miners can have replicas. Released (v0.1.3),
-  and its Docker Compose runbook was verified on beta.
+  sharing 1 Redis; relayers and miners can have replicas. Released (v0.1.3);
+  its Docker Compose runbook was verified on beta with an image built before
+  v0.1.0.
 - **Standalone mode**: 1 process (`standalone`) that runs both, its state in an
   embedded store on local disk, no Redis, no replicas. Released (v0.1.3).
   On a local chain (Tilt, level 3) it served, claimed, proved and settled
@@ -63,6 +64,8 @@ said, ask these 2 questions, in 1 message, and recommend from the answers:
    host, replicas, failover)? Yes: high-availability mode.
 2. Will it run on 1 host, and would they rather not operate Redis? Yes to both:
    standalone mode.
+
+If neither answer decides it, recommend high-availability mode.
 
 Say why in 1 line ("1 host, no Redis: standalone mode"), name the runbook, and
 let them confirm. If they do not answer, start with high-availability mode (the
@@ -84,7 +87,7 @@ the modes later is a fresh start: their state lives in different stores.
   [docs/deploy/README.md](docs/deploy/README.md#words-you-will-meet).
 - **The human has nothing yet** (no key, no POKT, no stake): the usual case,
   and not a blocker. In this order:
-  1. Start now: the Docker Compose runbook of the mode they chose (the 3
+  1. Start now: the Docker Compose runbook of the mode they chose (the 2
      questions above; high availability when they do not answer) on beta
      with the public example key, steps 0 to 8, with the dashboards if they
      want graphs. It starts as shipped, with the example's `my-service`:

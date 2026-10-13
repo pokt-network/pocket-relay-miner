@@ -24,7 +24,8 @@ the same two halves:
 **What is verified.** Standalone mode is newer than the high-availability
 runbook's recorded beta run, and its own beta run has not been recorded. Each
 **Expect** below says where it comes from: **checked** (run on 2026-10-07
-against this repository, without a chain), **as in high availability** (the
+against this repository without a chain, or with the v0.1.3-rc.1 image where
+it says so), **as in high availability** (the
 same code prints the same line; the high-availability runbook recorded it on
 beta), or **not verified**.
 
@@ -94,8 +95,8 @@ Also needed: about 6 GiB of free RAM (the container is limited to 6 GiB;
 $C pull; echo "EXIT=$?"
 ```
 
-**Expect**: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.3` pulled, then
-`EXIT=0`.
+**Expect** (not verified before v0.1.3 is published):
+`ghcr.io/pokt-network/pocket-relay-miner:v0.1.3` pulled, then `EXIT=0`.
 
 **If not**: `manifest unknown` → check the compose file names exactly that
 image. If this host cannot reach `ghcr.io`, build the image locally with the
@@ -108,7 +109,9 @@ docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.3 .
 
 If the tag is not in your checkout, fetch it first (`git fetch --tags`):
 otherwise the image is whatever commit you have checked out, under the v0.1.3
-name.
+name. The build pulls its base images from Docker Hub: `429 Too Many Requests`
+is Docker Hub's anonymous pull limit → wait, or `docker login`, and run it
+again.
 
 **Stop if**: someone asks you to use an image of another version.
 

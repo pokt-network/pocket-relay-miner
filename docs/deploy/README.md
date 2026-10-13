@@ -71,7 +71,7 @@ between them is a fresh start: their state is in different stores.
 | Path | Mode | Use it when | Runbook | Verified |
 |---|---|---|---|---|
 | Docker Compose | high availability | you want the fastest start, on beta through public endpoints | [DOCKER_COMPOSE.md](DOCKER_COMPOSE.md) | on beta with an unstaked key: configs validated, Redis, node connection, blocks reaching both processes, relayer ready. Not verified: relays, claims and proofs on beta or mainnet |
-| Docker Compose | standalone | the fastest start without Redis | [DOCKER_COMPOSE_STANDALONE.md](DOCKER_COMPOSE_STANDALONE.md) | config validated; the process starts with no Redis and stops only where it needs the node. Not verified: the image build, and the run on beta |
+| Docker Compose | standalone | the fastest start without Redis | [DOCKER_COMPOSE_STANDALONE.md](DOCKER_COMPOSE_STANDALONE.md) | config validated; the process starts with no Redis and stops only where it needs the node. Not verified: the pull of the released image, and the run on beta |
 | Host (binary + systemd) | high availability | you run services on VMs or bare metal without containers | [HOST.md](HOST.md) | configs and units checked; not verified end to end under systemd |
 | Host (binary + systemd) | standalone | 1 VM or bare-metal host, no containers, no Redis | [HOST_STANDALONE.md](HOST_STANDALONE.md) | config and unit checked; not verified end to end under systemd |
 | Kubernetes | either | you already run Kubernetes | no example in v0.1.0 | not verified |
