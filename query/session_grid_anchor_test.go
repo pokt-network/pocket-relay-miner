@@ -144,7 +144,7 @@ func TestGetSession_BelowGridAnchorResolvesParamsAtHeight(t *testing.T) {
 // the live anchor the live grid IS the grid in effect, so the at-height params RPC
 // must NOT be consulted. This matters because GetSession is called with the CURRENT
 // block height on the relay hot path — querying at-height every block would add a
-// paramsAtHeightCache entry per block and thrash that memo for every other caller.
+// params-at-height cache entry per block and thrash that memo for every other caller.
 func TestGetSession_AtOrAboveGridAnchorUsesLiveParams(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()

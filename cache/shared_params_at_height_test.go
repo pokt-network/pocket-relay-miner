@@ -25,6 +25,9 @@ type recordingSharedQueryClient struct {
 	liveCalls      int
 	atHeightCalls  []int64
 	fallbackParams *sharedtypes.Params
+	// notFinal makes every at-height answer one the node gave from below the
+	// asked height.
+	notFinal bool
 }
 
 func (c *recordingSharedQueryClient) GetParams(_ context.Context) (*sharedtypes.Params, error) {
@@ -45,6 +48,15 @@ func (c *recordingSharedQueryClient) GetParamsAtHeight(_ context.Context, height
 		return c.fallbackParams, nil
 	}
 	return c.liveParams, nil
+}
+
+// GetParamsAtHeightWithFinality answers like GetParamsAtHeight; the answer is
+// final unless notFinal says otherwise.
+func (c *recordingSharedQueryClient) GetParamsAtHeightWithFinality(ctx context.Context, height int64) (*sharedtypes.Params, bool, error) {
+	p, err := c.GetParamsAtHeight(ctx, height)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return p, !c.notFinal, err
 }
 
 func (c *recordingSharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {
@@ -95,7 +107,7 @@ func newAtHeightTestCache(t *testing.T, sharedClient *recordingSharedQueryClient
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		kv.NewRedis(zerolog.Nop(), redisClient),
 		sharedClient,
-		nil, // blockClient: only GetLatestSharedParams needs it
+		nil, // blockClient: GetLatestSharedParams and reusing a not-final answer need it
 		CacheConfig{},
 	)
 	t.Cleanup(func() { _ = c.Close() })

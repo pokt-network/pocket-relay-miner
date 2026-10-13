@@ -116,7 +116,7 @@ func TestGetServiceComputeUnitsPerRelayAtHeight_Cache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(3), calls.Load())
 
-	require.Equal(t, int64(3), qc.serviceClient.cuprAtHeightCacheSize.Load())
+	require.Equal(t, int64(3), int64(qc.serviceClient.cuprAtHeight.final.Size()))
 }
 
 // TestGetServiceComputeUnitsPerRelayAtHeight_CacheKeyIsUnambiguous guards against
@@ -174,9 +174,9 @@ func TestGetServiceComputeUnitsPerRelayAtHeight_DegradedIsNotCached(t *testing.T
 	_, err := qc.Service().GetServiceComputeUnitsPerRelayAtHeight(context.Background(), "develop", 100)
 	require.ErrorIs(t, err, ErrCUPRAtHeightUnavailable)
 
-	_, cached := qc.serviceClient.cuprAtHeightCache.Load("develop@100")
+	_, cached := qc.serviceClient.cuprAtHeight.final.Load(heightKey{id: "develop", height: 100})
 	require.False(t, cached, "no value may be cached under the at-height key while degraded")
-	require.Zero(t, qc.serviceClient.cuprAtHeightCacheSize.Load())
+	require.Zero(t, int64(qc.serviceClient.cuprAtHeight.final.Size()))
 }
 
 // TestGetServiceComputeUnitsPerRelayAtHeight_CooldownSkipsQuery asserts that while
@@ -244,10 +244,9 @@ func TestGetServiceComputeUnitsPerRelayAtHeight_CooldownExpiresAndRecovers(t *te
 	require.Equal(t, int64(2), atHeightCalls.Load())
 
 	// The recovered value is now cached under the at-height key.
-	entry, cached := qc.serviceClient.cuprAtHeightCache.Load("develop@100")
+	entry, cached := qc.serviceClient.cuprAtHeight.final.Load(heightKey{id: "develop", height: 100})
 	require.True(t, cached)
-	require.Equal(t, uint64(55), entry.computeUnitsPerRelay)
-	require.Equal(t, int64(100), entry.blockHeight)
+	require.Equal(t, uint64(55), entry.value)
 }
 
 // TestGetServiceComputeUnitsPerRelayAtHeight_NonUnimplementedErrorPropagates
@@ -326,17 +325,17 @@ func TestGetServiceComputeUnitsPerRelayAtHeight_CacheEviction(t *testing.T) {
 		}
 	}
 
-	require.LessOrEqual(t, qc.serviceClient.cuprAtHeightCacheSize.Load(), int64(maxCUPRAtHeightCacheEntries),
+	require.LessOrEqual(t, int64(qc.serviceClient.cuprAtHeight.final.Size()), int64(maxCUPRAtHeightCacheEntries),
 		"cache size %d exceeds max %d after eviction",
-		qc.serviceClient.cuprAtHeightCacheSize.Load(), maxCUPRAtHeightCacheEntries)
+		int64(qc.serviceClient.cuprAtHeight.final.Size()), maxCUPRAtHeightCacheEntries)
 
 	for _, svc := range services {
-		recent := fmt.Sprintf("%s@%d", svc, heightsPerService)
-		_, ok := qc.serviceClient.cuprAtHeightCache.Load(recent)
+		recent := heightKey{id: svc, height: heightsPerService}
+		_, ok := qc.serviceClient.cuprAtHeight.final.Load(recent)
 		require.True(t, ok, "recent entry %s should still be cached", recent)
 
-		oldest := fmt.Sprintf("%s@%d", svc, 1)
-		_, ok = qc.serviceClient.cuprAtHeightCache.Load(oldest)
+		oldest := heightKey{id: svc, height: 1}
+		_, ok = qc.serviceClient.cuprAtHeight.final.Load(oldest)
 		require.False(t, ok, "old entry %s should have been evicted", oldest)
 	}
 }

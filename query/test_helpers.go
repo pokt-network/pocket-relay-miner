@@ -6,12 +6,15 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
+	"sync/atomic"
 	"testing"
 
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
@@ -60,7 +63,20 @@ type mockQueryServer struct {
 	getRelayMiningDifficultyAtHeightFunc func(context.Context, *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error)
 	getCUPRAtHeightFunc                  func(context.Context, *servicetypes.QueryComputeUnitsPerRelayAtHeightRequest) (*servicetypes.QueryComputeUnitsPerRelayAtHeightResponse, error)
 	serviceParams                        *servicetypes.Params
+
+	// answeredHeight is the height every mock RPC reports as the state it
+	// answered from, in the x-cosmos-block-height response header, as a full
+	// node does. setupMockQueryServer sets it far above any height a test asks
+	// for, so a test that ignores it sees every answer as final. A handler may
+	// change it: the header is set after the handler returns.
+	answeredHeight atomic.Int64
+	// omitHeightHeader drops that header, as a proxy that strips it would.
+	omitHeightHeader atomic.Bool
 }
+
+// mockDefaultAnsweredHeight is the answered height a test gets unless it sets
+// one: above every height the tests ask for.
+const mockDefaultAnsweredHeight = int64(1) << 40
 
 // Session query server implementation
 type mockSessionQueryServer struct {
@@ -246,9 +262,20 @@ func setupMockQueryServer(t *testing.T) (server *grpc.Server, address string, cl
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	// Create gRPC server
-	server = grpc.NewServer()
+	// Create gRPC server. Every answer carries the height it was answered from,
+	// as baseapp's gRPC interceptor stamps it on a real node.
 	mock = &mockQueryServer{}
+	mock.answeredHeight.Store(mockDefaultAnsweredHeight)
+	server = grpc.NewServer(grpc.UnaryInterceptor(func(
+		ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler,
+	) (any, error) {
+		resp, err := handler(ctx, req)
+		if !mock.omitHeightHeader.Load() {
+			_ = grpc.SetHeader(ctx, metadata.Pairs(
+				"x-cosmos-block-height", strconv.FormatInt(mock.answeredHeight.Load(), 10)))
+		}
+		return resp, err
+	}))
 
 	// Register all services with their respective mock servers
 	sessiontypes.RegisterQueryServer(server, &mockSessionQueryServer{mock: mock})
@@ -409,6 +436,22 @@ func generateTestRelayMiningDifficulty(serviceID string) *servicetypes.RelayMini
 		NumRelaysEma: 1000,
 		TargetHash:   make([]byte, 32),
 	}
+}
+
+// setFlightJoinHook sets the hook called once a caller has joined the RPC for a
+// key, so a test knows every caller shares the RPC before it answers.
+func (c *heightCache[V]) setFlightJoinHook(fn func()) { c.onFlightJoin = fn }
+
+// setFlightJoinHook sets the join hook of both of the service client's height
+// caches.
+func (c *serviceQueryClient) setFlightJoinHook(fn func()) {
+	c.difficultyAtHeight.setFlightJoinHook(fn)
+	c.cuprAtHeight.setFlightJoinHook(fn)
+}
+
+// setFlightJoinHook sets the join hook of the shared params-at-height cache.
+func (c *sharedQueryClient) setFlightJoinHook(fn func()) {
+	c.paramsAtHeight.setFlightJoinHook(fn)
 }
 
 // AnsweredAt is err as GetClaim returns it when the node answered from height:

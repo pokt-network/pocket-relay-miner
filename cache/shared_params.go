@@ -13,6 +13,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -31,18 +32,31 @@ var sharedParamsLocalTTL = 30 * time.Minute
 // This caps L1 at ~this many entries instead of growing ~1/block forever.
 const sharedParamsLocalKeepHeights = 64
 
+// maxPendingLocalReuse bounds how long an L1 answer that is not final is reused
+// when no new block arrives: a stalled block feed must not make it permanent.
+// The query layer may have served that answer from its own cache under the same
+// bound before it reached L1, so with the feed stalled one answer can be reused
+// for up to twice this.
+const maxPendingLocalReuse = 30 * time.Second
+
 // sharedParamLocalEntry is an L1-cached shared params value plus its height (for
-// window-bounded pruning) and fetch time (for the TTL floor).
+// window-bounded pruning) and fetch time (for the TTL floor). An entry that is not
+// final is served only until this process sees a block past seenAt, the height
+// when it was asked for.
 type sharedParamLocalEntry struct {
 	params   *sharedtypes.Params
 	height   int64
 	cachedAt time.Time
+	final    bool
+	seenAt   int64
 }
 
 // storeLocal caches params in L1 and prunes entries whose height is far below the
 // newest, keeping the map bounded to ~sharedParamsLocalKeepHeights entries.
-func (c *RedisSharedParamCache) storeLocal(key string, height int64, params *sharedtypes.Params) {
-	c.localCache.Store(key, sharedParamLocalEntry{params: params, height: height, cachedAt: time.Now()})
+func (c *RedisSharedParamCache) storeLocal(key string, height int64, params *sharedtypes.Params, final bool, seenAt int64) {
+	c.localCache.Store(key, sharedParamLocalEntry{
+		params: params, height: height, cachedAt: time.Now(), final: final, seenAt: seenAt,
+	})
 
 	cutoff := height - sharedParamsLocalKeepHeights
 	if cutoff <= 0 {
@@ -58,9 +72,12 @@ func (c *RedisSharedParamCache) storeLocal(key string, height int64, params *sha
 
 // RedisSharedParamCache implements SharedParamCache using Redis as L2 cache.
 type RedisSharedParamCache struct {
-	logger       logging.Logger
-	store        kv.Store
-	sharedClient client.SharedQueryClient
+	logger logging.Logger
+	store  kv.Store
+	// sharedClient says whether each at-height answer is final. Only a final
+	// answer may reach L2, which every replica shares: an answer from a node that
+	// has not committed the height yet can still change.
+	sharedClient query.SharedFinalityClient
 	blockClient  client.BlockClient
 	config       CacheConfig
 
@@ -80,7 +97,7 @@ type RedisSharedParamCache struct {
 func NewRedisSharedParamCache(
 	logger logging.Logger,
 	store kv.Store,
-	sharedClient client.SharedQueryClient,
+	sharedClient query.SharedFinalityClient,
 	blockClient client.BlockClient,
 	config CacheConfig,
 ) *RedisSharedParamCache {
@@ -140,9 +157,10 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 
 	key := c.store.KB().ParamsSharedAtHeightKey(height)
 
-	// L1: Check local cache (fresh within the TTL floor only).
+	// L1: a final entry within the TTL floor, or one that is not final while no
+	// newer block has been seen since it was stored.
 	if e, ok := c.localCache.Load(key); ok {
-		if time.Since(e.cachedAt) < sharedParamsLocalTTL {
+		if e.final && time.Since(e.cachedAt) < sharedParamsLocalTTL || !e.final && c.reusableUntilNextBlock(e) {
 			cacheHits.WithLabelValues("shared_params", CacheLevelL1).Inc()
 			cacheGetLatency.WithLabelValues("shared_params", CacheLevelL1).Observe(time.Since(start).Seconds())
 			return e.params, nil
@@ -159,8 +177,8 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 		} else {
 			cacheHits.WithLabelValues("shared_params", CacheLevelL2).Inc()
 			cacheGetLatency.WithLabelValues("shared_params", CacheLevelL2).Observe(time.Since(start).Seconds())
-			// Store in L1
-			c.storeLocal(key, height, params)
+			// Store in L1; L2 only ever holds final answers.
+			c.storeLocal(key, height, params, true, c.currentHeight())
 			return params, nil
 		}
 	}
@@ -206,7 +224,8 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 		chainQueries.WithLabelValues("shared_params").Inc()
 		chainStart := time.Now()
 
-		params, queryErr := c.sharedClient.GetParamsAtHeight(ctx, height)
+		seenAt := c.currentHeight()
+		params, final, queryErr := c.sharedClient.GetParamsAtHeightWithFinality(ctx, height)
 		chainQueryLatency.WithLabelValues("shared_params").Observe(time.Since(chainStart).Seconds())
 
 		if queryErr != nil {
@@ -214,17 +233,19 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 			return nil, fmt.Errorf("failed to query chain: %w", queryErr)
 		}
 
-		// Cache in Redis
-		data, marshalErr := json.Marshal(params)
-		if marshalErr == nil {
-			ttl := c.config.BlocksToTTL(c.config.TTLBlocks)
-			if cacheErr := c.store.Set(ctx, key, data, ttl); cacheErr != nil {
-				c.logger.Warn().Err(cacheErr).Msg("failed to cache params in Redis")
+		// Cache in Redis only a final answer: every replica reads it.
+		if final {
+			data, marshalErr := json.Marshal(params)
+			if marshalErr == nil {
+				ttl := c.config.BlocksToTTL(c.config.TTLBlocks)
+				if cacheErr := c.store.Set(ctx, key, data, ttl); cacheErr != nil {
+					c.logger.Warn().Err(cacheErr).Msg("failed to cache params in Redis")
+				}
 			}
 		}
 
 		// Cache in L1
-		c.storeLocal(key, height, params)
+		c.storeLocal(key, height, params, final, seenAt)
 
 		return params, nil
 	}
@@ -238,21 +259,45 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 		params := &sharedtypes.Params{}
 		if unmarshalErr := json.Unmarshal(retryData, params); unmarshalErr == nil {
 			cacheHits.WithLabelValues("shared_params", CacheLevelL2Retry).Inc()
-			c.storeLocal(key, height, params)
+			c.storeLocal(key, height, params, true, c.currentHeight())
 			return params, nil
 		}
 	}
 
-	// Still not available - query chain directly at the requested height.
-	// Deliberately not cached: the lock holder owns populating this key.
-	params, fallbackErr := c.sharedClient.GetParamsAtHeight(ctx, height)
+	// Still not available - query chain directly at the requested height. Not
+	// written to L2 (the lock holder owns that key), but kept in this process's
+	// L1: an answer that is not final never reaches L2, so without it every
+	// lookup here would take this path again until the height is final.
+	seenAt := c.currentHeight()
+	params, final, fallbackErr := c.sharedClient.GetParamsAtHeightWithFinality(ctx, height)
 	if fallbackErr != nil {
 		chainQueryErrors.WithLabelValues("shared_params").Inc()
 		return nil, fmt.Errorf("failed to query chain: %w", fallbackErr)
 	}
 	chainQueries.WithLabelValues("shared_params").Inc()
+	c.storeLocal(key, height, params, final, seenAt)
 
 	return params, nil
+}
+
+// currentHeight is this process's block height, 0 when it has no block client.
+func (c *RedisSharedParamCache) currentHeight() int64 {
+	if c.blockClient == nil {
+		return 0
+	}
+	block := c.blockClient.LastBlock(context.Background())
+	if block == nil {
+		return 0
+	}
+	return block.Height()
+}
+
+// reusableUntilNextBlock reports whether an entry that is not final may still be
+// served: no block past the one it was asked for at has been seen, for at most
+// maxPendingLocalReuse.
+func (c *RedisSharedParamCache) reusableUntilNextBlock(e sharedParamLocalEntry) bool {
+	h := c.currentHeight()
+	return h > 0 && h <= e.seenAt && time.Since(e.cachedAt) < maxPendingLocalReuse
 }
 
 // GetLatestSharedParams returns the shared module parameters for the latest block.
@@ -291,7 +336,7 @@ func (c *RedisSharedParamCache) WarmupFromRedis(ctx context.Context) error {
 		return err
 	}
 
-	c.storeLocal(key, height, params)
+	c.storeLocal(key, height, params, true, height)
 	c.logger.Info().Int64("height", height).Msg("shared params cache warmup complete")
 
 	return nil

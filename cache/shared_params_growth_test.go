@@ -26,7 +26,7 @@ func TestSharedParamsLocal_BoundedGrowth(t *testing.T) {
 
 	const total = 500
 	for h := int64(1); h <= total; h++ {
-		c.storeLocal(keyFor(h), h, &sharedtypes.Params{NumBlocksPerSession: uint64(h)})
+		c.storeLocal(keyFor(h), h, &sharedtypes.Params{NumBlocksPerSession: uint64(h)}, true, h)
 	}
 
 	n := 0
@@ -52,7 +52,7 @@ func TestSharedParamsLocal_TTLFloor(t *testing.T) {
 	key := keyFor(100)
 
 	// A fresh entry is a hit.
-	c.storeLocal(key, 100, &sharedtypes.Params{NumBlocksPerSession: 4})
+	c.storeLocal(key, 100, &sharedtypes.Params{NumBlocksPerSession: 4}, true, 100)
 	e, ok := c.localCache.Load(key)
 	require.True(t, ok)
 	require.Less(t, time.Since(e.cachedAt), sharedParamsLocalTTL, "a just-stored entry is within the floor")

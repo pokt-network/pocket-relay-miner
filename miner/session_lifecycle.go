@@ -802,10 +802,9 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		}
 		// An ACTIVE session's end height is in the FUTURE. An at-height read there
 		// resolves against the live grid anyway (poktroll GetParamsAtHeight walks
-		// back to the newest entry <= the height), so it returns today's value —
-		// but caches it under a future-height key, where the query layer treats it
-		// as immutable and masks a later governance change until the TTL lapses.
-		// Read live while the session is still running; switch to the immutable
+		// back to the newest entry <= the height), so it returns today's value, and
+		// the query layer keeps asking the node every block until that height is
+		// final. Read live while the session is still running; switch to the
 		// at-height read once its end height is in the past.
 		var (
 			p   *sharedtypes.Params

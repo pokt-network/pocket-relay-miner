@@ -3999,13 +3999,10 @@ func (m *SupplierManager) claimWindowClosedAt(ctx context.Context, sessionEndHei
 
 	// Answer BEFORE any params query, and not for speed: this runs for every
 	// relay whose session is not already known-terminal, so on a live fleet it
-	// runs constantly with an end height in the FUTURE. GetParamsAtHeight has no
-	// future-height guard (query/query.go:492) -- it would query, get today's
-	// live params back, and cache them under a future height that the query
-	// layer treats as immutable for thirty minutes. The lifecycle sweep reads
-	// that same cache to compute a session's windows, so a governance change
-	// landing mid-session would be masked there. A session that has not ended
-	// cannot have a closed claim window, so the answer is already known.
+	// runs constantly with an end height in the FUTURE. GetParamsAtHeight at a
+	// future height is not final until the chain reaches it, so the query layer
+	// asks the node again every block. A session that has not ended cannot have
+	// a closed claim window, so the answer is already known.
 	if sessionEndHeight >= currentHeight {
 		return false
 	}

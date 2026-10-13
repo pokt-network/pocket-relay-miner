@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,7 +16,10 @@ import (
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
@@ -271,51 +275,125 @@ func TestGetClaim_RefreshAfterTTL(t *testing.T) {
 	require.Equal(t, 2, queryCount)
 }
 
-// --- Height-keyed / immutable caches (safety floor: immutableCacheTTLFloor). ---
+// --- Height-keyed caches: past the floor a final entry is re-validated, never dropped. ---
 
-func TestGetServiceRelayDifficultyAtHeight_RefreshAfterFloor(t *testing.T) {
+// TestGetServiceRelayDifficultyAtHeight_RevalidatesAfterFloor: a final entry
+// older than the floor keeps being served while the chain is asked again, and
+// the answer replaces it. A different answer is counted: the chain rewrote a
+// value already final (an upgrade handler can).
+func TestGetServiceRelayDifficultyAtHeight_RevalidatesAfterFloor(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()
 
-	queryCount := 0
-	fill := byte(1)
+	var queries atomic.Int64
+	var fill atomic.Int32
+	fill.Store(1)
 	mock.getRelayMiningDifficultyAtHeightFunc = func(_ context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
-		queryCount++
+		queries.Add(1)
 		d := generateTestRelayMiningDifficulty(req.ServiceId)
-		d.TargetHash = bytes.Repeat([]byte{fill}, 32)
+		d.TargetHash = bytes.Repeat([]byte{byte(fill.Load())}, 32)
 		return &servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse{RelayMiningDifficulty: *d}, nil
 	}
 
-	prev := immutableCacheTTLFloor
-	immutableCacheTTLFloor = time.Hour
-	t.Cleanup(func() { immutableCacheTTLFloor = prev })
-
 	qc := newTTLTestClients(t, address)
+	cache := qc.serviceClient.difficultyAtHeight
+	cache.floor = time.Hour
 	ctx := context.Background()
+	changedBefore := testutil.ToFloat64(queryCacheFinalAnswerChanged.WithLabelValues("service", "difficulty"))
 
-	d1, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
+	d, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
 	require.NoError(t, err)
-	require.Equal(t, bytes.Repeat([]byte{1}, 32), d1.TargetHash)
-	require.Equal(t, 1, queryCount)
+	require.Equal(t, bytes.Repeat([]byte{1}, 32), d.TargetHash)
 
-	// Within the floor a height-keyed entry is served from cache (no re-query).
-	fill = 2
-	d2, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
+	// Within the floor the entry is served without asking the chain.
+	fill.Store(2)
+	d, err = qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
 	require.NoError(t, err)
-	require.Equal(t, bytes.Repeat([]byte{1}, 32), d2.TargetHash, "within floor the cached entry is served")
-	require.Equal(t, 1, queryCount)
+	require.Equal(t, bytes.Repeat([]byte{1}, 32), d.TargetHash, "within the floor the cached entry is served")
+	require.Equal(t, int64(1), queries.Load())
 
-	// Past the floor the same height re-queries (self-heal), and Store overwrites
-	// the stale entry (regression: LoadOrStore would have kept the old value).
-	immutableCacheTTLFloor = 0
-	d3, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
+	// Past the floor the old value is still served while the chain is asked again.
+	cache.floor = 0
+	d, err = qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
 	require.NoError(t, err)
-	require.Equal(t, bytes.Repeat([]byte{2}, 32), d3.TargetHash,
-		"after the TTL floor a height-keyed entry must be re-queried and overwritten")
-	require.Equal(t, 2, queryCount)
+	require.Equal(t, bytes.Repeat([]byte{1}, 32), d.TargetHash, "the final value is served while it is re-validated")
+	require.Eventually(t, func() bool { return queries.Load() == 2 }, 5*time.Second, time.Millisecond,
+		"the entry past the floor must be asked again")
+	cache.floor = time.Hour
+
+	require.Eventually(t, func() bool {
+		d, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
+		return err == nil && bytes.Equal(d.TargetHash, bytes.Repeat([]byte{2}, 32))
+	}, 5*time.Second, time.Millisecond, "the re-validated answer must replace the entry")
+	require.Equal(t, changedBefore+1,
+		testutil.ToFloat64(queryCacheFinalAnswerChanged.WithLabelValues("service", "difficulty")),
+		"a different answer at a final height must be counted")
 }
 
-func TestGetParamsAtHeight_RefreshAfterFloor(t *testing.T) {
+// TestGetServiceRelayDifficultyAtHeight_FailedRevalidationKeepsServing: a
+// re-validation that fails, or that a node behind the height answers, must not
+// drop or replace the final entry, and is retried only after another floor.
+func TestGetServiceRelayDifficultyAtHeight_FailedRevalidationKeepsServing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		breakNode func(mock *mockQueryServer, fail *atomic.Bool)
+	}{
+		{"the node fails", func(_ *mockQueryServer, fail *atomic.Bool) { fail.Store(true) }},
+		{"the node answers from below the height", func(mock *mockQueryServer, _ *atomic.Bool) { mock.answeredHeight.Store(50) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, address, cleanup, mock := setupMockQueryServer(t)
+			defer cleanup()
+
+			var queries atomic.Int64
+			var fail atomic.Bool
+			mock.getRelayMiningDifficultyAtHeightFunc = func(_ context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
+				n := queries.Add(1)
+				if fail.Load() {
+					return nil, status.Error(codes.Unavailable, "node down")
+				}
+				d := generateTestRelayMiningDifficulty(req.ServiceId)
+				d.TargetHash = bytes.Repeat([]byte{byte(n)}, 32)
+				return &servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse{RelayMiningDifficulty: *d}, nil
+			}
+
+			qc := newTTLTestClients(t, address)
+			cache := qc.serviceClient.difficultyAtHeight
+			cache.floor = time.Hour
+			ctx := context.Background()
+			key := heightKey{id: "develop", height: 100}
+
+			_, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, key.id, key.height)
+			require.NoError(t, err)
+			want := bytes.Repeat([]byte{1}, 32)
+			first, ok := cache.final.Load(key)
+			require.True(t, ok)
+
+			tc.breakNode(mock, &fail)
+			cache.floor = 0
+			d, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, key.id, key.height)
+			require.NoError(t, err)
+			require.Equal(t, want, d.TargetHash, "the final value is served while it is re-validated")
+			cache.floor = time.Hour
+			restamped, ok := cache.final.Load(key)
+			require.True(t, ok)
+			require.True(t, restamped.fetchedAt.After(first.fetchedAt),
+				"the lookup that starts the re-validation restamps the entry, so the next try waits a floor")
+			require.Eventually(t, func() bool { return queries.Load() == 2 }, 5*time.Second, time.Millisecond)
+
+			// Neither a failure nor a lagging node changes the entry.
+			d, err = qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, key.id, key.height)
+			require.NoError(t, err)
+			require.Equal(t, want, d.TargetHash)
+			e, ok := cache.final.Load(key)
+			require.True(t, ok, "the final entry must stay")
+			require.Equal(t, want, e.value.TargetHash)
+		})
+	}
+}
+
+// TestGetParamsAtHeight_RevalidatesAfterFloor is the shared-params twin.
+func TestGetParamsAtHeight_RevalidatesAfterFloor(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()
 
@@ -323,30 +401,32 @@ func TestGetParamsAtHeight_RefreshAfterFloor(t *testing.T) {
 	old.NumBlocksPerSession = 4
 	mock.sharedParamsAtHeight = old
 
-	prev := immutableCacheTTLFloor
-	immutableCacheTTLFloor = time.Hour
-	t.Cleanup(func() { immutableCacheTTLFloor = prev })
-
 	qc := newTTLTestClients(t, address)
+	cache := qc.sharedClient.paramsAtHeight
+	cache.floor = time.Hour
 	ctx := context.Background()
 
-	p1, err := qc.Shared().GetParamsAtHeight(ctx, 100)
+	p, err := qc.Shared().GetParamsAtHeight(ctx, 100)
 	require.NoError(t, err)
-	require.Equal(t, uint64(4), p1.NumBlocksPerSession)
+	require.Equal(t, uint64(4), p.NumBlocksPerSession)
 
 	changed := generateTestSharedParams()
 	changed.NumBlocksPerSession = 8
 	mock.sharedParamsAtHeight = changed
 
-	p2, err := qc.Shared().GetParamsAtHeight(ctx, 100)
+	p, err = qc.Shared().GetParamsAtHeight(ctx, 100)
 	require.NoError(t, err)
-	require.Equal(t, uint64(4), p2.NumBlocksPerSession, "within floor the height-keyed params are served")
+	require.Equal(t, uint64(4), p.NumBlocksPerSession, "within the floor the height-keyed params are served")
 
-	immutableCacheTTLFloor = 0
-	p3, err := qc.Shared().GetParamsAtHeight(ctx, 100)
+	cache.floor = 0
+	p, err = qc.Shared().GetParamsAtHeight(ctx, 100)
 	require.NoError(t, err)
-	require.Equal(t, uint64(8), p3.NumBlocksPerSession,
-		"after the TTL floor params-at-height must be re-queried (self-heal)")
+	require.Equal(t, uint64(4), p.NumBlocksPerSession, "the final value is served while it is re-validated")
+	cache.floor = time.Hour
+	require.Eventually(t, func() bool {
+		p, err := qc.Shared().GetParamsAtHeight(ctx, 100)
+		return err == nil && p.NumBlocksPerSession == 8
+	}, 5*time.Second, time.Millisecond, "the re-validated params must replace the entry")
 }
 
 // TestSessionCache_BoundedEviction is the regression guard for unbounded session

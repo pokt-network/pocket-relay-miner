@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,8 +27,6 @@ import (
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/puzpuzpuz/xsync/v4"
-	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -84,6 +80,11 @@ type Clients struct {
 	// gRPC connection
 	grpcConn *grpc.ClientConn
 
+	// heights is this process's block height, set by the side that runs a block
+	// reader (SetBlockHeightSource). The height caches use it to decide when an
+	// answer that is not final yet is asked again.
+	heights blockHeightSource
+
 	// Individual query clients
 	sharedClient      *sharedQueryClient
 	sessionClient     *sessionQueryClient
@@ -133,12 +134,12 @@ func NewQueryClients(
 	}
 
 	// Initialize individual clients
-	qc.sharedClient = newSharedQueryClient(logger, grpcConn, config.QueryTimeout)
+	qc.sharedClient = newSharedQueryClient(logger, grpcConn, config.QueryTimeout, &qc.heights)
 	qc.sessionClient = newSessionQueryClient(logger, grpcConn, qc.sharedClient, config.QueryTimeout)
 	qc.applicationClient = newApplicationQueryClient(logger, grpcConn, config.QueryTimeout)
 	qc.supplierClient = newSupplierQueryClient(logger, grpcConn, config.QueryTimeout)
 	qc.proofClient = newProofQueryClient(logger, grpcConn, config.QueryTimeout)
-	qc.serviceClient = newServiceQueryClient(logger, grpcConn, config.QueryTimeout)
+	qc.serviceClient = newServiceQueryClient(logger, grpcConn, config.QueryTimeout, &qc.heights)
 	qc.accountClient = newAccountQueryClient(logger, grpcConn, config.QueryTimeout)
 	qc.bankClient = newBankQueryClient(logger, grpcConn, config.QueryTimeout)
 
@@ -149,8 +150,29 @@ func NewQueryClients(
 	return qc, nil
 }
 
+// SetBlockHeightSource gives the height caches this process's block height.
+// Without one (a CLI that runs no block reader), an answer that is not final is
+// asked again on every lookup, one RPC at a time per key.
+func (qc *Clients) SetBlockHeightSource(height func() int64) {
+	qc.heights.fn.Store(&height)
+}
+
 // Shared returns the shared module query client.
 func (qc *Clients) Shared() client.SharedQueryClient {
+	return qc.sharedClient
+}
+
+// SharedFinalityClient is poktroll's shared query client plus the at-height read
+// that says whether its answer is final, for a cache that keeps answers beyond
+// this process (an answer that is not final must not be shared).
+type SharedFinalityClient interface {
+	client.SharedQueryClient
+	GetParamsAtHeightWithFinality(ctx context.Context, queryHeight int64) (*sharedtypes.Params, bool, error)
+}
+
+// SharedWithFinality returns the shared module query client with
+// GetParamsAtHeightWithFinality.
+func (qc *Clients) SharedWithFinality() SharedFinalityClient {
 	return qc.sharedClient
 }
 
@@ -246,6 +268,16 @@ func (qc *Clients) Close() error {
 	}
 	qc.closed = true
 
+	// The height caches share their gauge series with the other clients of
+	// the process: a closed one takes its share back out.
+	if qc.sharedClient != nil {
+		qc.sharedClient.paramsAtHeight.unpublish()
+	}
+	if qc.serviceClient != nil {
+		qc.serviceClient.difficultyAtHeight.unpublish()
+		qc.serviceClient.cuprAtHeight.unpublish()
+	}
+
 	if qc.grpcConn != nil {
 		if err := qc.grpcConn.Close(); err != nil {
 			return fmt.Errorf("failed to close gRPC connection: %w", err)
@@ -270,39 +302,13 @@ type sharedQueryClient struct {
 	paramsCacheAt time.Time
 	paramsCacheMu sync.RWMutex
 
-	// paramsAtHeightCache memoizes ParamsAtHeight results keyed by query height.
-	// SAFE because params-at-a-height are immutable for every height our callers query:
-	// poktroll only writes params-history entries at session boundaries (effective_height
-	// = next session start) and never mid-session, and all callers pass a started session's
-	// start/end height (<= the current session end < the next boundary). So no later
-	// param change can alter the entry resolved for such a height — the same immutability
-	// the serviceQueryClient relies on for GetServiceRelayDifficultyAtHeight.
-	// Entries carry a fetch time so the immutableCacheTTLFloor expires them (mandate).
-	paramsAtHeightCache   map[int64]paramsAtHeightEntry
-	paramsAtHeightCacheMu sync.RWMutex
-
-	// paramsAtHeightFlight collapses concurrent misses for one height into one
-	// ParamsAtHeight RPC. Sessions of every supplier end on the same heights, so
-	// when they end every supplier asks for the same height at once, and each
-	// caller that missed the cache would otherwise send its own identical RPC.
-	paramsAtHeightFlight singleflight.Group
-
-	// onFlightJoin, when set, is called once a caller has joined the
-	// ParamsAtHeight flight for height. Tests use it to know every caller shares
-	// the in-flight RPC before letting it answer.
-	onFlightJoin func(height int64)
+	// paramsAtHeight holds the shared params effective at a height, as the
+	// chain's ParamsAtHeight answers them.
+	paramsAtHeight *heightCache[*sharedtypes.Params]
 }
 
-// paramsAtHeightEntry is an immutable params-at-height value plus its fetch time,
-// for the TTL safety floor.
-type paramsAtHeightEntry struct {
-	params   *sharedtypes.Params
-	cachedAt time.Time
-}
-
-// maxParamsAtHeightCacheEntries bounds the height-keyed params cache. Entries are
-// immutable, so eviction is purely to cap memory; the lowest (oldest) heights are
-// dropped first since settled sessions are not re-queried.
+// maxParamsAtHeightCacheEntries bounds the height-keyed params cache; the lowest
+// (oldest) heights are dropped first since settled sessions are not re-queried.
 const maxParamsAtHeightCacheEntries = 1024
 
 // liveParamsCacheTTL bounds how long live module params (shared/session/proof
@@ -329,8 +335,9 @@ var liveEntityCacheTTL = 90 * time.Second
 // for the process lifetime even when we think the value never changes: an
 // assumption that turns out wrong (upstream semantic change, reorg, our own bug)
 // must self-heal within one floor instead of needing a restart. Long enough not
-// to add meaningful L3 load for genuinely-immutable data. A var (not const) so
-// tests can shrink it without sleeping.
+// to add meaningful L3 load for genuinely-immutable data. The height caches
+// (heightCache) re-validate a final entry past this floor instead of dropping it.
+// A var (not const) so tests can shrink it without sleeping.
 var immutableCacheTTLFloor = 30 * time.Minute
 
 // cachedGet is the shared double-checked-lock body for the query-client L1 entity
@@ -450,13 +457,16 @@ func cachedParamsGet[V any](
 
 var _ client.SharedQueryClient = (*sharedQueryClient)(nil)
 
-func newSharedQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *sharedQueryClient {
-	return &sharedQueryClient{
-		logger:              logger.With().Str("query_client", "shared").Logger(),
-		queryClient:         sharedtypes.NewQueryClient(conn),
-		queryTimeout:        timeout,
-		paramsAtHeightCache: make(map[int64]paramsAtHeightEntry),
+func newSharedQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration, heights *blockHeightSource) *sharedQueryClient {
+	c := &sharedQueryClient{
+		logger:       logger.With().Str("query_client", "shared").Logger(),
+		queryClient:  sharedtypes.NewQueryClient(conn),
+		queryTimeout: timeout,
 	}
+	c.paramsAtHeight = newHeightCache(c.logger, "shared", "params_at_height", maxParamsAtHeightCacheEntries,
+		timeout, heights, c.fetchParamsAtHeight,
+		func(a, b *sharedtypes.Params) bool { return a.Equal(b) })
+	return c
 }
 
 func (c *sharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Params, error) {
@@ -503,94 +513,41 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 		return c.GetParams(ctx)
 	}
 
-	// Serve from the height-keyed cache when present and within the TTL floor
-	// (entries are immutable, see field doc; the floor only forces an occasional
-	// re-query to satisfy the cache-TTL mandate).
-	if params, ok := c.cachedParamsAtHeight(queryHeight); ok {
-		queryCacheHits.WithLabelValues("shared", "params_at_height").Inc()
-		return params, nil
-	}
-
-	queryCacheMisses.WithLabelValues("shared", "params_at_height").Inc()
-
 	// Always resolve through the chain's ParamsAtHeight RPC. We deliberately do NOT
-	// short-circuit on c.GetParams(): paramsCache is populated once and never
-	// invalidated in production, so after an on-chain MsgUpdateParam its cached
-	// SessionGridAnchorHeight belongs to the OLD epoch. A fast path keyed on that stale
-	// anchor (anchor <= queryHeight) would be satisfied for current-epoch heights and
-	// return stale params — silently defeating the height-aware semantics this method
-	// exists for. ParamsAtHeight is authoritative: the chain returns the live params for
-	// a current-epoch height (no history entry <= height) and the historical snapshot
-	// for an older-epoch height.
-	//
-	// Concurrent misses for one height share one RPC. It runs detached from the
-	// caller that started it, bounded by the query timeout, so one caller giving
-	// up does not fail the others waiting on the same height; each caller still
-	// stops waiting when its own context ends.
-	ch := c.paramsAtHeightFlight.DoChan(strconv.FormatInt(queryHeight, 10), func() (any, error) {
-		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.queryTimeout)
-		defer cancel()
-
-		res, err := c.queryClient.ParamsAtHeight(queryCtx, &sharedtypes.QueryParamsAtHeightRequest{Height: queryHeight})
-		if err != nil {
-			return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
-		}
-		params := &res.Params
-		c.storeParamsAtHeight(queryHeight, params)
-		return params, nil
-	})
-	if c.onFlightJoin != nil {
-		c.onFlightJoin(queryHeight)
+	// short-circuit on c.GetParams(): after an on-chain MsgUpdateParam the live
+	// params' SessionGridAnchorHeight can belong to another epoch, and a fast path
+	// keyed on it (anchor <= queryHeight) would return params of the wrong epoch.
+	// ParamsAtHeight is authoritative: the history entry effective at the height,
+	// or the live params when the chain recorded none.
+	params, err := c.paramsAtHeight.get(ctx, heightKey{height: queryHeight})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
 	}
-	select {
-	case r := <-ch:
-		if r.Err != nil {
-			return nil, r.Err
-		}
-		return r.Val.(*sharedtypes.Params), nil
-	case <-ctx.Done():
-		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, ctx.Err())
-	}
+	return params, nil
 }
 
-// cachedParamsAtHeight returns the cached params at height while they are
-// inside the TTL floor.
-func (c *sharedQueryClient) cachedParamsAtHeight(height int64) (*sharedtypes.Params, bool) {
-	c.paramsAtHeightCacheMu.RLock()
-	defer c.paramsAtHeightCacheMu.RUnlock()
-	e, ok := c.paramsAtHeightCache[height]
-	if !ok || time.Since(e.cachedAt) >= immutableCacheTTLFloor {
-		return nil, false
+// GetParamsAtHeightWithFinality is GetParamsAtHeight, also saying whether the
+// params are final: the node answered from queryHeight or above, so no block it
+// has not committed can still change them.
+func (c *sharedQueryClient) GetParamsAtHeightWithFinality(ctx context.Context, queryHeight int64) (*sharedtypes.Params, bool, error) {
+	if queryHeight <= 0 {
+		params, err := c.GetParams(ctx)
+		return params, false, err
 	}
-	return e.params, true
+	params, final, err := c.paramsAtHeight.getWithFinality(ctx, heightKey{height: queryHeight})
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
+	}
+	return params, final, nil
 }
 
-// storeParamsAtHeight caches an immutable params-at-height entry, evicting the lowest
-// heights first when the cache is full. A single write lock guards the whole store so
-// the size check and eviction cannot race.
-func (c *sharedQueryClient) storeParamsAtHeight(height int64, params *sharedtypes.Params) {
-	c.paramsAtHeightCacheMu.Lock()
-	defer c.paramsAtHeightCacheMu.Unlock()
-
-	if c.paramsAtHeightCache == nil {
-		c.paramsAtHeightCache = make(map[int64]paramsAtHeightEntry)
+func (c *sharedQueryClient) fetchParamsAtHeight(ctx context.Context, key heightKey) (*sharedtypes.Params, int64, error) {
+	var md metadata.MD
+	res, err := c.queryClient.ParamsAtHeight(ctx, &sharedtypes.QueryParamsAtHeightRequest{Height: key.height}, grpc.Header(&md))
+	if err != nil {
+		return nil, 0, err
 	}
-
-	if _, ok := c.paramsAtHeightCache[height]; !ok && len(c.paramsAtHeightCache) >= maxParamsAtHeightCacheEntries {
-		// Evict the lowest (oldest) heights down to half capacity. Settled sessions are
-		// not re-queried, so dropping the smallest heights is the cheapest useful policy.
-		heights := make([]int64, 0, len(c.paramsAtHeightCache))
-		for h := range c.paramsAtHeightCache {
-			heights = append(heights, h)
-		}
-		sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
-		for _, h := range heights[:len(heights)-maxParamsAtHeightCacheEntries/2] {
-			delete(c.paramsAtHeightCache, h)
-		}
-	}
-
-	c.paramsAtHeightCache[height] = paramsAtHeightEntry{params: params, cachedAt: time.Now()}
-	queryCacheSize.WithLabelValues("shared", "params_at_height").Set(float64(len(c.paramsAtHeightCache)))
+	return &res.Params, answeredHeight(md), nil
 }
 
 func (c *sharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {
@@ -747,7 +704,7 @@ func (c *sessionQueryClient) GetSession(
 	//
 	// The common path deliberately stays on live params: this method is called with
 	// the CURRENT block height on the relay hot path, so querying at-height
-	// unconditionally would add a paramsAtHeightCache entry per block and thrash that
+	// unconditionally would add a params-at-height cache entry per block and thrash that
 	// memo for every other at-height caller.
 	if blockHeight < int64(sharedParams.GetSessionGridAnchorHeight()) {
 		paramsAtHeight, paramsErr := c.sharedClient.GetParamsAtHeight(ctx, blockHeight)
@@ -1389,16 +1346,16 @@ func (c *proofQueryClient) paginateSupplierClaims(
 // Service Query Client
 // =============================================================================
 
-// maxHeightDifficultyCacheEntries is the maximum number of height-aware difficulty
-// entries (keyed by serviceID@height) before eviction is triggered. This is a simple
-// size cap — no assumptions about session length or block timing. The data is immutable
-// and cheap to re-query from chain if an evicted entry is needed again.
+// maxHeightDifficultyCacheEntries is the maximum number of final height-aware
+// difficulty entries (keyed by service and height) before eviction is triggered. This
+// is a simple size cap — no assumptions about session length or block timing. An
+// evicted entry is cheap to re-query from chain if it is needed again.
 // Sized generously: a provider with 28 services across many session heights fits easily.
 const maxHeightDifficultyCacheEntries = 1000
 
 // maxCUPRAtHeightCacheEntries bounds the height-keyed compute-units-per-relay cache.
 // Same reasoning and sizing as maxHeightDifficultyCacheEntries: one entry per
-// (service, session-start height), immutable, cheap to re-query if evicted.
+// (service, session-start height), cheap to re-query if evicted.
 const maxCUPRAtHeightCacheEntries = 1000
 
 type serviceQueryClient struct {
@@ -1412,19 +1369,10 @@ type serviceQueryClient struct {
 	serviceCache   map[string]serviceCacheEntry
 	serviceCacheMu sync.RWMutex
 
-	// Bounded cache for height-aware difficulty queries (keyed by "serviceID@height").
-	// Uses xsync.MapOf for lock-free concurrent reads (project standard).
-	// Difficulty at a given height is immutable — no invalidation needed.
-	heightDifficultyCache *xsync.Map[string, heightDifficultyCacheEntry]
-	// heightDifficultyCacheSize tracks entry count atomically for O(1) threshold checks.
-	heightDifficultyCacheSize atomic.Int64
-
-	// Bounded cache for height-aware compute-units-per-relay queries (keyed by
-	// "serviceID@height"). Same shape as heightDifficultyCache: cupr at a past
-	// height is immutable, so entries only need eviction, never invalidation.
-	cuprAtHeightCache *xsync.Map[string, cuprAtHeightCacheEntry]
-	// cuprAtHeightCacheSize tracks entry count atomically for O(1) threshold checks.
-	cuprAtHeightCacheSize atomic.Int64
+	// Relay mining difficulty and compute units per relay at a session's start
+	// height, as the chain resolves them for claims and proofs.
+	difficultyAtHeight *heightCache[servicetypes.RelayMiningDifficulty]
+	cuprAtHeight       *heightCache[uint64]
 
 	// cuprAtHeightUnsupportedUntilUnixNano holds the deadline of the cooldown
 	// entered when the node answers ComputeUnitsPerRelayAtHeight with
@@ -1447,23 +1395,6 @@ type serviceQueryClient struct {
 	paramsCache   *servicetypes.Params
 	paramsCacheAt time.Time
 	paramsCacheMu sync.RWMutex
-}
-
-// heightDifficultyCacheEntry stores difficulty data alongside the block height
-// for efficient eviction sweeps, plus the fetch time for the TTL safety floor.
-type heightDifficultyCacheEntry struct {
-	difficulty  servicetypes.RelayMiningDifficulty
-	blockHeight int64
-	cachedAt    time.Time
-}
-
-// cuprAtHeightCacheEntry stores a service's compute_units_per_relay at a block
-// height, alongside that height for eviction sweeps and the fetch time for the
-// TTL safety floor.
-type cuprAtHeightCacheEntry struct {
-	computeUnitsPerRelay uint64
-	blockHeight          int64
-	cachedAt             time.Time
 }
 
 // cuprAtHeightUnsupportedCooldown is how long the miner serves the LIVE cupr
@@ -1490,15 +1421,20 @@ var (
 	_ ServiceDifficultyClient   = (*serviceQueryClient)(nil)
 )
 
-func newServiceQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *serviceQueryClient {
-	return &serviceQueryClient{
-		logger:                logger.With().Str("query_client", "service").Logger(),
-		queryClient:           servicetypes.NewQueryClient(conn),
-		queryTimeout:          timeout,
-		serviceCache:          make(map[string]serviceCacheEntry),
-		heightDifficultyCache: xsync.NewMap[string, heightDifficultyCacheEntry](),
-		cuprAtHeightCache:     xsync.NewMap[string, cuprAtHeightCacheEntry](),
+func newServiceQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration, heights *blockHeightSource) *serviceQueryClient {
+	c := &serviceQueryClient{
+		logger:       logger.With().Str("query_client", "service").Logger(),
+		queryClient:  servicetypes.NewQueryClient(conn),
+		queryTimeout: timeout,
+		serviceCache: make(map[string]serviceCacheEntry),
 	}
+	c.difficultyAtHeight = newHeightCache(c.logger, "service", "difficulty", maxHeightDifficultyCacheEntries,
+		timeout, heights, c.fetchDifficultyAtHeight,
+		func(a, b servicetypes.RelayMiningDifficulty) bool { return bytes.Equal(a.TargetHash, b.TargetHash) })
+	c.cuprAtHeight = newHeightCache(c.logger, "service", "cupr_at_height", maxCUPRAtHeightCacheEntries,
+		timeout, heights, c.fetchCUPRAtHeight,
+		func(a, b uint64) bool { return a == b })
+	return c
 }
 
 // serviceCacheTTL bounds how long a cached service (including its
@@ -1577,85 +1513,28 @@ func (c *serviceQueryClient) GetServiceRelayDifficulty(ctx context.Context, serv
 	return res.RelayMiningDifficulty, nil
 }
 
-// GetServiceRelayDifficultyAtHeight queries the chain for the relay mining difficulty
-// of a service at a specific block height. This is used to get the difficulty that was
-// effective at session start, ensuring consistency with on-chain proof validation.
-// Results are cached in a bounded xsync.MapOf with composite key "serviceID@blockHeight".
-// Difficulty at a given height is immutable — no invalidation needed, only eviction of old entries.
+// GetServiceRelayDifficultyAtHeight returns the relay mining difficulty of a
+// service at a specific block height. Callers pass a session's start height: the
+// difficulty effective at session start is the one on-chain proof validation uses.
 func (c *serviceQueryClient) GetServiceRelayDifficultyAtHeight(ctx context.Context, serviceId string, blockHeight int64) (servicetypes.RelayMiningDifficulty, error) {
-	cacheKey := fmt.Sprintf("%s@%d", serviceId, blockHeight)
-
-	// Check cache (lock-free read via xsync.MapOf). Difficulty at a height is
-	// immutable, but per the cache-TTL mandate a stale entry past
-	// immutableCacheTTLFloor is treated as a miss and re-queried (self-heal floor).
-	existing, existed := c.heightDifficultyCache.Load(cacheKey)
-	if existed && time.Since(existing.cachedAt) < immutableCacheTTLFloor {
-		queryCacheHits.WithLabelValues("service", "difficulty").Inc()
-		c.logger.Debug().Str("service_id", serviceId).Int64("block_height", blockHeight).Msg("relay mining difficulty served from L1 cache")
-		return existing.difficulty, nil
-	}
-
-	queryCacheMisses.WithLabelValues("service", "difficulty").Inc()
-
-	// Query chain
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.RelayMiningDifficultyAtHeight(queryCtx, &servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest{
-		ServiceId:   serviceId,
-		BlockHeight: blockHeight,
-	})
+	d, err := c.difficultyAtHeight.get(ctx, heightKey{id: serviceId, height: blockHeight})
 	if err != nil {
 		return servicetypes.RelayMiningDifficulty{}, fmt.Errorf("failed to query relay mining difficulty at height %d: %w", blockHeight, err)
 	}
-
-	// Store overwrites a stale entry (Store, not LoadOrStore, so a past-floor refresh
-	// actually replaces the old value); the size counter only grows for a brand-new key.
-	entry := heightDifficultyCacheEntry{
-		difficulty:  res.RelayMiningDifficulty,
-		blockHeight: blockHeight,
-		cachedAt:    time.Now(),
-	}
-	c.heightDifficultyCache.Store(cacheKey, entry)
-	if !existed {
-		c.heightDifficultyCacheSize.Add(1)
-	}
-	queryCacheSize.WithLabelValues("service", "difficulty").Set(float64(c.heightDifficultyCacheSize.Load()))
-	recordRelayMiningDifficulty(serviceId, res.RelayMiningDifficulty.TargetHash)
-
-	// Evict oldest entries if cache exceeds size cap
-	if c.heightDifficultyCacheSize.Load() > maxHeightDifficultyCacheEntries {
-		c.evictOldestHeightDifficultyEntries()
-	}
-
-	return res.RelayMiningDifficulty, nil
+	return d, nil
 }
 
-// evictOldestHeightDifficultyEntries finds the median block height across all
-// cached entries and removes everything at or below it. This evicts roughly
-// half the cache without assuming any particular session length or block timing.
-// The data is immutable — evicted entries are simply re-queried from chain if needed.
-func (c *serviceQueryClient) evictOldestHeightDifficultyEntries() {
-	// Collect all heights to find the median
-	var heights []int64
-	c.heightDifficultyCache.Range(func(_ string, entry heightDifficultyCacheEntry) bool {
-		heights = append(heights, entry.blockHeight)
-		return true
-	})
-	if len(heights) == 0 {
-		return
+func (c *serviceQueryClient) fetchDifficultyAtHeight(ctx context.Context, key heightKey) (servicetypes.RelayMiningDifficulty, int64, error) {
+	var md metadata.MD
+	res, err := c.queryClient.RelayMiningDifficultyAtHeight(ctx, &servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest{
+		ServiceId:   key.id,
+		BlockHeight: key.height,
+	}, grpc.Header(&md))
+	if err != nil {
+		return servicetypes.RelayMiningDifficulty{}, 0, err
 	}
-	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
-	medianHeight := heights[len(heights)/2]
-
-	// Delete entries at or below the median height
-	c.heightDifficultyCache.Range(func(key string, entry heightDifficultyCacheEntry) bool {
-		if entry.blockHeight <= medianHeight {
-			c.heightDifficultyCache.Delete(key)
-			c.heightDifficultyCacheSize.Add(-1)
-		}
-		return true
-	})
+	recordRelayMiningDifficulty(key.id, res.RelayMiningDifficulty.TargetHash)
+	return res.RelayMiningDifficulty, answeredHeight(md), nil
 }
 
 // GetServiceComputeUnitsPerRelayAtHeight queries the chain for the
@@ -1669,19 +1548,10 @@ func (c *serviceQueryClient) evictOldestHeightDifficultyEntries() {
 // cupr instead lets a mid-session cupr change produce a mixed-weight SMST whose
 // sum no longer equals numRelays * cupr, and the claim is rejected with
 // ErrProofComputeUnitsMismatch — forfeiting the whole session.
-//
-// Results are cached in a bounded xsync.Map keyed "serviceID@blockHeight". cupr
-// at a past height is immutable, so entries are only evicted, never invalidated.
 func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.Context, serviceId string, blockHeight int64) (uint64, error) {
-	cacheKey := fmt.Sprintf("%s@%d", serviceId, blockHeight)
-
-	// Check cache (lock-free read via xsync.Map). The value is immutable, but per
-	// the cache-TTL mandate an entry older than immutableCacheTTLFloor is treated
-	// as a miss and re-queried (self-heal floor).
-	existing, existed := c.cuprAtHeightCache.Load(cacheKey)
-	if existed && time.Since(existing.cachedAt) < immutableCacheTTLFloor {
-		queryCacheHits.WithLabelValues("service", "cupr_at_height").Inc()
-		return existing.computeUnitsPerRelay, nil
+	key := heightKey{id: serviceId, height: blockHeight}
+	if cupr, _, ok := c.cuprAtHeight.cached(key); ok {
+		return cupr, nil
 	}
 
 	// Skip the query while a previous codes.Unimplemented cooldown is still running,
@@ -1691,15 +1561,30 @@ func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.
 		return 0, ErrCUPRAtHeightUnavailable
 	}
 
-	queryCacheMisses.WithLabelValues("service", "cupr_at_height").Inc()
+	cupr, _, err := c.cuprAtHeight.ask(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrCUPRAtHeightUnavailable) {
+			return 0, err
+		}
+		return 0, fmt.Errorf("failed to query compute units per relay at height %d: %w", blockHeight, err)
+	}
+	return cupr, nil
+}
 
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
+// CachedServiceComputeUnitsPerRelayAtHeight returns the compute units per relay
+// at blockHeight when the cache holds an answer it reuses, without asking the
+// chain: a caller on the relay path then needs no deadline for the hit.
+func (c *serviceQueryClient) CachedServiceComputeUnitsPerRelayAtHeight(serviceId string, blockHeight int64) (uint64, bool) {
+	cupr, _, ok := c.cuprAtHeight.cached(heightKey{id: serviceId, height: blockHeight})
+	return cupr, ok
+}
 
-	res, err := c.queryClient.ComputeUnitsPerRelayAtHeight(queryCtx, &servicetypes.QueryComputeUnitsPerRelayAtHeightRequest{
-		ServiceId:   serviceId,
-		BlockHeight: blockHeight,
-	})
+func (c *serviceQueryClient) fetchCUPRAtHeight(ctx context.Context, key heightKey) (uint64, int64, error) {
+	var md metadata.MD
+	res, err := c.queryClient.ComputeUnitsPerRelayAtHeight(ctx, &servicetypes.QueryComputeUnitsPerRelayAtHeightRequest{
+		ServiceId:   key.id,
+		BlockHeight: key.height,
+	}, grpc.Header(&md))
 	if err != nil {
 		// A pre-v0.1.35 node does not serve this RPC. grpc-go also maps an ingress
 		// 404 to Unimplemented, so a load-balancer hiccup lands here too — which is
@@ -1711,13 +1596,13 @@ func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.
 			c.cuprAtHeightDegraded.Store(true)
 			c.cuprUnsupportedWarnOnce.Do(func() {
 				c.logger.Warn().
-					Str("service_id", serviceId).
+					Str("service_id", key.id).
 					Dur("retry_after", cuprAtHeightUnsupportedCooldown).
 					Msg("node does not implement ComputeUnitsPerRelayAtHeight (pre-v0.1.35); at-height CUPR is unavailable. Callers fall back per their own policy (relayer serves live, miner guard fails open). Session-start CUPR pricing is INACTIVE until the full node is upgraded; recovery will be logged")
 			})
-			return 0, ErrCUPRAtHeightUnavailable
+			return 0, 0, ErrCUPRAtHeightUnavailable
 		}
-		return 0, fmt.Errorf("failed to query compute units per relay at height %d: %w", blockHeight, err)
+		return 0, 0, err
 	}
 
 	// A successful query means the node implements the RPC. Clear the cooldown so
@@ -1728,49 +1613,7 @@ func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.
 	if c.cuprAtHeightDegraded.CompareAndSwap(true, false) {
 		c.logger.Info().Msg("node now implements ComputeUnitsPerRelayAtHeight; session-start CUPR pricing is ACTIVE again")
 	}
-
-	// Store (not LoadOrStore) so a past-floor refresh actually replaces the old
-	// value; the size counter only grows for a brand-new key.
-	c.cuprAtHeightCache.Store(cacheKey, cuprAtHeightCacheEntry{
-		computeUnitsPerRelay: res.ComputeUnitsPerRelay,
-		blockHeight:          blockHeight,
-		cachedAt:             time.Now(),
-	})
-	if !existed {
-		c.cuprAtHeightCacheSize.Add(1)
-	}
-	queryCacheSize.WithLabelValues("service", "cupr_at_height").Set(float64(c.cuprAtHeightCacheSize.Load()))
-
-	if c.cuprAtHeightCacheSize.Load() > maxCUPRAtHeightCacheEntries {
-		c.evictOldestCUPRAtHeightEntries()
-	}
-
-	return res.ComputeUnitsPerRelay, nil
-}
-
-// evictOldestCUPRAtHeightEntries removes every entry at or below the median
-// cached block height, shedding roughly half the cache without assuming a
-// session length or block time. Mirrors evictOldestHeightDifficultyEntries; the
-// data is immutable, so an evicted entry is simply re-queried if needed again.
-func (c *serviceQueryClient) evictOldestCUPRAtHeightEntries() {
-	var heights []int64
-	c.cuprAtHeightCache.Range(func(_ string, entry cuprAtHeightCacheEntry) bool {
-		heights = append(heights, entry.blockHeight)
-		return true
-	})
-	if len(heights) == 0 {
-		return
-	}
-	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
-	medianHeight := heights[len(heights)/2]
-
-	c.cuprAtHeightCache.Range(func(key string, entry cuprAtHeightCacheEntry) bool {
-		if entry.blockHeight <= medianHeight {
-			c.cuprAtHeightCache.Delete(key)
-			c.cuprAtHeightCacheSize.Add(-1)
-		}
-		return true
-	})
+	return res.ComputeUnitsPerRelay, answeredHeight(md), nil
 }
 
 func (c *serviceQueryClient) GetParams(ctx context.Context) (*servicetypes.Params, error) {

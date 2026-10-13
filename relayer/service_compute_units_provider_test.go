@@ -235,3 +235,28 @@ func TestServiceCacheComputeUnitsProvider_Concurrent(t *testing.T) {
 		require.Failf(t, "wrong CUPR under concurrency", "got %d", got)
 	}
 }
+
+// cachingCUPRClient also answers from its cache without blocking, as the query
+// layer's service client does.
+type cachingCUPRClient struct {
+	fakeCUPRAtHeightClient
+	cached map[int64]uint64
+}
+
+func (f *cachingCUPRClient) CachedServiceComputeUnitsPerRelayAtHeight(_ string, blockHeight int64) (uint64, bool) {
+	v, ok := f.cached[blockHeight]
+	return v, ok
+}
+
+// A compute-units hit on the relay path allocates nothing: the lookup's
+// deadline is built only for a miss that has to ask the chain.
+func TestServiceCacheComputeUnitsProvider_ACacheHitAllocatesNothing(t *testing.T) {
+	qc := &cachingCUPRClient{cached: map[int64]uint64{100: 6312}}
+	p := NewServiceCacheComputeUnitsProvider(culog(), nil, qc)
+	ctx := context.Background()
+
+	require.Equal(t, uint64(6312), p.GetServiceComputeUnits(ctx, "seda", 100))
+	allocs := testing.AllocsPerRun(100, func() { _ = p.GetServiceComputeUnits(ctx, "seda", 100) })
+	require.Zero(t, allocs, "a cache hit must not allocate")
+	require.Zero(t, qc.calls.Load(), "a hit does not ask the chain")
+}

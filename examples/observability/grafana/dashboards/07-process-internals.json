@@ -1382,6 +1382,93 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Final changed and no height header stay at 0. Not final: answers the node gave from below the asked height and still held; each is asked again at the next block, but one for a height nobody asks again stays until it is evicted, so the line need not return to 0 after a lag.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 51
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (client,cache_type)(ha_query_cache_pending)",
+          "legendFormat": "not final {{client}} {{cache_type}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (client,cache_type)(rate(ha_query_cache_final_answer_changed_total[$__rate_interval]))",
+          "legendFormat": "final changed {{client}} {{cache_type}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (client,cache_type)(rate(ha_query_cache_answer_height_missing_total[$__rate_interval]))",
+          "legendFormat": "no height header {{client}} {{cache_type}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Query height caches: not final / changed / no height header",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "description": "",
       "fieldConfig": {
         "defaults": {
@@ -1413,11 +1500,11 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 0,
+        "w": 8,
+        "x": 8,
         "y": 51
       },
-      "id": 20,
+      "id": 21,
       "options": {
         "legend": {
           "calcs": [
@@ -1482,11 +1569,11 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 51
       },
-      "id": 21,
+      "id": 22,
       "options": {
         "legend": {
           "calcs": [

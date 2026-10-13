@@ -174,14 +174,17 @@ func (rp *relayProcessor) ProcessRelay(
 	// Check mining difficulty using the difficulty at session start height
 	isApplicable, err := rp.checkMiningDifficulty(ctx, serviceID, relayHash[:], sessionStartHeight)
 	if err != nil {
-		// FAILS OPEN: the relay is mined as applicable. Debug is per-request,
-		// so the counter is the only signal that difficulty is unresolvable.
+		// Served, not mined. Mined against another target, a relay below the
+		// real one could be the leaf the chain picks for the proof, which it
+		// validates against the difficulty at the session start: the whole
+		// session's proof would fail. Debug is per-request, so the counter is
+		// the only signal that difficulty is unresolvable.
 		difficultyQueryFailures.WithLabelValues(serviceID).Inc()
 		rp.logger.Debug().
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
-			Msg("failed to check mining difficulty, assuming applicable")
-		isApplicable = true // Default to applicable on error
+			Msg("failed to resolve mining difficulty, relay served and not mined")
+		return nil, nil
 	}
 
 	if !isApplicable {
@@ -299,7 +302,7 @@ type ServiceDifficultyQueryClient interface {
 
 // QueryDifficultyProvider is a thin pass-through to the query layer for difficulty lookups.
 // Caching of successful responses is handled by the query layer
-// (serviceQueryClient.heightDifficultyCache) — no duplicate caching here.
+// (serviceQueryClient.difficultyAtHeight) — no duplicate caching here.
 type QueryDifficultyProvider struct {
 	logger      logging.Logger
 	queryClient ServiceDifficultyQueryClient
@@ -331,15 +334,9 @@ func (p *QueryDifficultyProvider) GetTargetHash(ctx context.Context, serviceID s
 
 	target, err := p.queryClient.GetServiceRelayDifficulty(ctx, serviceID, sessionStartHeight)
 	if err != nil {
-		// Falls back to base difficulty (every relay applicable) — same
-		// fail-open, same need for a counter.
-		difficultyQueryFailures.WithLabelValues(serviceID).Inc()
-		p.logger.Debug().
-			Err(err).
-			Str(logging.FieldServiceID, serviceID).
-			Int64("session_start_height", sessionStartHeight).
-			Msg("failed to query service difficulty, using base")
-		return protocol.BaseRelayDifficultyHashBz, nil
+		// Returned, not replaced by the base target: the processor does not
+		// mine a relay whose difficulty it could not resolve.
+		return nil, fmt.Errorf("difficulty of %s at height %d: %w", serviceID, sessionStartHeight, err)
 	}
 
 	return target, nil

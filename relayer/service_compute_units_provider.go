@@ -20,6 +20,13 @@ type ServiceCUPRAtHeightQueryClient interface {
 	GetServiceComputeUnitsPerRelayAtHeight(ctx context.Context, serviceID string, blockHeight int64) (uint64, error)
 }
 
+// cachedCUPRAtHeight is the non-blocking lookup the query layer's service
+// client also offers: a hit returns before the lookup's deadline is built, and
+// building it (context.WithTimeout) allocates on every relay.
+type cachedCUPRAtHeight interface {
+	CachedServiceComputeUnitsPerRelayAtHeight(serviceID string, blockHeight int64) (uint64, bool)
+}
+
 // serviceCacheComputeUnitsProvider resolves a service's compute_units_per_relay
 // at a session's START height.
 //
@@ -72,6 +79,15 @@ func (p *serviceCacheComputeUnitsProvider) GetServiceComputeUnits(
 	// live value, which is what this path did before v0.1.35.
 	if sessionStartHeight <= 0 || p.queryClient == nil {
 		return p.liveComputeUnits(ctx, serviceID)
+	}
+
+	if c, ok := p.queryClient.(cachedCUPRAtHeight); ok {
+		if computeUnits, hit := c.CachedServiceComputeUnitsPerRelayAtHeight(serviceID, sessionStartHeight); hit {
+			if computeUnits == 0 {
+				return 1
+			}
+			return computeUnits
+		}
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, serviceComputeUnitsLookupTimeout)
