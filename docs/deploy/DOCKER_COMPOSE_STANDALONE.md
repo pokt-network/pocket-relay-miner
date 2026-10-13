@@ -86,27 +86,31 @@ Also needed: about 6 GiB of free RAM (the container is limited to 6 GiB;
 `sauron-rpc.beta.infra.pocket.network` and
 `sauron-grpc.beta.infra.pocket.network:443`.
 
-## Step 1: build the image
-
-Standalone mode is not in `v0.1.2`, the release the high-availability example
-pins. The compose file builds the image from this checkout, under the name
-`pocket-relay-miner:standalone-local`.
+## Step 1: get the image
 
 **Run**
 
 ```bash
-$C build; echo "EXIT=$?"
+$C pull; echo "EXIT=$?"
 ```
 
-**Expect**: the build steps, then `EXIT=0`. **Not verified**: the build on
-2026-10-07 was refused by Docker Hub's anonymous pull limit
-(`429 Too Many Requests` on `alpine:latest`).
+**Expect**: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.3` pulled, then
+`EXIT=0`.
 
-**If not**: `429 Too Many Requests` → Docker Hub's pull limit → wait, or
-`docker login`, and run it again.
+**If not**: `manifest unknown` → check the compose file names exactly that
+image. If this host cannot reach `ghcr.io`, build the image locally with the
+same name (takes a few minutes), because the compose file names that image:
 
-**Stop if**: someone asks you to use an image of another version than this
-checkout.
+```bash
+git checkout v0.1.3 2>/dev/null || echo "tag v0.1.3 not found: building the current checkout"
+docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.3 .
+```
+
+If the tag is not in your checkout, fetch it first (`git fetch --tags`):
+otherwise the image is whatever commit you have checked out, under the v0.1.3
+name.
+
+**Stop if**: someone asks you to use an image of another version.
 
 ## Step 2: the node answers, on the network you expect
 
@@ -137,7 +141,7 @@ refuses to start on a chain id that differs from `pocket_node.chain_id`.
 $C run --rm --no-deps standalone standalone validate --config /config/standalone.yaml; echo "EXIT=$?"
 ```
 
-**Expect** (checked, with the binary of this checkout; the container prints a
+**Expect** (checked with v0.1.3-rc.1; the container prints a
 `Container ... Created` line first)
 
 ```
