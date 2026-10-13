@@ -101,6 +101,10 @@ version). Run tests with `make` too, except when debugging one package.
    opens a draft marked as a pre-release. Either draft starts with the commits
    since the previous `vX.Y.Z`, listed by git-cliff from `cliff.toml`; edit it
    into the notes before publishing.
+   Before a `vX.Y.Z` tag publishes anything, `scripts/gates/doc_versions.sh`
+   checks that the docs install that version; it lists every line that still
+   names the previous one. Bump them in a PR first, or, after a red, delete the
+   tag and push it again once that PR merged.
 
 Everything tracked is in English: code, comments, docs, skills, scripts, commit
 messages. The static gate fails on Spanish in any tracked file.

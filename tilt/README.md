@@ -24,7 +24,7 @@ tilt/
 │   ├── defaults.Tiltfile   # Default values, relay_miner_mode among them
 │   ├── ports.Tiltfile      # Centralized port registry
 │   ├── utils.Tiltfile      # Helpers, the keyring init container all relay-miner pods share
-│   ├── redis.Tiltfile      # Redis (high-availability mode, and the gateway)
+│   ├── redis.Tiltfile      # Redis (high-availability mode)
 │   ├── validator.Tiltfile  # Validator + genesis
 │   ├── miner.Tiltfile      # Miner Deployment (high-availability mode)
 │   ├── relayer.Tiltfile    # Relayer Deployment (high-availability mode)
@@ -32,7 +32,6 @@ tilt/
 │   ├── backend.Tiltfile    # Demo backend server
 │   ├── nginx-backend.Tiltfile  # Static JSON-RPC backend for load tests
 │   ├── observability.Tiltfile  # Prometheus, Grafana, Loki and Promtail
-│   ├── path.Tiltfile       # The gateway that sends relays (optional)
 │   ├── account-init.Tiltfile   # Account initialization
 │   └── accounts.star       # Accounts account-init initializes, derived from the genesis
 ├── config/                 # Localnet chain files

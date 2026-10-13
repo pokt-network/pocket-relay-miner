@@ -2,18 +2,16 @@
 
 This is the **direct** way to test the relayer: the built-in `relay` command
 sends signed relay requests **straight to a relayer replica** (`:8180` on the
-Tilt localnet), with no gateway in between. Use it when you need honest
+Tilt localnet), with no proxy in between. Use it when you need honest
 per-relay results — signature verification, error codes, and per-protocol
 behavior.
 
 ## Why direct
 
 A client that judges a relay by its HTTP status can count failures as
-successes: a gateway may answer its own client with `200 OK` and an empty body
-when the relayer behind it returned a `503`. A load run measured that way can
-report every request as `OK` while the WAL stays empty (`XLEN 0`) — not one
-relay mined. That makes such a measurement wrong for **every** question,
-throughput and lifecycle included, not just for error paths.
+successes: a proxy in front of the relayer may answer its own client with
+`200 OK` and an empty body when the relayer returned a `503`. A load run
+measured that way can report every request as `OK` while nothing was mined.
 
 The `relay` CLI talks to the relayer directly and validates the full response
 (supplier signature + the backend's own error field), so a failure is a
