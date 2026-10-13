@@ -8,11 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // ServiceFactorManifest is the complete service factor state published by the
@@ -37,8 +35,8 @@ const serviceFactorReloadInterval = 2 * time.Second
 // against 1.855 relays/s on a live run. A service the manifest does not list has
 // no override -- that is data, not a failed lookup.
 type ServiceFactorClient struct {
-	logger      logging.Logger
-	redisClient *redisutil.Client
+	logger logging.Logger
+	store  kv.Store
 
 	// manifest is replaced whole, never mutated: readers take the pointer and
 	// the map inside is only ever written before that pointer is published, so
@@ -67,11 +65,11 @@ type ServiceFactorClient struct {
 // NewServiceFactorClient creates a new service factor client.
 func NewServiceFactorClient(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 ) *ServiceFactorClient {
 	return &ServiceFactorClient{
-		logger:      logging.ForComponent(logger, logging.ComponentServiceFactorClient),
-		redisClient: redisClient,
+		logger: logging.ForComponent(logger, logging.ComponentServiceFactorClient),
+		store:  store,
 	}
 }
 
@@ -109,7 +107,7 @@ func (c *ServiceFactorClient) Start(ctx context.Context) error {
 	// its own if Redis goes down and comes back.
 	if err := cache.SubscribeToInvalidations(
 		loopCtx,
-		c.redisClient,
+		c.store,
 		c.logger,
 		cache.ServiceFactorCacheType,
 		c.handleInvalidation,
@@ -151,7 +149,7 @@ func (c *ServiceFactorClient) retryUntilLoaded(ctx context.Context) {
 // treating it as "no price" would stop admission across the entire fleet on one
 // blink of Redis: a worse failure than the one this design fixes.
 func (c *ServiceFactorClient) loadManifest(ctx context.Context) error {
-	raw, err := c.redisClient.Get(ctx, c.redisClient.KB().ServiceFactorManifestKey()).Bytes()
+	raw, err := c.store.Get(ctx, c.store.KB().ServiceFactorManifestKey())
 	switch {
 	case err == nil:
 		var manifest ServiceFactorManifest
@@ -164,7 +162,7 @@ func (c *ServiceFactorClient) loadManifest(ctx context.Context) error {
 		c.manifest.Store(&manifest)
 		return nil
 
-	case errors.Is(err, redis.Nil):
+	case errors.Is(err, kv.ErrNotFound):
 		return err
 
 	default:

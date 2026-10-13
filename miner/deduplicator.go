@@ -81,12 +81,7 @@ func NewRedisDeduplicator(
 	redisClient *redisutil.Client,
 	config DeduplicatorConfig,
 ) *RedisDeduplicator {
-	if config.TTLBlocks == 0 {
-		config.TTLBlocks = 10 // session length + grace period + buffer
-	}
-	if config.BlockTimeSeconds == 0 {
-		config.BlockTimeSeconds = cache.DefaultBlockTimeSeconds
-	}
+	config = config.withDefaults()
 
 	return &RedisDeduplicator{
 		logger:      logging.ForComponent(logger, logging.ComponentDeduplicator),
@@ -184,7 +179,23 @@ func (d *RedisDeduplicator) sessionKey(sessionID string) string {
 
 // getTTL returns the TTL for deduplication entries.
 func (d *RedisDeduplicator) getTTL() time.Duration {
-	return time.Duration(d.config.TTLBlocks*d.config.BlockTimeSeconds) * time.Second
+	return d.config.ttl()
+}
+
+// withDefaults fills what the config leaves at zero.
+func (c DeduplicatorConfig) withDefaults() DeduplicatorConfig {
+	if c.TTLBlocks == 0 {
+		c.TTLBlocks = 10 // session length + grace period + buffer
+	}
+	if c.BlockTimeSeconds == 0 {
+		c.BlockTimeSeconds = cache.DefaultBlockTimeSeconds
+	}
+	return c
+}
+
+// ttl is how long a session's marks live after its last mark.
+func (c DeduplicatorConfig) ttl() time.Duration {
+	return time.Duration(c.TTLBlocks*c.BlockTimeSeconds) * time.Second
 }
 
 // hashMember converts raw relay hash bytes into the string form go-redis

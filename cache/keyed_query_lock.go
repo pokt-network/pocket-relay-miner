@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
@@ -64,18 +64,18 @@ type keyedQueryLockSpec[V any] struct {
 //     chainQueryLatency / chainQueryErrors metric increments
 func queryKeyedChainWithLock[V any](
 	ctx context.Context,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	logger logging.Logger,
 	key string,
 	spec keyedQueryLockSpec[V],
 ) (V, error) {
 	var zero V
 
-	lockKey := redisClient.KB().CacheLockKey(spec.cacheType, key)
+	lockKey := store.KB().CacheLockKey(spec.cacheType, key)
 
 	// Try to acquire distributed lock
 	lockToken := newLockToken()
-	locked, err := redisClient.SetNX(ctx, lockKey, lockToken, 5*time.Second).Result()
+	locked, err := store.SetNX(ctx, lockKey, []byte(lockToken), 5*time.Second)
 	if err != nil {
 		return zero, fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -84,7 +84,7 @@ func queryKeyedChainWithLock[V any](
 	// out -- that lets a third instance acquire immediately and fire another
 	// duplicate query, defeating the dedup this lock exists for.
 	if locked {
-		defer releaseCacheLock(ctx, redisClient, lockKey, lockToken)
+		defer releaseCacheLock(ctx, store, lockKey, lockToken)
 	}
 
 	if !locked {
@@ -130,7 +130,7 @@ func queryKeyedChainWithLock[V any](
 // stores the decoded value in L1 via storeL1.
 func warmupKeyedFromRedis[V any](
 	ctx context.Context,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	logger logging.Logger,
 	cacheType string,
 	logKeyField string,
@@ -140,8 +140,8 @@ func warmupKeyedFromRedis[V any](
 	storeL1 func(key string, val V),
 ) error {
 	// Load from Redis (L2) into local cache (L1)
-	redisKey := redisClient.KB().CacheKey(cacheType, key)
-	data, err := redisClient.Get(ctx, redisKey).Bytes()
+	redisKey := store.KB().CacheKey(cacheType, key)
+	data, err := store.Get(ctx, redisKey)
 	if err != nil {
 		// Key doesn't exist in Redis, skip
 		return nil

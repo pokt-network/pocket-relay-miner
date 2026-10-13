@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -21,7 +22,7 @@ func newServiceFactorRegistry(t *testing.T, config ServiceFactorRegistryConfig) 
 	t.Helper()
 
 	client, _ := newTestRedis(t)
-	return NewServiceFactorRegistry(zerolog.Nop(), client, client.KB(), config), client
+	return NewServiceFactorRegistry(zerolog.Nop(), kv.NewRedis(zerolog.Nop(), client), client.KB(), config), client
 }
 
 // readManifest returns the published manifest, failing if none was written.

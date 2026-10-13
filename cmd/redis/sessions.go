@@ -73,6 +73,12 @@ func showSession(ctx context.Context, client *DebugRedisClient, supplier, sessio
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	return PrintSession(snapshot, supplier, sessionID, jsonOutput)
+}
+
+// PrintSession prints one session, as JSON or as fields. Standalone's inspect
+// command prints its sessions with it too.
+func PrintSession(snapshot map[string]interface{}, supplier, sessionID string, jsonOutput bool) error {
 	if jsonOutput {
 		out, err := json.MarshalIndent(snapshot, "", "  ")
 		if err != nil {
@@ -189,6 +195,12 @@ func fetchAndDisplaySessions(ctx context.Context, client *DebugRedisClient, supp
 		sessions = append(sessions, snapshot)
 	}
 
+	return PrintSessions(sessions, jsonOutput)
+}
+
+// PrintSessions prints sessions, as a JSON array or as a table. Standalone's
+// inspect command prints its sessions with it too.
+func PrintSessions(sessions []map[string]interface{}, jsonOutput bool) error {
 	if jsonOutput {
 		output, err := json.MarshalIndent(sessions, "", "  ")
 		if err != nil {

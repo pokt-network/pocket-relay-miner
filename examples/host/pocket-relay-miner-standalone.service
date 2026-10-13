@@ -1,0 +1,46 @@
+# systemd unit for STANDALONE MODE: the relayer and the miner in one process,
+# their state in an embedded store under /var/lib/pocket-relay-miner, no Redis.
+# The high-availability mode uses pocket-relay-miner-miner.service and
+# pocket-relay-miner-relayer.service instead; never run both modes for the
+# same supplier keys. Install:
+#   sudo cp pocket-relay-miner-standalone.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pocket-relay-miner-standalone
+# The process exits if it cannot read the chain at startup; Restart=on-failure
+# retries it.
+
+[Unit]
+Description=Pocket RelayMiner (standalone mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pocket-relay-miner
+Group=pocket-relay-miner
+# Secrets and Go runtime settings (GOMEMLIMIT, GOMAXPROCS). Mode 0600.
+EnvironmentFile=/etc/pocket-relay-miner/standalone.env
+ExecStartPre=/usr/local/bin/pocket-relay-miner standalone validate --config /etc/pocket-relay-miner/standalone.yaml
+ExecStart=/usr/local/bin/pocket-relay-miner standalone --config /etc/pocket-relay-miner/standalone.yaml
+Restart=on-failure
+RestartSec=10
+# The embedded store: /var/lib/pocket-relay-miner, created for the service
+# user and writable under ProtectSystem=strict. storage.path is below it.
+StateDirectory=pocket-relay-miner
+StateDirectoryMode=0750
+# The relayer drains first, then the miner checkpoints its trees.
+TimeoutStopSec=120
+# Sizing: the sum of the high-availability units' limits (relayer 4G, miner
+# 8G). Not measured for standalone mode: watch memory as traffic grows.
+# Hard limits. Keep GOMEMLIMIT in standalone.env about 10% below MemoryMax,
+# and GOMAXPROCS equal to CPUQuota / 100%.
+MemoryMax=12G
+CPUQuota=400%
+LimitNOFILE=1048576
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

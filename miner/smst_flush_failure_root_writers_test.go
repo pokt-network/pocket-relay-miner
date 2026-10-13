@@ -88,7 +88,7 @@ func TestRedisMapStore_FailedFlushKeepsBufferedNodesForTheNextFlush(t *testing.T
 	fail := newHSetFailSwitch(client)
 
 	const supplier, sessionID = "pokt1pending_nodes_supplier", "sess-pending-nodes-store"
-	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*RedisMapStore)
+	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*nodeStore)
 	require.True(t, ok)
 	hashKey := client.KB().SMSTNodesKey(supplier, sessionID)
 

@@ -9,14 +9,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
-func paramsAtHeightMisses() float64 {
-	return testutil.ToFloat64(queryCacheMisses.WithLabelValues("shared", "params_at_height"))
+// countFlightJoins counts the callers that have joined a ParamsAtHeight
+// flight on qc. It must be called before any caller starts.
+func countFlightJoins(t *testing.T, qc *Clients) *atomic.Int64 {
+	t.Helper()
+	shared, ok := qc.Shared().(*sharedQueryClient)
+	require.True(t, ok, "the shared query client must be *sharedQueryClient")
+	var joins atomic.Int64
+	shared.onFlightJoin = func(int64) { joins.Add(1) }
+	return &joins
 }
 
 // TestGetParamsAtHeight_ConcurrentMissesShareOneRPC: when a session ends, every
@@ -28,6 +34,9 @@ func TestGetParamsAtHeight_ConcurrentMissesShareOneRPC(t *testing.T) {
 	mock.sharedParamsAtHeight = generateTestSharedParams()
 
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	defer letGo() // a failed wait must not leave the RPC handler blocked
 	var rpcs atomic.Int64
 	mock.onParamsAtHeight = func(int64) {
 		rpcs.Add(1)
@@ -41,7 +50,7 @@ func TestGetParamsAtHeight_ConcurrentMissesShareOneRPC(t *testing.T) {
 
 	const callers = 16
 	const height = int64(777)
-	missesBefore := paramsAtHeightMisses()
+	joins := countFlightJoins(t, qc)
 
 	var wg sync.WaitGroup
 	errs := make(chan error, callers)
@@ -57,11 +66,11 @@ func TestGetParamsAtHeight_ConcurrentMissesShareOneRPC(t *testing.T) {
 		}()
 	}
 
-	// Every caller has missed the cache before the RPC is let go, so without
-	// coalescing each one is past the cache and on its way to its own RPC.
-	require.Eventually(t, func() bool { return paramsAtHeightMisses()-missesBefore == callers },
-		5*time.Second, time.Millisecond, "all callers must miss the cache before the RPC answers")
-	close(release)
+	// Every caller has joined the flight before the RPC is let go: a caller
+	// that joins after it answered would start its own RPC.
+	require.Eventually(t, func() bool { return joins.Load() == callers },
+		5*time.Second, time.Millisecond, "all callers must join the flight before the RPC answers")
+	letGo()
 	wg.Wait()
 	close(errs)
 	for err := range errs {
@@ -81,6 +90,9 @@ func TestGetParamsAtHeight_ACancelledCallerDoesNotFailTheOthers(t *testing.T) {
 	mock.sharedParamsAtHeight = generateTestSharedParams()
 
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	defer letGo() // a failed wait must not leave the RPC handler blocked
 	var rpcs atomic.Int64
 	mock.onParamsAtHeight = func(int64) {
 		rpcs.Add(1)
@@ -93,7 +105,7 @@ func TestGetParamsAtHeight_ACancelledCallerDoesNotFailTheOthers(t *testing.T) {
 	defer func() { _ = qc.Close() }()
 
 	const height = int64(888)
-	missesBefore := paramsAtHeightMisses()
+	joins := countFlightJoins(t, qc)
 
 	first, cancelFirst := context.WithCancel(context.Background())
 	defer cancelFirst()
@@ -110,13 +122,13 @@ func TestGetParamsAtHeight_ACancelledCallerDoesNotFailTheOthers(t *testing.T) {
 		_, err := qc.Shared().GetParamsAtHeight(context.Background(), height)
 		secondErr <- err
 	}()
-	require.Eventually(t, func() bool { return paramsAtHeightMisses()-missesBefore == 2 }, 5*time.Second, time.Millisecond,
-		"the second caller must have missed the cache while the first RPC is in flight")
+	require.Eventually(t, func() bool { return joins.Load() == 2 }, 5*time.Second, time.Millisecond,
+		"the second caller must have joined the flight while the first RPC is in flight")
 
 	cancelFirst()
 	require.ErrorIs(t, <-firstErr, context.Canceled, "the cancelled caller stops waiting")
 
-	close(release)
+	letGo()
 	require.NoError(t, <-secondErr, "the other caller must get the params the shared RPC returns")
 	require.Equal(t, int64(1), rpcs.Load(), "the cancelled caller's RPC is the one the other caller used")
 }

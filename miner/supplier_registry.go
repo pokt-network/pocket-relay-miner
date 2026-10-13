@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
-
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // SupplierUpdateAction represents the type of supplier update.
@@ -32,25 +31,25 @@ type SupplierRegistryConfig struct {
 // declared endpoints — is the supplier CACHE's job (ha:supplier:{addr},
 // singular), which the relayer reads to decide whether to serve a relay.
 type SupplierRegistry struct {
-	logger      logging.Logger
-	redisClient *redisutil.Client
-	config      SupplierRegistryConfig
+	logger logging.Logger
+	store  kv.Store
+	config SupplierRegistryConfig
 }
 
 // NewSupplierRegistry creates a new supplier registry.
 func NewSupplierRegistry(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	config SupplierRegistryConfig,
 ) *SupplierRegistry {
 	if config.IndexKey == "" {
-		config.IndexKey = redisClient.KB().SuppliersRegistryIndexKey()
+		config.IndexKey = store.KB().SuppliersRegistryIndexKey()
 	}
 
 	return &SupplierRegistry{
-		logger:      logging.ForComponent(logger, logging.ComponentSupplierRegistry),
-		redisClient: redisClient,
-		config:      config,
+		logger: logging.ForComponent(logger, logging.ComponentSupplierRegistry),
+		store:  store,
+		config: config,
 	}
 }
 
@@ -89,12 +88,12 @@ func (r *SupplierRegistry) PublishSupplierUpdate(
 ) error {
 	switch action {
 	case SupplierUpdateActionAdd:
-		if err := r.redisClient.SAdd(ctx, r.config.IndexKey, operatorAddr).Err(); err != nil {
+		if err := r.store.SAdd(ctx, r.config.IndexKey, operatorAddr); err != nil {
 			return fmt.Errorf("failed to add to supplier index: %w", err)
 		}
 
 	case SupplierUpdateActionRemove:
-		if err := r.redisClient.SRem(ctx, r.config.IndexKey, operatorAddr).Err(); err != nil {
+		if err := r.store.SRem(ctx, r.config.IndexKey, operatorAddr); err != nil {
 			return fmt.Errorf("failed to remove from supplier index: %w", err)
 		}
 
@@ -125,7 +124,7 @@ func (r *SupplierRegistry) PublishSupplierUpdate(
 
 // ListSuppliers returns all registered supplier addresses.
 func (r *SupplierRegistry) ListSuppliers(ctx context.Context) ([]string, error) {
-	suppliers, err := r.redisClient.SMembers(ctx, r.config.IndexKey).Result()
+	suppliers, err := r.store.SMembers(ctx, r.config.IndexKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list suppliers: %w", err)
 	}

@@ -7,10 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -55,7 +57,7 @@ func TestReleaseCacheLock_ReleasesEvenWhenTheRequestWasCancelled(t *testing.T) {
 	// disconnecting client or an expired deadline does.
 	cancel()
 
-	releaseCacheLock(ctx, client, lockKey, token)
+	releaseCacheLock(ctx, kv.NewRedis(zerolog.Nop(), client), lockKey, token)
 
 	exists, err := client.Exists(context.Background(), lockKey).Result()
 	require.NoError(t, err)
@@ -73,7 +75,7 @@ func TestReleaseCacheLock_ReleasesOnALiveContext(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	releaseCacheLock(ctx, client, lockKey, token)
+	releaseCacheLock(ctx, kv.NewRedis(zerolog.Nop(), client), lockKey, token)
 
 	exists, err := client.Exists(ctx, lockKey).Result()
 	require.NoError(t, err)
@@ -101,7 +103,7 @@ func TestReleaseCacheLock_LeavesASuccessorsLockAlone(t *testing.T) {
 	require.True(t, ok)
 
 	// The straggler's deferred release finally runs.
-	releaseCacheLock(ctx, client, lockKey, stragglerToken)
+	releaseCacheLock(ctx, kv.NewRedis(zerolog.Nop(), client), lockKey, stragglerToken)
 
 	got, err := client.Get(ctx, lockKey).Result()
 	require.NoError(t, err, "the successor's lock must still be there")

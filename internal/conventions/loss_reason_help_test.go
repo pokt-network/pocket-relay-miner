@@ -31,7 +31,7 @@ const lossReasonEnumerator = "sessions_failed_total"
 // who starts at any of them has a next step.
 var lossReasonPointers = []string{
 	"compute_units_lost_total",
-	"upokt_lost_total",
+	"chain_upokt_lost_total",
 	"relays_lost_total",
 }
 
@@ -174,7 +174,7 @@ func lossCounterMetricName(varName string) string {
 	case "computeUnitsLostTotal":
 		return "compute_units_lost_total"
 	case "upoktLostTotal":
-		return "upokt_lost_total"
+		return "chain_upokt_lost_total"
 	}
 	return varName
 }

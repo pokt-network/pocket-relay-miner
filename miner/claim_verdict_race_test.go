@@ -103,7 +103,7 @@ func TestSweep_AClaimBookedAfterTheReadIsNotUndone(t *testing.T) {
 	cb.observeClaim = func(ctx context.Context, snapshot *SessionSnapshot) (bool, error) {
 		// The reconciler lands in between: same Redis, same session.
 		booked, err := cb.store.ReactivateClaimed(ctx, snapshot.SessionID, make([]byte, 48), "CLAIMTX")
-		if err != nil || !booked {
+		if err != nil || booked.From == "" {
 			return false, errors.New("premise: the reconciler could not book the session claimed")
 		}
 		return false, nil

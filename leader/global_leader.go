@@ -63,20 +63,14 @@ type GlobalLeaderElectorConfig struct {
 // - LifecycleCallback (claim/proof submission)
 // - Any future leader-only operations
 type GlobalLeaderElector struct {
-	logger      logging.Logger
-	redisClient *redisutil.Client
-	instanceID  string // Unique ID for this miner instance (hostname + UUID)
-	config      GlobalLeaderElectorConfig
-	metrics     *leaderMetrics
-	leaderKey   string // Redis key for global leader lock (built via KeyBuilder)
+	logger     logging.Logger
+	lock       leaderLock // where the lock is held: Redis, or this process alone
+	instanceID string     // Unique ID for this miner instance (hostname + UUID)
+	config     GlobalLeaderElectorConfig
+	metrics    *leaderMetrics
 
 	isLeader                   atomic.Bool
 	consecutiveAcquireFailures int
-
-	// Lua scripts for atomic operations
-	acquireScript *redis.Script
-	renewScript   *redis.Script
-	releaseScript *redis.Script
 
 	// Callbacks for leadership changes
 	onElectedCallbacks []LeadershipCallback
@@ -104,16 +98,30 @@ func NewGlobalLeaderElectorWithConfig(
 	instanceID string,
 	config GlobalLeaderElectorConfig,
 ) *GlobalLeaderElector {
-	return &GlobalLeaderElector{
-		logger:        logging.ForComponent(logger, logging.ComponentLeaderElector),
-		redisClient:   redisClient,
-		instanceID:    instanceID,
-		config:        config,
-		metrics:       initMetrics(), // Lazy-load metrics only when elector is created
-		leaderKey:     redisClient.KB().GlobalLeaderKey(),
+	return newGlobalLeaderElector(logger, &redisLock{
+		client:        redisClient,
+		key:           redisClient.KB().GlobalLeaderKey(),
 		acquireScript: redis.NewScript(acquireLuaScript),
 		renewScript:   redis.NewScript(renewLuaScript),
 		releaseScript: redis.NewScript(releaseLuaScript),
+	}, instanceID, config)
+}
+
+// NewExclusiveGlobalLeaderElector is the elector of a process that has no
+// peers to elect against (standalone): the lock is held in the process, so
+// the first attempt wins it and nothing takes it away. The election loop,
+// callbacks and metrics are the same as over Redis.
+func NewExclusiveGlobalLeaderElector(logger logging.Logger, instanceID string, config GlobalLeaderElectorConfig) *GlobalLeaderElector {
+	return newGlobalLeaderElector(logger, &exclusiveLock{}, instanceID, config)
+}
+
+func newGlobalLeaderElector(logger logging.Logger, lock leaderLock, instanceID string, config GlobalLeaderElectorConfig) *GlobalLeaderElector {
+	return &GlobalLeaderElector{
+		logger:     logging.ForComponent(logger, logging.ComponentLeaderElector),
+		lock:       lock,
+		instanceID: instanceID,
+		config:     config,
+		metrics:    initMetrics(), // Lazy-load metrics only when elector is created
 	}
 }
 
@@ -158,10 +166,7 @@ func (e *GlobalLeaderElector) leaderLoop(ctx context.Context) {
 			if e.isLeader.Load() {
 				releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-				result, err := e.releaseScript.Run(releaseCtx, e.redisClient,
-					[]string{e.leaderKey},
-					e.instanceID,
-				).Int()
+				result, err := e.lock.release(releaseCtx, e.instanceID)
 
 				cancel() // Call directly to avoid a defer-in-loop antipattern
 
@@ -183,11 +188,7 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 
 	if wasLeader {
 		// We think we're a leader - try to renew
-		result, err := e.renewScript.Run(ctx, e.redisClient,
-			[]string{e.leaderKey},
-			e.instanceID,
-			int(e.config.LeaderTTL.Seconds()),
-		).Int()
+		result, err := e.lock.renew(ctx, e.instanceID, int(e.config.LeaderTTL.Seconds()))
 
 		if err != nil {
 			// Distinguish OOM errors from generic Redis errors for targeted alerting
@@ -224,11 +225,7 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 		}
 	} else {
 		// Not leader - try to acquire
-		result, err := e.acquireScript.Run(ctx, e.redisClient,
-			[]string{e.leaderKey},
-			e.instanceID,
-			int(e.config.LeaderTTL.Seconds()),
-		).Int()
+		result, err := e.lock.acquire(ctx, e.instanceID, int(e.config.LeaderTTL.Seconds()))
 
 		if err != nil {
 			e.consecutiveAcquireFailures++

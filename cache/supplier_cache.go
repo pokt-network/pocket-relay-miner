@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -269,7 +271,7 @@ func (s *SupplierState) IsActiveForService(serviceID string) bool {
 // across all instances.
 type SupplierCache struct {
 	logger logging.Logger
-	redis  *redisutil.Client
+	store  kv.Store
 
 	// ttl is nanoseconds (time.Duration), atomic so SetTTL can update it after
 	// construction without a lock on the hot SetSupplierState write path. A
@@ -306,7 +308,7 @@ type SupplierCacheConfig struct {
 // with Close() when no longer needed.
 func NewSupplierCache(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	config SupplierCacheConfig,
 ) *SupplierCache {
 	ttl := config.TTL
@@ -316,7 +318,7 @@ func NewSupplierCache(
 
 	c := &SupplierCache{
 		logger:     logging.ForComponent(logger, logging.ComponentQuerySupplier),
-		redis:      redisClient,
+		store:      store,
 		localCache: xsync.NewMap[string, supplierCacheL1Entry](),
 	}
 	c.ttl.Store(int64(ttl))
@@ -344,7 +346,7 @@ func (c *SupplierCache) SetTTL(ttl time.Duration) {
 
 // supplierKey returns the Redis key for a supplier's state.
 func (c *SupplierCache) supplierKey(operatorAddress string) string {
-	return c.redis.KB().SupplierStateKey(operatorAddress)
+	return c.store.KB().SupplierStateKey(operatorAddress)
 }
 
 // GetSupplierState retrieves a supplier's state from the cache using L1 → L2 fallback.
@@ -393,9 +395,9 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 
 	// L2: Check Redis cache
 	key := c.supplierKey(operatorAddress)
-	data, err := c.redis.Get(ctx, key).Bytes()
+	data, err := c.store.Get(ctx, key)
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, kv.ErrNotFound) {
 			// Supplier not in cache
 			cacheMisses.WithLabelValues(supplierCacheType, "l2_not_found").Inc()
 			cacheGetLatency.WithLabelValues(supplierCacheType, "l2_not_found").Observe(time.Since(start).Seconds())
@@ -501,7 +503,7 @@ func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierSta
 	// anymore, which is exactly the decommissioned-supplier case this TTL
 	// exists to bound (HIGH-1, review 2026-08-20). A TTL=0 write here is
 	// what let that entry freeze "still active" forever.
-	if err := c.redis.Set(ctx, key, data, time.Duration(c.ttl.Load())).Err(); err != nil {
+	if err := c.store.Set(ctx, key, data, time.Duration(c.ttl.Load())); err != nil {
 		return fmt.Errorf("failed to set supplier state: %w", err)
 	}
 
@@ -518,7 +520,7 @@ func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierSta
 	// scales with the miner count.
 	if !unchanged {
 		payload := fmt.Sprintf(`{"operator_address": "%s"}`, state.OperatorAddress)
-		if err := PublishInvalidation(ctx, c.redis, c.logger, supplierCacheType, payload); err != nil {
+		if err := PublishInvalidation(ctx, c.store, c.logger, supplierCacheType, payload); err != nil {
 			c.logger.Warn().
 				Err(err).
 				Str(logging.FieldSupplierOperator, state.OperatorAddress).
@@ -558,7 +560,7 @@ func (c *SupplierCache) supplierStateUnchanged(
 	key string,
 	next *SupplierState,
 ) bool {
-	raw, err := c.redis.Get(ctx, key).Bytes()
+	raw, err := c.store.Get(ctx, key)
 	if err != nil {
 		return false
 	}
@@ -623,13 +625,13 @@ func (c *SupplierCache) DeleteSupplierState(ctx context.Context, operatorAddress
 
 	// Remove from L2 (Redis)
 	key := c.supplierKey(operatorAddress)
-	if err := c.redis.Del(ctx, key).Err(); err != nil {
+	if err := c.store.Del(ctx, key); err != nil {
 		return fmt.Errorf("failed to delete supplier state: %w", err)
 	}
 
 	// Publish invalidation event to other instances
 	payload := fmt.Sprintf(`{"operator_address": "%s"}`, operatorAddress)
-	if err := PublishInvalidation(ctx, c.redis, c.logger, supplierCacheType, payload); err != nil {
+	if err := PublishInvalidation(ctx, c.store, c.logger, supplierCacheType, payload); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Str(logging.FieldSupplierOperator, operatorAddress).
@@ -648,17 +650,17 @@ func (c *SupplierCache) DeleteSupplierState(ctx context.Context, operatorAddress
 // GetAllSupplierStates returns all supplier states from the cache.
 // This is useful for debugging and monitoring.
 func (c *SupplierCache) GetAllSupplierStates(ctx context.Context) (map[string]*SupplierState, error) {
-	pattern := c.redis.KB().SupplierStatePattern()
-	keys, err := c.redis.Keys(ctx, pattern).Result()
+	pattern := c.store.KB().SupplierStatePattern()
+	keys, err := c.store.ScanPrefix(ctx, strings.TrimSuffix(pattern, "*"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to list supplier keys: %w", err)
 	}
 
 	states := make(map[string]*SupplierState)
 	for _, key := range keys {
-		data, err := c.redis.Get(ctx, key).Bytes()
+		data, err := c.store.Get(ctx, key)
 		if err != nil {
-			if err == redis.Nil {
+			if errors.Is(err, kv.ErrNotFound) {
 				continue
 			}
 			return nil, fmt.Errorf("failed to get supplier state for key %s: %w", key, err)
@@ -686,7 +688,7 @@ func (c *SupplierCache) Start(ctx context.Context) error {
 	// Subscribe to invalidation events
 	if err := SubscribeToInvalidations(
 		c.ctx,
-		c.redis,
+		c.store,
 		c.logger,
 		supplierCacheType,
 		c.handleInvalidation,
@@ -721,8 +723,8 @@ func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddres
 	// If no addresses provided, discover all suppliers in Redis
 	if len(knownSupplierAddresses) == 0 {
 		c.logger.Info().Msg("discovering all suppliers in Redis for warmup")
-		pattern := c.redis.KB().SupplierStatePattern()
-		keys, err := c.redis.Keys(ctx, pattern).Result()
+		pattern := c.store.KB().SupplierStatePattern()
+		keys, err := c.store.ScanPrefix(ctx, strings.TrimSuffix(pattern, "*"))
 		if err != nil {
 			return fmt.Errorf("failed to discover suppliers: %w", err)
 		}
@@ -733,7 +735,7 @@ func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddres
 		// that drifted from the key layout would leave L1 empty and send every
 		// relay to L2 -- degraded, silently.
 		for _, key := range keys {
-			if addr, ok := c.redis.KB().SupplierStateAddress(key); ok {
+			if addr, ok := c.store.KB().SupplierStateAddress(key); ok {
 				knownSupplierAddresses = append(knownSupplierAddresses, addr)
 			}
 		}
@@ -755,7 +757,7 @@ func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddres
 
 			// Load from Redis (L2) into local cache (L1)
 			key := c.supplierKey(addr)
-			data, err := c.redis.Get(ctx, key).Bytes()
+			data, err := c.store.Get(ctx, key)
 			if err != nil {
 				// Key doesn't exist in Redis, skip
 				return

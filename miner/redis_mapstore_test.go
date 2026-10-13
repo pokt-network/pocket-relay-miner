@@ -400,8 +400,7 @@ func (s *RedisSMSTTestSuite) TestRedisMapStore_OrphanBuffer_NonPipelineSetClears
 	// Step 3: simulate the live_root checkpoint. A non-empty liveRoot
 	// payload is written to a distinct key; only orphanBuffer controls
 	// which hash fields get HDEL'd.
-	liveKey := s.redisClient.KB().SMSTLiveRootKey(testMapStoreSupplier, "test-session-orphan-nonpipeline-set")
-	s.Require().NoError(store.FlushOrphansWithLiveRoot(s.ctx, liveKey, []byte("live-root-bytes"), time.Duration(0)))
+	s.Require().NoError(store.FlushOrphansWithLiveRoot(s.ctx, []byte("live-root-bytes"), time.Duration(0)))
 
 	// Step 4: the rewritten value must survive. If orphanBuffer was
 	// stale, the pipeline TxExec above would have issued an HDEL and

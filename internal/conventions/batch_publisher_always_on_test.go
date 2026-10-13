@@ -7,7 +7,7 @@ import (
 )
 
 // The relayer's mined-relay publisher is ALWAYS the batching one (Jorge,
-// 2026-09-12): only its interval is configurable. runHARelayer builds a whole
+// 2026-09-12): only its interval is configurable. serveRelayer builds a whole
 // process and has no test, so the construction is frozen by reading it -- the
 // same idiom as TestPublisherFlushIsDeferredAfterTheRedisClient.
 //

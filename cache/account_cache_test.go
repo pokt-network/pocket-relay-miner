@@ -8,11 +8,13 @@ import (
 	"time"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // frozenAccountQueryClient models the chain query layer for account pubkeys: it
@@ -49,7 +51,7 @@ func TestAccountCache_L1RefreshesAfterTTL(t *testing.T) {
 	pkA := pubKeyFromByte(0x11)
 	pkB := pubKeyFromByte(0x22)
 	fq := &frozenAccountQueryClient{pubKey: pkA}
-	ac := NewAccountCache(logging.NewLoggerFromConfig(logging.DefaultConfig()), client, fq)
+	ac := NewAccountCache(logging.NewLoggerFromConfig(logging.DefaultConfig()), kv.NewRedis(zerolog.Nop(), client), fq)
 
 	ctx := context.Background()
 	require.NoError(t, ac.Start(ctx))

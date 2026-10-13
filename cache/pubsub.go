@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
@@ -36,12 +38,12 @@ var subscribeReadyTimeout = 10 * time.Second
 //	})
 func SubscribeToInvalidations(
 	ctx context.Context,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	logger logging.Logger,
 	cacheType string,
 	handler func(ctx context.Context, payload string) error,
 ) error {
-	channel := redisClient.KB().EventChannel(cacheType, "invalidate")
+	channel := store.KB().EventChannel(cacheType, "invalidate")
 
 	logger.Info().
 		Str(logging.FieldCacheType, cacheType).
@@ -60,11 +62,11 @@ func SubscribeToInvalidations(
 			fmt.Sprintf("pubsub_%s", cacheType),
 			// connectFn: Test Redis connection
 			func(ctx context.Context) error {
-				return redisClient.Ping(ctx).Err()
+				return store.Ping(ctx)
 			},
 			// runFn: Subscribe and process messages until disconnect
 			func(ctx context.Context) error {
-				return runPubSubLoop(ctx, redisClient, logger, channel, cacheType, handler, signalReady)
+				return runPubSubLoop(ctx, store, logger, channel, cacheType, handler, signalReady)
 			},
 		)
 
@@ -92,20 +94,19 @@ func SubscribeToInvalidations(
 // Returns error to trigger reconnection via the reconnection loop.
 func runPubSubLoop(
 	ctx context.Context,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	logger logging.Logger,
 	channel string,
 	cacheType string,
 	handler func(ctx context.Context, payload string) error,
 	signalReady func(),
 ) error {
-	pubsub := redisClient.Subscribe(ctx, channel)
-	defer func() { _ = pubsub.Close() }()
-
-	// Verify subscription
-	if _, err := pubsub.Receive(ctx); err != nil {
+	// Returns once the subscription is active.
+	sub, err := store.Subscribe(ctx, channel)
+	if err != nil {
 		return fmt.Errorf("failed to subscribe to %s: %w", channel, err)
 	}
+	defer func() { _ = sub.Close() }()
 	signalReady()
 
 	logger.Info().
@@ -118,9 +119,9 @@ func runPubSubLoop(
 		case <-ctx.Done():
 			return ctx.Err()
 
-		case msg := <-pubsub.Channel():
-			// Check if msg is nil (a channel closed - Redis disconnected)
-			if msg == nil {
+		case msg, ok := <-sub.Messages():
+			// A closed channel is a lost subscription (Redis disconnected).
+			if !ok {
 				return fmt.Errorf("pub/sub channel closed")
 			}
 
@@ -151,14 +152,14 @@ func runPubSubLoop(
 //	err := PublishInvalidation(ctx, redisClient, logger, "application", payload)
 func PublishInvalidation(
 	ctx context.Context,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	logger logging.Logger,
 	cacheType string,
 	payload string,
 ) error {
-	channel := redisClient.KB().EventChannel(cacheType, "invalidate")
+	channel := store.KB().EventChannel(cacheType, "invalidate")
 
-	if err := redisClient.Publish(ctx, channel, payload).Err(); err != nil {
+	if err := store.Publish(ctx, channel, []byte(payload)); err != nil {
 		logger.Error().
 			Err(err).
 			Str(logging.FieldCacheType, cacheType).
@@ -173,4 +174,18 @@ func PublishInvalidation(
 		Msg("published invalidation event")
 
 	return nil
+}
+
+// deleteByPrefix deletes every L2 key under prefix. A key that fails is logged
+// and the rest are still deleted: InvalidateAll clears what it can.
+func deleteByPrefix(ctx context.Context, store kv.Store, logger logging.Logger, prefix string) {
+	keys, err := store.ScanPrefix(ctx, prefix)
+	if err != nil {
+		logger.Warn().Err(err).Str("prefix", prefix).Msg("failed to scan cache keys for invalidation")
+	}
+	for _, key := range keys {
+		if err := store.Del(ctx, key); err != nil {
+			logger.Warn().Err(err).Str("key", key).Msg("failed to delete cache key")
+		}
+	}
 }

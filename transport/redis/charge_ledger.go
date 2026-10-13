@@ -173,3 +173,16 @@ func (l *ChargeLedger) requeueLocked(c Charge) {
 	cp := c
 	l.pending[c.Key] = &cp
 }
+
+// TakeAll, Untake and Committed are the dispatch half of the ledger for a
+// publisher outside this package: take every queued charge for one write, put
+// back what was never written, report what was.
+
+// TakeAll moves every queued charge into the writing set and returns them.
+func (l *ChargeLedger) TakeAll() []Charge { return l.takeAll() }
+
+// Untake puts back a charge that was never written.
+func (l *ChargeLedger) Untake(c Charge) { l.untake(c) }
+
+// Committed reports a charge written, with the counter's new value.
+func (l *ChargeLedger) Committed(c Charge, consumed int64) { l.commit(c, consumed) }

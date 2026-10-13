@@ -6,9 +6,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -45,7 +47,7 @@ func newScopedTestMeter(
 
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		app,
 		nil,
 		&fakeSessionClient{numSuppliers: 1},

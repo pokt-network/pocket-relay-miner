@@ -9,6 +9,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -68,10 +69,10 @@ type ServiceFactorRegistryConfig struct {
 // It is created on the miner and publishes service factors to Redis
 // so that relayers can read them for relay metering.
 type ServiceFactorRegistry struct {
-	logger      logging.Logger
-	redisClient *redisutil.Client
-	keyBuilder  *redisutil.KeyBuilder
-	config      ServiceFactorRegistryConfig
+	logger     logging.Logger
+	store      kv.Store
+	keyBuilder *redisutil.KeyBuilder
+	config     ServiceFactorRegistryConfig
 
 	// Lifecycle. The republish loop hangs off a context this registry owns, NOT
 	// off the one Start receives: that context belongs to the leader elector and
@@ -88,15 +89,15 @@ type ServiceFactorRegistry struct {
 // NewServiceFactorRegistry creates a new service factor registry.
 func NewServiceFactorRegistry(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	keyBuilder *redisutil.KeyBuilder,
 	config ServiceFactorRegistryConfig,
 ) *ServiceFactorRegistry {
 	return &ServiceFactorRegistry{
-		logger:      logging.ForComponent(logger, logging.ComponentServiceFactorRegistry),
-		redisClient: redisClient,
-		keyBuilder:  keyBuilder,
-		config:      config,
+		logger:     logging.ForComponent(logger, logging.ComponentServiceFactorRegistry),
+		store:      store,
+		keyBuilder: keyBuilder,
+		config:     config,
 	}
 }
 
@@ -210,7 +211,7 @@ func (r *ServiceFactorRegistry) PublishServiceFactors(ctx context.Context) error
 		return fmt.Errorf("failed to marshal service factor manifest: %w", err)
 	}
 
-	pipe := r.redisClient.TxPipeline()
+	var entries []kv.Entry
 
 	// The per-key entries come first and are the DEPRECATED format: a relayer
 	// built before the manifest reads only these, so dropping them here would
@@ -223,7 +224,7 @@ func (r *ServiceFactorRegistry) PublishServiceFactors(ctx context.Context) error
 		if marshalErr != nil {
 			return fmt.Errorf("failed to marshal default service factor: %w", marshalErr)
 		}
-		pipe.Set(ctx, r.keyBuilder.ServiceFactorDefaultKey(), defaultJSON, 0)
+		entries = append(entries, kv.Entry{Key: r.keyBuilder.ServiceFactorDefaultKey(), Value: defaultJSON})
 	}
 	for serviceID, factor := range manifest.Overrides {
 		serviceJSON, marshalErr := json.Marshal(ServiceFactorData{
@@ -233,12 +234,12 @@ func (r *ServiceFactorRegistry) PublishServiceFactors(ctx context.Context) error
 		if marshalErr != nil {
 			return fmt.Errorf("failed to marshal service factor for %s: %w", serviceID, marshalErr)
 		}
-		pipe.Set(ctx, r.keyBuilder.ServiceFactorServiceKey(serviceID), serviceJSON, 0)
+		entries = append(entries, kv.Entry{Key: r.keyBuilder.ServiceFactorServiceKey(serviceID), Value: serviceJSON})
 	}
 
-	pipe.Set(ctx, r.keyBuilder.ServiceFactorManifestKey(), manifestJSON, 0)
+	entries = append(entries, kv.Entry{Key: r.keyBuilder.ServiceFactorManifestKey(), Value: manifestJSON})
 
-	if _, err = pipe.Exec(ctx); err != nil {
+	if err = r.store.SetAll(ctx, entries...); err != nil {
 		return fmt.Errorf("failed to publish service factor manifest: %w", err)
 	}
 
@@ -290,7 +291,7 @@ func (r *ServiceFactorRegistry) publishInvalidation(ctx context.Context, service
 	}
 	if err = cache.PublishInvalidation(
 		ctx,
-		r.redisClient,
+		r.store,
 		r.logger,
 		cache.ServiceFactorCacheType,
 		string(payloadBytes),

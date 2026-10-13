@@ -6,9 +6,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // TestPublishSupplierUpdateRejectsUnknownActions pins the default branch.
@@ -24,7 +26,7 @@ func TestPublishSupplierUpdateRejectsUnknownActions(t *testing.T) {
 	client, _ := newTestRedis(t)
 	registry := NewSupplierRegistry(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		client,
+		kv.NewRedis(zerolog.Nop(), client),
 		SupplierRegistryConfig{},
 	)
 
@@ -61,7 +63,7 @@ func TestPublishSupplierUpdateAcceptsTheRealActions(t *testing.T) {
 	client, _ := newTestRedis(t)
 	registry := NewSupplierRegistry(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		client,
+		kv.NewRedis(zerolog.Nop(), client),
 		SupplierRegistryConfig{},
 	)
 
@@ -86,7 +88,7 @@ func TestRegistryIndexMembershipIsTheContract(t *testing.T) {
 	client, _ := newTestRedis(t)
 	registry := NewSupplierRegistry(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		client,
+		kv.NewRedis(zerolog.Nop(), client),
 		SupplierRegistryConfig{},
 	)
 

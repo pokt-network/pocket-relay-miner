@@ -25,8 +25,13 @@ def load_config():
     # Validate configuration
     validate_config(merged)
 
-    # Validate port conflicts
-    validate_port_conflicts(merged)
+    # Validate port conflicts. Standalone mode forwards 1 relayer's and 1
+    # miner's ports, so that is what is checked.
+    if merged["relay_miner_mode"] == "standalone":
+        ports_view = deep_merge(merged, {"relayer": {"count": 1}, "miner": {"count": 1}})
+        validate_port_conflicts(ports_view)
+    else:
+        validate_port_conflicts(merged)
 
     return merged
 
@@ -68,9 +73,16 @@ def validate_config(config):
     if config["miner"]["count"] < 0:
         fail("miner.count must be >= 0")
 
-    # Validate Redis is enabled if any HA components exist
+    mode = config["relay_miner_mode"]
+    if mode not in ["ha", "standalone"]:
+        fail("relay_miner_mode must be 'ha' or 'standalone', got: {}".format(mode))
+
+    # Validate Redis is enabled if any HA components exist. Standalone mode
+    # runs 1 process whatever the counts say, and uses no Redis.
     total_instances = config["relayer"]["count"] + config["miner"]["count"]
-    if total_instances > 0 and not config["redis"]["enabled"]:
+    if mode == "standalone":
+        total_instances = 1
+    elif total_instances > 0 and not config["redis"]["enabled"]:
         fail("Redis must be enabled when using relayers or miners")
 
     # Validate validator is enabled if relayers/miners are enabled

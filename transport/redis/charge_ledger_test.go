@@ -330,16 +330,23 @@ func TestTheHeartbeatRunsOnItsOwnTickerWhateverTheBatchInterval(t *testing.T) {
 	client.AddHook(hook)
 	p := NewBatchingPublisher(zerolog.Nop(), client, testredis.Prefix(t), time.Hour)
 	t.Cleanup(func() { _ = p.Close() })
-	built := lastMark(p)
 
-	// The SECOND answered PING: the dispatcher runs one heartbeat at a time, so by
-	// then the first one has stored its mark.
-	for i := 0; i < 2; i++ {
+	answered := func(i int) {
+		t.Helper()
 		select {
 		case <-hook.answered:
 		case <-time.After(5 * heartbeatInterval):
-			t.Fatalf("PING %d did not come within five heartbeat intervals: the heartbeat is not on its own ticker", i+1)
+			t.Fatalf("PING %d did not come within five heartbeat intervals: the heartbeat is not on its own ticker", i)
 		}
 	}
+	// The hook signals a PING before the publisher stores its mark, so the mark
+	// read after PING n can be that of PING n-1. Read it after the first PING,
+	// zero or the first beat's, and wait for the THIRD: the dispatcher runs one
+	// heartbeat at a time, so the second beat, a ticker interval after the
+	// first, has stored its mark before the third is sent.
+	answered(1)
+	built := lastMark(p)
+	answered(2)
+	answered(3)
 	require.True(t, lastMark(p).After(built), "an answered heartbeat moves the mark admission reads")
 }

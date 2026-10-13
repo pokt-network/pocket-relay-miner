@@ -25,7 +25,7 @@ served and relays billed, and both were exact — it never touches the reload pa
 Nothing was broken in what the gate observes, so nothing went red, twice.
 
 The same shape, counted: **44 of the 45 error and loss metrics are read by no
-gate at all** — `upokt_lost_total`, `compute_units_lost_total`,
+gate at all** — `chain_upokt_lost_total`, `compute_units_lost_total`,
 `relays_lost_total`, `relays_failed_smst_total` among them. Only
 `ha_miner_relays_rejected_total` is asserted anywhere. A metric nothing reads is
 an observer that was built and never wired.

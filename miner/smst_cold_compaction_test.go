@@ -547,7 +547,7 @@ func TestColdCompaction_AProofThatLosesTheNodesHashMidWalkIsProvedFromTheBlob(t 
 	root := claimColdTree(t, ctx, mgr, sessionID, coldRelays(12, 300))
 
 	// The blob a compaction stores, while the hash is still there.
-	leaves, _, err := mgr.readColdLeaves(ctx, kb.SMSTNodesKey(supplier, sessionID))
+	leaves, _, err := mgr.readColdLeaves(ctx, sessionID)
 	require.NoError(t, err)
 	blob, err := encodeColdLeaves(root, leaves)
 	require.NoError(t, err)

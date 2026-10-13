@@ -16,8 +16,10 @@ import (
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
@@ -53,7 +55,7 @@ func newOwnerTestPipelineWithCharges(t *testing.T) (*RelayPipeline, *redisutil.C
 	app := &fakeAppClient{addr: ownerTestAppAddr}
 	app.stakeUpokt.Store(1_000_000)
 	meter := NewRelayMeter(
-		logger, redisClient, app, nil,
+		logger, kv.NewRedis(zerolog.Nop(), redisClient), app, nil,
 		&fakeSessionClient{numSuppliers: 1}, nil,
 		&fakeSharedParamCache{params: &sharedtypes.Params{
 			NumBlocksPerSession:            10,

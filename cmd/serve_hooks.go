@@ -1,0 +1,83 @@
+package cmd
+
+import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/keys"
+	"github.com/pokt-network/pocket-relay-miner/leader"
+	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/miner"
+	"github.com/pokt-network/pocket-relay-miner/observability"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
+	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
+)
+
+// sideHooks is what serveRelayer and serveMiner take from the process that runs
+// them: the relayer and miner subcommands each run one side, standalone runs
+// both, and these are the only places the two differ.
+type sideHooks struct {
+	// openKeys returns the supplier key manager and what to call when the side
+	// is done with it. A side that owns its manager closes it there; a side that
+	// shares one does nothing, and its owner closes it once both sides are done.
+	openKeys func(ctx context.Context, logger logging.Logger) (*keys.MultiProviderKeyManager, func(), error)
+
+	// started is called once the side is serving, and returns the channel whose
+	// receive tells it to shut down.
+	started func() <-chan os.Signal
+
+	// setReadiness, when not nil, installs the side's readiness check on the
+	// process's observability server.
+	setReadiness func(observability.ReadinessCheck)
+
+	// openStore, when not nil, opens the side's store: what its caches, meter
+	// and registries keep their state in, and whether that store can take
+	// writes. component labels the health metrics and gate is the side's
+	// threshold. nil means Redis (high-availability mode).
+	openStore func(ctx context.Context, logger logging.Logger, component string, gate redistransport.StoreGate) (sideStore, func(), error)
+
+	// openPublisher builds the relayer's mined-relay publisher.
+	openPublisher func(ctx context.Context, logger logging.Logger, d relayPublisherDeps) (relayPublisher, func(), error)
+
+	// minerBackend, when not nil, keeps the miner's relay queue, sessions and
+	// dedup marks; nil means Redis.
+	minerBackend func(miner.SupplierManagerConfig) miner.StoreBackend
+
+	// newElector, when not nil, builds the miner's leader elector; nil means
+	// the Redis lock every replica competes for.
+	newElector func(logger logging.Logger, instanceID string, config leader.GlobalLeaderElectorConfig) *leader.GlobalLeaderElector
+}
+
+// openOwnKeys opens a key manager the side owns: closed when the side is done.
+func openOwnKeys(cfg config.KeysConfig) func(context.Context, logging.Logger) (*keys.MultiProviderKeyManager, func(), error) {
+	return func(ctx context.Context, logger logging.Logger) (*keys.MultiProviderKeyManager, func(), error) {
+		keyManager, err := keys.OpenManager(ctx, logger, cfg.KeysFile, keyringSettings(cfg.Keyring), cfg.HotReloadEnabled)
+		if err != nil {
+			return nil, nil, err
+		}
+		return keyManager, func() { _ = keyManager.Close() }, nil
+	}
+}
+
+// waitForSignal is the started hook of a process that runs one side: it stops
+// on SIGINT or SIGTERM, registered once the side is serving, as before.
+func waitForSignal() <-chan os.Signal {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	return sigCh
+}
+
+// sideStore is where a side keeps its state, and whether that store can take
+// writes.
+type sideStore struct {
+	kv     kv.Store
+	health *redistransport.StoreHealth
+	// redisClient and redisPools are the side's Redis client and its pool
+	// collector in high-availability mode; nil in standalone mode, which keeps
+	// nothing in Redis.
+	redisClient *redistransport.Client
+	redisPools  *redistransport.PoolCollector
+}

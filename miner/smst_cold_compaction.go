@@ -271,9 +271,9 @@ func (m *RedisSMSTManager) rebuildColdTree(sessionID string, leaves []coldLeaf) 
 // compression landed this function ran its own HSCAN, and a frame would have
 // made `node[0] != 0` skip every leaf IN SILENCE -- no crash, no log, an empty
 // rebuild and a root mismatch that is not retriable (item 398).
-func (m *RedisSMSTManager) readColdLeaves(ctx context.Context, hashKey string) (leaves []coldLeaf, hashBytes int, err error) {
+func (m *RedisSMSTManager) readColdLeaves(ctx context.Context, sessionID string) (leaves []coldLeaf, hashBytes int, err error) {
 	seen := make(map[string]struct{})
-	store := newRedisMapStoreForHash(ctx, m.redisClient, hashKey)
+	store := m.store.nodes(ctx, sessionID)
 	rangeErr := store.RangeNodes(ctx, func(field string, node []byte, storedBytes int) error {
 		if _, dup := seen[field]; dup {
 			return nil
@@ -316,28 +316,24 @@ func (m *RedisSMSTManager) CompactColdTree(ctx context.Context, sessionID string
 		observability.SMSTColdDuration.WithLabelValues(supplier, "compact").Observe(time.Since(start).Seconds())
 	}()
 
-	kb := m.redisClient.KB()
-	nodesKey := kb.SMSTNodesKey(supplier, sessionID)
-	leavesKey := kb.SMSTLeavesKey(supplier, sessionID)
-
-	claimedRoot, err := m.redisClient.Get(ctx, kb.SMSTRootKey(supplier, sessionID)).Bytes()
-	if errors.Is(err, redis.Nil) || (err == nil && !isValidSMSTRoot(claimedRoot)) {
+	claimedRoot, err := m.store.get(ctx, smstClaimedRoot, sessionID)
+	if errors.Is(err, errSMSTRecordAbsent) || (err == nil && !isValidSMSTRoot(claimedRoot)) {
 		return coldNotReady, fmt.Errorf("session %s: no valid claimed_root in Redis", sessionID)
 	}
 	if err != nil {
 		return coldReadFailed, fmt.Errorf("read claimed_root: %w", err)
 	}
 
-	present, err := m.redisClient.Exists(ctx, nodesKey).Result()
+	present, err := m.store.exists(ctx, smstNodes, sessionID)
 	if err != nil {
 		return coldReadFailed, fmt.Errorf("check nodes hash: %w", err)
 	}
-	if present == 0 {
-		blobs, existsErr := m.redisClient.Exists(ctx, leavesKey).Result()
+	if !present {
+		blobs, existsErr := m.store.exists(ctx, smstLeaves, sessionID)
 		if existsErr != nil {
 			return coldReadFailed, fmt.Errorf("check leaves blob: %w", existsErr)
 		}
-		if blobs == 1 {
+		if blobs {
 			return coldAlreadyCompacted, nil
 		}
 		return coldNoTree, nil
@@ -352,7 +348,7 @@ func (m *RedisSMSTManager) CompactColdTree(ctx context.Context, sessionID string
 	}
 	defer release()
 
-	leaves, hashBytes, err := m.readColdLeaves(ctx, nodesKey)
+	leaves, hashBytes, err := m.readColdLeaves(ctx, sessionID)
 	if err != nil {
 		return coldReadFailed, fmt.Errorf("read leaves: %w", err)
 	}
@@ -362,17 +358,17 @@ func (m *RedisSMSTManager) CompactColdTree(ctx context.Context, sessionID string
 	}
 	// SET is refused under maxmemory; nothing has been deleted yet, so the
 	// hash stays whole and a later attempt starts over.
-	if err := m.redisClient.Set(ctx, leavesKey, blob, m.config.CacheTTL).Err(); err != nil {
+	if err := m.store.set(ctx, smstLeaves, sessionID, blob, m.config.CacheTTL); err != nil {
 		return coldSetFailed, fmt.Errorf("store leaves blob: %w", err)
 	}
 
 	// Verify what Redis holds, not the bytes in hand.
-	stored, err := m.redisClient.Get(ctx, leavesKey).Bytes()
+	stored, err := m.store.get(ctx, smstLeaves, sessionID)
 	if err != nil {
 		return coldReadFailed, fmt.Errorf("read back leaves blob: %w", err)
 	}
 	if verifyErr := m.verifyColdBlob(sessionID, stored, claimedRoot); verifyErr != nil {
-		if delErr := m.redisClient.Unlink(ctx, leavesKey).Err(); delErr != nil {
+		if _, delErr := m.store.del(ctx, sessionID, smstLeaves); delErr != nil {
 			verifyErr = errors.Join(verifyErr, fmt.Errorf("unlink mismatched blob: %w", delErr))
 		}
 		m.logger.Warn().
@@ -407,11 +403,11 @@ func (m *RedisSMSTManager) CompactColdTree(ctx context.Context, sessionID string
 	// 8 with maxmemory reached, a SET inside MULTI is refused when it is queued
 	// ("OOM command not allowed"), EXEC answers EXECABORT, and the hash is
 	// untouched.
-	deleted, err := unlinkNodesIfBlobScript.Run(ctx, m.redisClient, []string{nodesKey, leavesKey}, stored).Int64()
+	deleted, err := m.store.deleteNodesIfLeaves(ctx, sessionID, stored)
 	if err != nil {
 		return coldDeleteFailed, fmt.Errorf("unlink nodes hash: %w", err)
 	}
-	if deleted == 0 {
+	if !deleted {
 		m.logger.Warn().
 			Str(logging.FieldSessionID, sessionID).
 			Msg("the leaves blob changed while the claimed SMST was being compacted; keeping the nodes hash")
@@ -514,14 +510,11 @@ return 1
 // coldTreeCompacted reports whether the session's tree is stored as a leaves
 // blob only: the blob present and the nodes hash absent.
 func (m *RedisSMSTManager) coldTreeCompacted(ctx context.Context, sessionID string) (bool, error) {
-	kb := m.redisClient.KB()
-	pipe := m.redisClient.Pipeline()
-	nodes := pipe.Exists(ctx, kb.SMSTNodesKey(m.config.SupplierAddress, sessionID))
-	blob := pipe.Exists(ctx, kb.SMSTLeavesKey(m.config.SupplierAddress, sessionID))
-	if _, err := pipe.Exec(ctx); err != nil {
+	compacted, err := m.store.compacted(ctx, sessionID)
+	if err != nil {
 		return false, fmt.Errorf("check compacted SMST: %w", err)
 	}
-	return blob.Val() == 1 && nodes.Val() == 0, nil
+	return compacted, nil
 }
 
 // proveClosestFromLeaves rebuilds the claimed tree from its leaves blob in
@@ -541,8 +534,8 @@ func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID
 	// loaded tells the admission this tree is in memory; set once admitted.
 	loaded := func() {}
 	rebuildAndProve := func() error {
-		blob, err := m.redisClient.Get(ctx, m.redisClient.KB().SMSTLeavesKey(supplier, sessionID)).Bytes()
-		if errors.Is(err, redis.Nil) {
+		blob, err := m.store.get(ctx, smstLeaves, sessionID)
+		if errors.Is(err, errSMSTRecordAbsent) {
 			result = "missing"
 			return fmt.Errorf("session %s: nodes hash and leaves blob are both absent", sessionID)
 		}
@@ -618,8 +611,7 @@ func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID
 // smaller frame is too small to matter. A missing blob estimates zero, and the
 // rebuild reports it.
 func (m *RedisSMSTManager) coldRebuildEstimate(ctx context.Context, sessionID string) (uint64, error) {
-	head, err := m.redisClient.GetRange(ctx, m.redisClient.KB().SMSTLeavesKey(m.config.SupplierAddress, sessionID),
-		0, coldLeavesHeaderLen+zstd.HeaderMaxSize-1).Bytes()
+	head, err := m.store.head(ctx, smstLeaves, sessionID, coldLeavesHeaderLen+zstd.HeaderMaxSize)
 	if err != nil {
 		return 0, fmt.Errorf("read leaves blob header: %w", err)
 	}

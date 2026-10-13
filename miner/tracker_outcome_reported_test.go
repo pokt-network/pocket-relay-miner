@@ -109,7 +109,7 @@ func TestRecordOutcome_TrackerFailureIsReportedOnTheProofSideToo(t *testing.T) {
 	err := m.inclusionReconciler.proofPhase.recordOutcome(
 		context.Background(), rebroadcastEntry{TxHash: "hash-1", OrigTxHash: "hash-1"},
 		"supplier-1", 100, "session-1", inclusionMissing, 0)
-	require.NoError(t, err, "recordProofOutcome has no error path at all; the log is the ONLY record")
+	require.NoError(t, err, "recordProofOutcome errors only on a found proof it could not record; the log is the ONLY record")
 
 	require.True(t, strings.Contains(buf.String(), "proof on-chain outcome observed but not recorded"),
 		"the proof side must report its own tracker failure, not rely on the claim side being tested; got: %s", buf.String())

@@ -282,13 +282,32 @@ func (c *StreamsConsumer) operable() bool {
 // miner does with a read relay is a write, so reading while full only moves
 // relays from the stream into a PEL they cannot leave.
 func (c *StreamsConsumer) waitOperable(ctx context.Context) error {
+	return WaitOperable(ctx, c.health, c.pause)
+}
+
+// OperableSignal is a store gate: whether it admits work, and a channel closed
+// at its next change. *StoreHealth is one.
+type OperableSignal interface {
+	Operable() bool
+	Changed() <-chan struct{}
+}
+
+// WaitOperable returns once health admits work and pause holds nothing, or
+// with ctx's error. A nil health or pause holds nothing. Every relay consumer
+// waits here before it reads.
+func WaitOperable(ctx context.Context, health OperableSignal, pause IngestionPause) error {
 	for {
-		changed := c.health.Changed()
-		var pauseChanged <-chan struct{}
-		if c.pause != nil {
-			pauseChanged = c.pause.PauseChanged()
+		var changed, pauseChanged <-chan struct{}
+		operable := true
+		if health != nil {
+			changed = health.Changed()
+			operable = health.Operable()
 		}
-		if c.operable() {
+		if pause != nil {
+			pauseChanged = pause.PauseChanged()
+			operable = operable && !pause.Paused()
+		}
+		if operable {
 			return nil
 		}
 		select {

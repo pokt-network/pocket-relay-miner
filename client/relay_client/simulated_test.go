@@ -16,11 +16,13 @@ import (
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/relayer"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -121,7 +123,7 @@ func newSimVerifierFixture(t *testing.T, keys simTestKeys, simKeyID string, cloc
 
 	verifier, err := relayer.NewSimulationVerifier(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		cfg, redisClient, signer,
+		cfg, kv.NewRedis(zerolog.Nop(), redisClient), signer,
 		map[string]struct{}{simCLITestServiceID: {}},
 		clock,
 	)

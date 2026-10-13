@@ -31,6 +31,9 @@ import (
 // What is wrong is SUBTRACTING from one. So, to add an entry: say in one line
 // why the instant is never subtracted from -- and if it is, keep the instant.
 var instantFromIntAllowlist = map[string]int{
+	// A stored key's expiry, read back from disk and only compared with now
+	// (After), never subtracted from: no monotonic reading survives the disk.
+	"storage/kv/pebble.go": 1,
 	// Printing a stored submission timestamp to the operator's terminal.
 	"cmd/redis/submissions.go": 2,
 	// Formatting a supplier state's LastUpdated for display.

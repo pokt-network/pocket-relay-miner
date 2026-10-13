@@ -312,6 +312,15 @@ func proofPhaseVerdict(state query.SessionProofState, _ bool) inclusionVerdict {
 type reconcilePhase struct {
 	phase             RebroadcastPhase
 	windowCloseHeight func(p *sharedtypes.Params, sessionEnd int64) int64
+	// pollRetryUntil is the last height at which an on-chain query that FAILED
+	// after the window closed is asked again next block instead of recorded as
+	// poll_error and cleared. Nil means never. The claim phase sets it: a
+	// claim stays on chain until the proof window closes (poktroll settles and
+	// removes it in the block after), and one found while its proof can still
+	// go out is a claim saved from a slash. The proof phase leaves it nil: a
+	// read after its window closes sees the claim already settled away and
+	// could not tell a validated proof from a missing one.
+	pollRetryUntil func(p *sharedtypes.Params, sessionEnd int64) int64
 	// verdict interprets one session's on-chain state FOR THIS PHASE. present is
 	// false when the supplier has no claim for that session at all, which the
 	// state alone cannot express -- the zero state is Unknown, and "absent" and
@@ -658,6 +667,15 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			}
 			return
 		}
+		// Window closed and the chain still answerable: keep every entry and
+		// ask again next block. Nothing is resent (canRebroadcast refuses past
+		// the close); a later answer goes through the loop below as usual.
+		if rp.pollRetryUntil != nil && height <= rp.pollRetryUntil(params, g.SessionEnd) {
+			r.logger.Warn().Err(qErr).Str("phase", string(rp.phase)).Str("supplier", g.Supplier).
+				Int64("height", height).Int64("window_close", windowClose).
+				Msg("inclusion reconcile: on-chain query failed with window closed; keeping pending entries to ask again next block")
+			return
+		}
 		// Window closed and we still can't confirm — record poll_error so the
 		// outcome is not silently lost, then clear.
 		for sessionID, raw := range pending {
@@ -671,14 +689,14 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			}
 			// The discard is safe by STRUCTURE, not by luck, and there is no test holding
 			// it -- so this says what it rests on. recordOutcome returns a non-nil error
-			// only from reactivateClaimedSession, which sits inside `if outcome ==
-			// inclusionFound` in recordClaimOutcome; recordProofOutcome has no error path at
-			// all. This call passes inclusionPollErr, so the value is invariantly nil. The one
-			// caller that DOES pass inclusionFound checks it, keeps the entry and retries.
+			// only from inside its `if outcome == inclusionFound` branch, in both
+			// recordClaimOutcome (reactivateClaimedSession) and recordProofOutcome
+			// (markProvedSession). This call passes inclusionPollErr, so the value is
+			// invariantly nil. The one caller that DOES pass inclusionFound checks it,
+			// keeps the entry and retries.
 			//
-			// Three edits break that, and none of them would fail a test: moving the
-			// `return err` out of the inclusionFound branch, giving recordProofOutcome an
-			// error path (item 37 would), or a new caller passing inclusionFound here.
+			// Two edits break that, and neither would fail a test: moving a `return err`
+			// out of an inclusionFound branch, or a new caller passing inclusionFound here.
 			_ = rp.recordOutcome(ctx, e, g.Supplier, g.SessionEnd, sessionID, inclusionPollErr, 0) //nolint:errcheck // invariantly nil here; see above
 			r.clear(ctx, rp.phase, g, sessionID, e)
 		}
@@ -809,14 +827,14 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			}
 			// The discard is safe by STRUCTURE, not by luck, and there is no test holding
 			// it -- so this says what it rests on. recordOutcome returns a non-nil error
-			// only from reactivateClaimedSession, which sits inside `if outcome ==
-			// inclusionFound` in recordClaimOutcome; recordProofOutcome has no error path at
-			// all. This call passes inclusionMissing, so the value is invariantly nil. The one
-			// caller that DOES pass inclusionFound checks it, keeps the entry and retries.
+			// only from inside its `if outcome == inclusionFound` branch, in both
+			// recordClaimOutcome (reactivateClaimedSession) and recordProofOutcome
+			// (markProvedSession). This call passes inclusionMissing, so the value is
+			// invariantly nil. The one caller that DOES pass inclusionFound checks it,
+			// keeps the entry and retries.
 			//
-			// Three edits break that, and none of them would fail a test: moving the
-			// `return err` out of the inclusionFound branch, giving recordProofOutcome an
-			// error path (item 37 would), or a new caller passing inclusionFound here.
+			// Two edits break that, and neither would fail a test: moving a `return err`
+			// out of an inclusionFound branch, or a new caller passing inclusionFound here.
 			_ = rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionMissing, 0) //nolint:errcheck // invariantly nil here; see above
 			r.clear(ctx, rp.phase, g, sessionID, entry)
 			continue

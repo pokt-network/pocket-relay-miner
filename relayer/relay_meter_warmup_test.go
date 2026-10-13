@@ -199,12 +199,22 @@ func TestAPairWithNothingChargedYetIsWarmedAtZero(t *testing.T) {
 
 var errPipelineLost = errors.New("pipeline lost")
 
-// failPipelines fails every pipeline while single commands still reach Redis,
-// which is how a store lost between listing the pairs and reading them looks.
+// failPipelines fails every pipeline and every MGET while the other single
+// commands still reach Redis, which is how a store lost between listing the
+// pairs and reading them looks: the listing is one SMEMBERS, the reads are one
+// MGET per round.
 type failPipelines struct{}
 
-func (failPipelines) DialHook(next goredis.DialHook) goredis.DialHook          { return next }
-func (failPipelines) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook { return next }
+func (failPipelines) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+func (failPipelines) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error {
+		if cmd.Name() == "mget" {
+			cmd.SetErr(errPipelineLost)
+			return errPipelineLost
+		}
+		return next(ctx, cmd)
+	}
+}
 func (failPipelines) ProcessPipelineHook(goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
 	return func(context.Context, []goredis.Cmder) error { return errPipelineLost }
 }

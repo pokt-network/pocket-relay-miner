@@ -101,7 +101,10 @@ func TestReactivateClaimed_AcceptsOnlyStatesBehindClaimed(t *testing.T) {
 
 			flipped, err := store.ReactivateClaimed(ctx, sessionID, reactivationTestRoot("guard"), "TXHASH")
 			require.NoError(t, err)
-			require.Equal(t, tt.wantFlip, flipped, "flip decision")
+			require.Equal(t, tt.wantFlip, flipped.From != "", "flip decision")
+			if tt.wantFlip {
+				require.Equal(t, tt.state, flipped.From, "the flip reports the state it came from")
+			}
 
 			got, err := store.Get(ctx, sessionID)
 			require.NoError(t, err)
@@ -135,7 +138,7 @@ func TestReactivateClaimed_WritesClaimFieldsWithTheState(t *testing.T) {
 
 	flipped, err := store.ReactivateClaimed(ctx, sessionID, root, "TX-REBROADCAST")
 	require.NoError(t, err)
-	require.True(t, flipped)
+	require.Equal(t, SessionStateClaimTxError, flipped.From, "the flip reports the state it came from")
 
 	got, err := store.Get(ctx, sessionID)
 	require.NoError(t, err)
@@ -321,7 +324,7 @@ func TestReactivateClaimed_ConcurrentObserversProduceExactlyOneFlip(t *testing.T
 			defer wg.Done()
 			<-start
 			flipped, err := store.ReactivateClaimed(ctx, sessionID, root, "TX-RACE")
-			if err == nil && flipped {
+			if err == nil && flipped.From != "" {
 				flips.Add(1)
 			}
 		}()

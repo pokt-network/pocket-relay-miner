@@ -19,7 +19,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // Simulation admission sentinel errors. Each distinct rejection reason has its
@@ -176,7 +176,7 @@ type simIdentity struct {
 // pinned-ring signature). It never touches the shared data path.
 type SimulationVerifier struct {
 	logger     logging.Logger
-	redis      *redisutil.Client
+	store      kv.Store
 	signer     *ResponseSigner
 	serviceIDs map[string]struct{} // configured services; nil => skip existence check
 	windowSecs int
@@ -193,7 +193,7 @@ type SimulationVerifier struct {
 func NewSimulationVerifier(
 	logger logging.Logger,
 	cfg *SimulationConfig,
-	redis *redisutil.Client,
+	store kv.Store,
 	signer *ResponseSigner,
 	serviceIDs map[string]struct{},
 	clock func() time.Time,
@@ -212,7 +212,7 @@ func NewSimulationVerifier(
 
 	v := &SimulationVerifier{
 		logger:     logging.ForComponent(logger, "simulation_verifier"),
-		redis:      redis,
+		store:      store,
 		signer:     signer,
 		serviceIDs: serviceIDs,
 		windowSecs: window,
@@ -422,7 +422,7 @@ func (v *SimulationVerifier) Verify(ctx context.Context, keyID string, rr *servi
 // must not silently allow replays.
 func (v *SimulationVerifier) checkReplay(ctx context.Context, signature []byte) error {
 	sum := sha256.Sum256(signature)
-	key := v.redis.KB().SimulationReplayKey(hex.EncodeToString(sum[:]))
+	key := v.store.KB().SimulationReplayKey(hex.EncodeToString(sum[:]))
 	// TTL covers the FULL freshness lifetime, not just one window. The freshness
 	// check is two-sided (|now - ts| < window), so a future-dated request (a
 	// client clock ahead by up to `window`) stays fresh until ts + window =
@@ -430,7 +430,7 @@ func (v *SimulationVerifier) checkReplay(ctx context.Context, signature []byte) 
 	// entry while the request is still admissible, reopening a replay gap under
 	// clock skew. 2*window closes it.
 	ttl := 2 * time.Duration(v.windowSecs) * time.Second
-	set, err := v.redis.SetNX(ctx, key, "1", ttl).Result()
+	set, err := v.store.SetNX(ctx, key, []byte("1"), ttl)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSimDedupUnavailable, err)
 	}

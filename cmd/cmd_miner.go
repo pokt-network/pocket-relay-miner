@@ -3,21 +3,18 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 
 	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
-	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -182,9 +179,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	}
 	if len(unknownConfigKeys) > 0 {
 		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
-			return fmt.Errorf(
-				"--strict-config: refusing to start, %d key(s) this miner does not understand (listed above)",
-				len(unknownConfigKeys))
+			return strictConfigError("this miner", unknownConfigKeys)
 		}
 	}
 
@@ -229,6 +224,22 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		logger.Info().Msg("runtime metrics collector started")
 	}
 
+	var setReadiness func(observability.ReadinessCheck)
+	if obsServer != nil {
+		setReadiness = obsServer.SetReadinessCheck
+	}
+	return serveMiner(ctx, logger, config, sideHooks{
+		openKeys:     openOwnKeys(config.Keys),
+		started:      waitForSignal,
+		setReadiness: setReadiness,
+	})
+}
+
+// openMinerRedisStore is the miner's store in high-availability mode: its
+// Redis client, the kv store over it, the health of that Redis, and the Redis
+// memory metrics and monitor. The returned func closes the monitor and the
+// client.
+func openMinerRedisStore(ctx context.Context, logger logging.Logger, config *miner.Config) (sideStore, func(), error) {
 	// Create a wrapped Redis client with KeyBuilder for namespace-aware key construction
 	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
 		URL:                    config.Redis.URL,
@@ -239,16 +250,13 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Namespace:              config.Redis.Namespace,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create Redis client: %w", err)
+		return sideStore{}, nil, fmt.Errorf("failed to create Redis client: %w", err)
 	}
-	defer func() {
-		// closeErr, NOT err: runHAMiner has a NAMED result, so assigning to
-		// err here overwrites whatever the function returned — a nil Close
-		// would mask the leader-controller failure below and exit 0.
+	closeClient := func() {
 		if closeErr := redisClient.Close(); closeErr != nil {
 			logger.Error().Err(closeErr).Msg("failed to close Redis client")
 		}
-	}()
+	}
 	logger.Info().
 		Str("redis_url", config.Redis.URL).
 		Str("consumer_name", config.Redis.ConsumerName).
@@ -274,7 +282,8 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// A Redis with no memory limit, or one that evicts, is refused here: the
 	// miner would serve relays it cannot claim, and find out at the settlement.
 	if err := storeHealth.Start(ctx); err != nil {
-		return fmt.Errorf("redis is not configured for this miner: %w", err)
+		closeClient()
+		return sideStore{}, nil, fmt.Errorf("redis is not configured for this miner: %w", err)
 	}
 	miner.RecordStoreMemoryOnClose(ctx, logger, redisClient, storeHealth)
 
@@ -282,34 +291,62 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	redisPools.Add("shared", redisClient)
 	observability.SharedRegistry.MustRegister(redisPools)
 
-	// Set readiness check to verify Redis connectivity via PING
-	if obsServer != nil {
-		obsServer.SetReadinessCheck(func(ctx context.Context) error {
-			return redisClient.Ping(ctx).Err()
-		})
-	}
-
 	// Start Redis health monitor (runs on ALL replicas for OOM visibility)
 	redisHealthMonitor := leader.NewRedisHealthMonitor(logger, redisClient)
-	if err = redisHealthMonitor.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start Redis health monitor: %w", err)
+	if err := redisHealthMonitor.Start(ctx); err != nil {
+		closeClient()
+		return sideStore{}, nil, fmt.Errorf("failed to start Redis health monitor: %w", err)
 	}
-	defer func() { _ = redisHealthMonitor.Close() }()
+
+	closeStore := func() {
+		_ = redisHealthMonitor.Close()
+		closeClient()
+	}
+	return sideStore{kv: kv.NewRedis(logger, redisClient), health: storeHealth, redisClient: redisClient, redisPools: redisPools}, closeStore, nil
+}
+
+// serveMiner builds the miner's components on a running process, serves until
+// hooks.started's channel delivers or the leader controller fails, and shuts
+// them down in the reverse order it built them (its defers). The caller owns
+// config, logger, memory limit and observability.
+//
+// err is a NAMED result, which is what the comments below about closeErr refer
+// to: assigning a Close error to it would overwrite what this returns.
+func serveMiner(parent context.Context, logger logging.Logger, config *miner.Config, hooks sideHooks) (err error) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
+	// Where the miner keeps its state, and whether that store can take writes:
+	// Redis (high-availability mode), or what the process hands it.
+	openStore := hooks.openStore
+	if openStore == nil {
+		openStore = func(ctx context.Context, logger logging.Logger, _ string, _ redistransport.StoreGate) (sideStore, func(), error) {
+			return openMinerRedisStore(ctx, logger, config)
+		}
+	}
+	st, closeStore, err := openStore(ctx, logger, "miner", redistransport.StoreGateIngestion)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+	storeHealth, redisClient := st.health, st.redisClient
+
+	// Readiness: the store answers.
+	if hooks.setReadiness != nil {
+		hooks.setReadiness(func(ctx context.Context) error {
+			return st.kv.Ping(ctx)
+		})
+	}
 
 	// One shared sequence for both binaries: build the providers the config
 	// names, put a key manager over them, load once, arm the watch and the
 	// reload timer, and refuse to continue with no keys. See keys.OpenManager
 	// for why that lives there and not here.
-	keyManager, err := keys.OpenManager(
-		ctx, logger,
-		config.Keys.KeysFile,
-		keyringSettings(config.Keys.Keyring),
-		config.Keys.HotReloadEnabled,
-	)
+	keyManager, releaseKeys, err := hooks.openKeys(ctx, logger)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = keyManager.Close() }()
+	defer releaseKeys()
 
 	logger.Info().
 		Int("count", len(keyManager.ListSuppliers())).
@@ -346,12 +383,12 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 			Msg("WARNING: heartbeat_rate is more than half of leader_ttl - risk of lock expiration before renewal! Recommended: heartbeat_rate <= leader_ttl/3")
 	}
 
-	globalLeader := leader.NewGlobalLeaderElectorWithConfig(
-		logger,
-		redisClient,
-		instanceID,
-		leaderConfig,
-	)
+	var globalLeader *leader.GlobalLeaderElector
+	if hooks.newElector != nil {
+		globalLeader = hooks.newElector(logger, instanceID, leaderConfig)
+	} else {
+		globalLeader = leader.NewGlobalLeaderElectorWithConfig(logger, redisClient, instanceID, leaderConfig)
+	}
 	// NOT started yet: the election loop must not be able to fire OnElected
 	// before registerLeaderCallbacks has wired it. See where Start now lives.
 	// Use dynamic logger that evaluates replica status at log time
@@ -368,8 +405,10 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// flusher — and their claims will expire once. The migration is a no-op
 	// on clusters that have never run the legacy code, and idempotent on
 	// re-runs (all keys already in the new schema are skipped).
-	if _, migrateErr := miner.MigrateLegacySMSTKeys(ctx, logger, redisClient); migrateErr != nil {
-		logger.Warn().Err(migrateErr).Msg("legacy SMST migration encountered errors (continuing startup)")
+	if redisClient != nil { // standalone mode keeps no legacy Redis keys
+		if _, migrateErr := miner.MigrateLegacySMSTKeys(ctx, logger, redisClient); migrateErr != nil {
+			logger.Warn().Err(migrateErr).Msg("legacy SMST migration encountered errors (continuing startup)")
+		}
 	}
 
 	// Start SupplierWorker for ALL miners
@@ -379,6 +418,8 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	supplierWorker := miner.NewSupplierWorker(miner.SupplierWorkerConfig{
 		Logger:           logger,
 		RedisClient:      redisClient,
+		KV:               st.kv,
+		Backend:          hooks.minerBackend,
 		StoreHealth:      storeHealth,
 		KeyManager:       keyManager,
 		Config:           config,
@@ -428,6 +469,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	leaderController := miner.NewLeaderController(miner.LeaderControllerConfig{
 		Logger:           logger,
 		RedisClient:      redisClient,
+		KV:               st.kv,
 		KeyManager:       keyManager,
 		Config:           config,
 		GlobalLeader:     globalLeader,
@@ -478,14 +520,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Bool("hot_reload", config.Keys.HotReloadEnabled).
 		Msg("HA Miner started")
 
-	// Set up signal handling
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	// Wait for a shutdown signal or a leader-controller failure
+	stopCh := hooks.started()
 	var runErr error
 	select {
-	case <-sigCh:
+	case <-stopCh:
 		logger.Info().Msg("shutdown signal received, stopping HA Miner...")
 	case runErr = <-leaderErrCh:
 		logger.Error().Err(runErr).Msg("leader controller failed, stopping HA Miner so a standby can take over...")

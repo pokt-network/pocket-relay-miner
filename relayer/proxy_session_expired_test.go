@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,7 +60,7 @@ func newAlwaysAllowMeter(t *testing.T, appAddr string) *RelayMeter {
 	app := &fakeAppClient{addr: appAddr}
 	app.stakeUpokt.Store(1_000_000)
 	meter := NewRelayMeter(
-		testLogger(), redisClient, app, nil,
+		testLogger(), kv.NewRedis(zerolog.Nop(), redisClient), app, nil,
 		&fakeSessionClient{numSuppliers: 1}, nil,
 		&fakeSharedParamCache{params: &sharedtypes.Params{
 			NumBlocksPerSession:            10,

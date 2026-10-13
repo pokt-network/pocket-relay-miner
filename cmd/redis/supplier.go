@@ -342,11 +342,31 @@ func listAllSuppliers(ctx context.Context, client *DebugRedisClient) error {
 	if err != nil {
 		return fmt.Errorf("failed to get supplier states: %w", err)
 	}
+	printSupplierList(states)
+	return nil
+}
 
+// PrintSupplierList prints the supplier states, each the JSON of one supplier
+// state entry, as `redis supplier --list` does. Standalone's inspect command
+// prints its suppliers with it too.
+func PrintSupplierList(raw map[string]json.RawMessage) error {
+	states := make(map[string]*supplierCacheState, len(raw))
+	for addr, data := range raw {
+		var state supplierCacheState
+		if err := json.Unmarshal(data, &state); err != nil {
+			return fmt.Errorf("supplier %s: %w", addr, err)
+		}
+		states[addr] = &state
+	}
+	printSupplierList(states)
+	return nil
+}
+
+func printSupplierList(states map[string]*supplierCacheState) {
 	if len(states) == 0 {
 		fmt.Printf("No suppliers found in cache\n")
 		fmt.Printf("(Miner writes supplier status to cache when it starts)\n")
-		return nil
+		return
 	}
 
 	// Count staked vs unstaked
@@ -395,7 +415,6 @@ func listAllSuppliers(ctx context.Context, client *DebugRedisClient) error {
 
 	_ = w.Flush()
 
-	return nil
 }
 
 func inspectSupplier(ctx context.Context, client *DebugRedisClient, supplier string) error {

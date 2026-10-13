@@ -160,8 +160,17 @@ func listSubmissions(ctx context.Context, client *DebugRedisClient, supplier, se
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", key, err)
 			continue
 		}
+		records = append(records, record)
+	}
+	return PrintSubmissionRecords(records, service, app, failedOnly, successOnly, limit, jsonOutput)
+}
 
-		// Apply filters
+// PrintSubmissionRecords filters, sorts, limits and prints submission
+// tracking records, as `redis submissions` does. Standalone's inspect command
+// prints its records with it too.
+func PrintSubmissionRecords(all []miner.SubmissionTrackingRecord, service, app string, failedOnly, successOnly bool, limit int, jsonOutput bool) error {
+	var records []submissionRecord
+	for _, record := range all {
 		if service != "" && record.Service != service {
 			continue
 		}
@@ -171,7 +180,6 @@ func listSubmissions(ctx context.Context, client *DebugRedisClient, supplier, se
 		if !matchesOutcomeFilters(record, failedOnly, successOnly) {
 			continue
 		}
-
 		records = append(records, record)
 	}
 

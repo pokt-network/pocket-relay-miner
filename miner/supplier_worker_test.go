@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 )
 
 // TestDefaultSupplierReconcileIntervalMatchesTTLMarginAssumption pins the
@@ -48,7 +50,7 @@ func TestDefaultSupplierReconcileIntervalMatchesTTLMarginAssumption(t *testing.T
 func TestRefineSupplierCacheTTLSurvivesWorkerQueryClientsGoingNil(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	redisClient, _ := newTestRedis(t)
-	supplierCache := cache.NewSupplierCache(logger, redisClient, cache.SupplierCacheConfig{})
+	supplierCache := cache.NewSupplierCache(logger, kv.NewRedis(zerolog.Nop(), redisClient), cache.SupplierCacheConfig{})
 
 	// A real *query.Clients pointed at a refused local port: construction
 	// never dials (grpc.NewClient is lazy), and the GetParams call below

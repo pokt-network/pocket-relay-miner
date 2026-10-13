@@ -15,10 +15,12 @@ import (
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -176,16 +178,16 @@ func newSmokeOrchestrator(t *testing.T, svcCUPR uint64, appDelegatees []string) 
 	svcClient := &smokeServiceClient{chainCUPR: svcCUPR}
 	appClient := &smokeAppClient{chainDelegatees: appDelegatees}
 
-	leaderSvc := NewServiceCache(log, redisClient, svcClient)
-	appCache := NewApplicationCache(log, redisClient, appClient)
-	sharedCache := NewSharedParamsCache(log, redisClient, &stubSharedQueryClient{}, 10)
-	proofCache := NewProofParamsCache(log, redisClient, &smokeProofClient{}, &stubSharedQueryClient{}, 10)
-	supplierParams := NewRedisSupplierParamCache(log, redisClient, &smokeSupplierParamsClient{}, CacheConfig{})
-	supplierCache := NewSupplierCache(log, redisClient, SupplierCacheConfig{})
+	leaderSvc := NewServiceCache(log, kv.NewRedis(zerolog.Nop(), redisClient), svcClient)
+	appCache := NewApplicationCache(log, kv.NewRedis(zerolog.Nop(), redisClient), appClient)
+	sharedCache := NewSharedParamsCache(log, kv.NewRedis(zerolog.Nop(), redisClient), &stubSharedQueryClient{}, 10)
+	proofCache := NewProofParamsCache(log, kv.NewRedis(zerolog.Nop(), redisClient), &smokeProofClient{}, &stubSharedQueryClient{}, 10)
+	supplierParams := NewRedisSupplierParamCache(log, kv.NewRedis(zerolog.Nop(), redisClient), &smokeSupplierParamsClient{}, CacheConfig{})
+	supplierCache := NewSupplierCache(log, kv.NewRedis(zerolog.Nop(), redisClient), SupplierCacheConfig{})
 
 	// A second service cache instance simulates the RELAYER: it has no
 	// orchestrator and follows only via pub/sub + its own L1 TTL.
-	relayerSvc := NewServiceCache(log, redisClient, &smokeServiceClient{chainCUPR: svcCUPR})
+	relayerSvc := NewServiceCache(log, kv.NewRedis(zerolog.Nop(), redisClient), &smokeServiceClient{chainCUPR: svcCUPR})
 
 	ctx := context.Background()
 	for _, c := range []interface{ Start(context.Context) error }{leaderSvc, appCache, sharedCache, proofCache, supplierParams, relayerSvc} {
@@ -218,7 +220,7 @@ func newSmokeOrchestrator(t *testing.T, svcCUPR uint64, appDelegatees []string) 
 		CacheOrchestratorConfig{RefreshIntervalBlocks: 1},
 		elector,
 		subscriber,
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		sharedCache,
 		proofCache,
 		supplierParams,
@@ -276,8 +278,8 @@ func (h *smokeHarness) becomeLeaderAndStart(t *testing.T) {
 func seedKnown(t *testing.T, h *smokeHarness, entityType string, ids ...string) {
 	t.Helper()
 	ctx := context.Background()
-	key := h.orch.redisClient.KB().CacheKnownKey(entityType)
-	require.NoError(t, h.orch.redisClient.SAdd(ctx, key, ids).Err())
+	key := h.orch.store.(*kv.Redis).Client().KB().CacheKnownKey(entityType)
+	require.NoError(t, h.orch.store.(*kv.Redis).Client().SAdd(ctx, key, ids).Err())
 }
 
 // TestOrchestrator_BlockEvent_RefreshesDiscoveredService_FullChain is the

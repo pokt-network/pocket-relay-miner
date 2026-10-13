@@ -16,12 +16,14 @@ import (
 	ring_secp256k1 "github.com/pokt-network/go-dleq/secp256k1"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -91,7 +93,7 @@ func newSimFixture(t *testing.T) *simFixture {
 	serviceIDs := map[string]struct{}{simTestService: {}, "other-svc": {}}
 	v, err := NewSimulationVerifier(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		cfg, rc, signer, serviceIDs, clock,
+		cfg, kv.NewRedis(zerolog.Nop(), rc), signer, serviceIDs, clock,
 	)
 	require.NoError(t, err)
 
@@ -237,7 +239,7 @@ func TestSimVerify_CrossReplicaReplay(t *testing.T) {
 	require.NoError(t, err)
 	v2, err := NewSimulationVerifier(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		f.cfg, f.redisClient, signer, map[string]struct{}{simTestService: {}, "other-svc": {}}, f.clock,
+		f.cfg, kv.NewRedis(zerolog.Nop(), f.redisClient), signer, map[string]struct{}{simTestService: {}, "other-svc": {}}, f.clock,
 	)
 	require.NoError(t, err)
 

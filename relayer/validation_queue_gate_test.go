@@ -10,11 +10,13 @@ import (
 	"testing"
 
 	"github.com/alitto/pond/v2"
+	"github.com/rs/zerolog"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -33,7 +35,7 @@ func gatedFixture(t *testing.T, mode ValidationMode) (*simHTTPFixture, *atomic.I
 	meterRedis, _ := newTestRedis(t)
 	app := &fakeAppClient{addr: f.appAddr}
 	app.stakeUpokt.Store(1_000_000)
-	meter := NewRelayMeter(logging.NewLoggerFromConfig(logging.DefaultConfig()), meterRedis, app, nil,
+	meter := NewRelayMeter(logging.NewLoggerFromConfig(logging.DefaultConfig()), kv.NewRedis(zerolog.Nop(), meterRedis), app, nil,
 		&fakeSessionClient{numSuppliers: 1}, nil,
 		&fakeSharedParamCache{params: &sharedtypes.Params{NumBlocksPerSession: 10, ComputeUnitsToTokensMultiplier: 1, ComputeUnitCostGranularity: 1}},
 		nil, staticServiceFactor{f: 1}, RelayMeterConfig{})

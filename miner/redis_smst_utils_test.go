@@ -114,11 +114,11 @@ func (s *RedisSMSTTestSuite) ageKeyTo(key string, remaining time.Duration) {
 const testMapStoreSupplier = "pokt1test_mapstore_default_supplier"
 
 // createTestRedisStore creates a RedisMapStore for testing.
-func (s *RedisSMSTTestSuite) createTestRedisStore(sessionID string) *RedisMapStore {
+func (s *RedisSMSTTestSuite) createTestRedisStore(sessionID string) *nodeStore {
 	store := NewRedisMapStore(s.ctx, s.redisClient, testMapStoreSupplier, sessionID)
 	// Type assertion - NewRedisMapStore returns kvstore.MapStore interface
-	redisStore, ok := store.(*RedisMapStore)
-	s.Require().True(ok, "NewRedisMapStore should return *RedisMapStore")
+	redisStore, ok := store.(*nodeStore)
+	s.Require().True(ok, "NewRedisMapStore should return *nodeStore")
 	return redisStore
 }
 

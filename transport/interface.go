@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"time"
 )
 
 // MinedRelayPublisher publishes mined relays to the transport layer.
@@ -23,24 +24,62 @@ type MinedRelayPublisher interface {
 	Close() error
 }
 
-// MinedRelayConsumer consumes mined relays from the transport layer.
-// The Miner service uses this interface to receive mined relays from Relayer instances.
+// MinedRelayConsumer is the queue the Miner reads one supplier's mined relays
+// from. Delivery is at-least-once within TrimStream's maxAge: a delivered entry
+// stays pending until it is acknowledged (AckMessage, or a committer that
+// acknowledges it together with other writes), handed back (ReleaseMessage), or
+// trimmed. A redelivery of an entry that was already delivered once carries
+// IsReclaim=true.
 //
-// Messages are auto-acknowledged via XACKDEL (Redis 8.2+) on successful consumption.
+// Entry IDs are "<ms>-<seq>", strictly increasing in append order (the Miner
+// compares them to gate a claim on everything appended so far).
+//
+// Implementations must be safe for concurrent use by multiple goroutines.
 type MinedRelayConsumer interface {
-	// Consume returns a channel that yields mined relay messages.
-	// Messages are auto-acknowledged when received from the channel.
-	//
-	// The channel is closed when:
-	// - The context is cancelled
-	// - Close() is called
-	// - An unrecoverable error occurs
-	//
-	// Callers should handle channel closure gracefully.
+	// Consume starts delivery and returns the channel it delivers on. It is
+	// called at most once per consumer. The channel is closed once delivery
+	// has stopped: the context is cancelled, or Stop or Close is called.
 	Consume(ctx context.Context) <-chan StreamMessage
 
-	// Close gracefully shuts down the consumer.
-	// Any unacknowledged messages will be redelivered to other consumers in the group.
+	// MarkDelivered is called by whoever takes a message from the channel, as
+	// soon as it takes it, so the channel's byte budget stops counting it.
+	MarkDelivered(msg StreamMessage)
+
+	// AckMessage acknowledges and removes one entry: it is never delivered again.
+	AckMessage(ctx context.Context, msg StreamMessage) error
+
+	// ReleaseMessage hands one pending entry back unacknowledged, so the next
+	// redelivery pass can deliver it again without waiting for it to go idle.
+	ReleaseMessage(ctx context.Context, msg StreamMessage) error
+
+	// EachOwnPending calls fn with every entry pending under this consumer,
+	// oldest first, marked a reclaim. Meant for a consumer already stopped. An
+	// entry no longer in the queue, or one that does not parse, is
+	// acknowledged instead of passed to fn.
+	EachOwnPending(ctx context.Context, fn func(StreamMessage)) error
+
+	// LastGeneratedID is the highest ID appended, delivered or not; "" or
+	// "0-0" means nothing has been appended.
+	LastGeneratedID(ctx context.Context) (string, error)
+
+	// RecordAcked counts n entries acknowledged on this consumer's behalf
+	// outside AckMessage, on the series AckMessage counts on.
+	RecordAcked(n int)
+
+	// TrimStream removes entries older than maxAge, a safety net for entries
+	// never acknowledged. Returns how many it removed.
+	TrimStream(ctx context.Context, maxAge time.Duration) (int64, error)
+
+	// StreamName is the name every message this consumer delivers carries in
+	// StreamMessage.StreamName, and the one AckMessage and ReleaseMessage need.
+	StreamName() string
+
+	// Stop ends delivery and waits for it, without closing: AckMessage and
+	// ReleaseMessage keep working. Idempotent.
+	Stop()
+
+	// Close stops the consumer and releases its resources. Entries still
+	// pending stay pending. Idempotent.
 	Close() error
 }
 

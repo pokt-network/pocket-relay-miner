@@ -3,16 +3,16 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -59,7 +59,7 @@ func (c *RedisSharedParamCache) storeLocal(key string, height int64, params *sha
 // RedisSharedParamCache implements SharedParamCache using Redis as L2 cache.
 type RedisSharedParamCache struct {
 	logger       logging.Logger
-	redisClient  *redisutil.Client
+	store        kv.Store
 	sharedClient client.SharedQueryClient
 	blockClient  client.BlockClient
 	config       CacheConfig
@@ -79,7 +79,7 @@ type RedisSharedParamCache struct {
 // NewRedisSharedParamCache creates a new SharedParamCache backed by Redis.
 func NewRedisSharedParamCache(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	sharedClient client.SharedQueryClient,
 	blockClient client.BlockClient,
 	config CacheConfig,
@@ -103,7 +103,7 @@ func NewRedisSharedParamCache(
 	return &RedisSharedParamCache{
 		localCache:   xsync.NewMap[string, sharedParamLocalEntry](),
 		logger:       logging.ForComponent(logger, logging.ComponentSharedParamCache),
-		redisClient:  redisClient,
+		store:        store,
 		sharedClient: sharedClient,
 		blockClient:  blockClient,
 		config:       config,
@@ -138,7 +138,7 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 	}
 	c.mu.RUnlock()
 
-	key := c.redisClient.KB().ParamsSharedAtHeightKey(height)
+	key := c.store.KB().ParamsSharedAtHeightKey(height)
 
 	// L1: Check local cache (fresh within the TTL floor only).
 	if e, ok := c.localCache.Load(key); ok {
@@ -151,7 +151,7 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 	cacheMisses.WithLabelValues("shared_params", "l1").Inc()
 
 	// L2: Check Redis cache
-	data, err := c.redisClient.Get(ctx, key).Bytes()
+	data, err := c.store.Get(ctx, key)
 	if err == nil {
 		params := &sharedtypes.Params{}
 		if unmarshalErr := json.Unmarshal(data, params); unmarshalErr != nil {
@@ -164,7 +164,7 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 			return params, nil
 		}
 	}
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, kv.ErrNotFound) {
 		c.logger.Warn().Err(err).Msg("error fetching from Redis cache")
 	}
 	cacheMisses.WithLabelValues("shared_params", "l2").Inc()
@@ -189,11 +189,11 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 // (For the latest height the two are equivalent, which is why this was invisible
 // while GetLatestSharedParams was the only caller.)
 func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height int64, key string) (*sharedtypes.Params, error) {
-	lockKey := c.redisClient.KB().ParamsSharedAtHeightLockKey(height)
+	lockKey := c.store.KB().ParamsSharedAtHeightLockKey(height)
 
 	// Try to acquire lock
 	lockToken := newLockToken()
-	locked, err := c.redisClient.SetNX(ctx, lockKey, lockToken, c.config.LockTimeout).Result()
+	locked, err := c.store.SetNX(ctx, lockKey, []byte(lockToken), c.config.LockTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -201,7 +201,7 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 	if locked {
 		// We got the lock - query chain
 		lockAcquisitions.WithLabelValues("shared_params", "acquired").Inc()
-		defer releaseCacheLock(ctx, c.redisClient, lockKey, lockToken)
+		defer releaseCacheLock(ctx, c.store, lockKey, lockToken)
 
 		chainQueries.WithLabelValues("shared_params").Inc()
 		chainStart := time.Now()
@@ -218,7 +218,7 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 		data, marshalErr := json.Marshal(params)
 		if marshalErr == nil {
 			ttl := c.config.BlocksToTTL(c.config.TTLBlocks)
-			if cacheErr := c.redisClient.Set(ctx, key, data, ttl).Err(); cacheErr != nil {
+			if cacheErr := c.store.Set(ctx, key, data, ttl); cacheErr != nil {
 				c.logger.Warn().Err(cacheErr).Msg("failed to cache params in Redis")
 			}
 		}
@@ -233,7 +233,7 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 	lockAcquisitions.WithLabelValues("shared_params", "contended").Inc()
 	time.Sleep(5 * time.Millisecond)
 
-	retryData, retryErr := c.redisClient.Get(ctx, key).Bytes()
+	retryData, retryErr := c.store.Get(ctx, key)
 	if retryErr == nil {
 		params := &sharedtypes.Params{}
 		if unmarshalErr := json.Unmarshal(retryData, params); unmarshalErr == nil {
@@ -272,10 +272,10 @@ func (c *RedisSharedParamCache) WarmupFromRedis(ctx context.Context) error {
 	height := latestBlock.Height()
 
 	// Try to load from Redis into L1
-	key := c.redisClient.KB().ParamsSharedAtHeightKey(height)
-	data, err := c.redisClient.Get(ctx, key).Bytes()
+	key := c.store.KB().ParamsSharedAtHeightKey(height)
+	data, err := c.store.Get(ctx, key)
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, kv.ErrNotFound) {
 			// Not in cache yet, that's OK
 			c.logger.Debug().Int64("height", height).Msg("shared params not in Redis, will be loaded on first query")
 			return nil

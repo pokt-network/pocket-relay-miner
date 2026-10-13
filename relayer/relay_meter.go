@@ -7,16 +7,17 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/rs/zerolog"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
@@ -148,7 +149,7 @@ type SessionMeterState struct {
 type RelayMeter struct {
 	logger        logging.Logger
 	config        RelayMeterConfig
-	redisClient   *redisutil.Client
+	store         kv.Store
 	appClient     client.ApplicationQueryClient
 	sharedClient  client.SharedQueryClient
 	sessionClient client.SessionQueryClient
@@ -196,7 +197,7 @@ type RelayMeter struct {
 // NewRelayMeter creates a new relay meter.
 func NewRelayMeter(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
+	store kv.Store,
 	appClient client.ApplicationQueryClient,
 	sharedClient client.SharedQueryClient,
 	sessionClient client.SessionQueryClient,
@@ -213,7 +214,7 @@ func NewRelayMeter(
 	m := &RelayMeter{
 		logger:                logging.ForComponent(logger, logging.ComponentRelayMeter),
 		config:                config,
-		redisClient:           redisClient,
+		store:                 store,
 		appClient:             appClient,
 		sharedClient:          sharedClient,
 		sessionClient:         sessionClient,
@@ -582,10 +583,7 @@ func (m *RelayMeter) loadSeen(ctx context.Context, key string) error {
 		return nil
 	}
 
-	consumed, err := m.redisClient.Get(ctx, key).Int64()
-	if errors.Is(err, redis.Nil) {
-		consumed, err = 0, nil
-	}
+	consumed, err := readCounter(m.store.Get(ctx, key))
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err)
 	}
@@ -630,7 +628,7 @@ const meterWarmupPairsPerRound = 100
 // read: the memory of one pair, holding a counter no lower than the zero a read
 // after the cleanup would find. It returns how many pairs it added to the view.
 func (m *RelayMeter) WarmFromRedis(ctx context.Context, signsFor func(supplier string) bool) (int, error) {
-	members, err := m.redisClient.SMembers(ctx, m.redisClient.KB().MeterActiveSessionsKey()).Result()
+	members, err := m.store.SMembers(ctx, m.store.KB().MeterActiveSessionsKey())
 	if err != nil {
 		return 0, fmt.Errorf("%w: read active meters: %w", ErrMeterStoreUnavailable, err)
 	}
@@ -648,20 +646,16 @@ func (m *RelayMeter) WarmFromRedis(ctx context.Context, signsFor func(supplier s
 	warmed := 0
 	for start := 0; start < len(pairs); start += meterWarmupPairsPerRound {
 		round := pairs[start:min(start+meterWarmupPairsPerRound, len(pairs))]
-		pipe := m.redisClient.Pipeline()
-		metas := make([]*redis.StringCmd, len(round))
-		consumed := make([]*redis.StringCmd, len(round))
-		for i, p := range round {
-			metas[i] = pipe.Get(ctx, m.metaKey(p.sessionID, p.supplier))
-			consumed[i] = pipe.Get(ctx, m.consumedKey(p.sessionID, p.supplier))
+		keys := make([]string, 0, 2*len(round))
+		for _, p := range round {
+			keys = append(keys, m.metaKey(p.sessionID, p.supplier), m.consumedKey(p.sessionID, p.supplier))
 		}
-		// A missing key is a redis.Nil on its own command and is read per pair
-		// below; any other error means the store did not answer.
-		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		vals, err := m.store.MGet(ctx, keys...)
+		if err != nil {
 			return warmed, fmt.Errorf("%w: read active meters: %w", ErrMeterStoreUnavailable, err)
 		}
 		for i, p := range round {
-			if m.warmPair(p.sessionID, p.supplier, metas[i], consumed[i]) {
+			if m.warmPair(p.sessionID, p.supplier, vals[2*i], vals[2*i+1]) {
 				warmed++
 			}
 		}
@@ -671,19 +665,15 @@ func (m *RelayMeter) WarmFromRedis(ctx context.Context, signsFor func(supplier s
 
 // warmPair puts one pair read by WarmFromRedis into the view, unless the view
 // already holds it, and reports whether it did.
-func (m *RelayMeter) warmPair(sessionID, supplier string, metaCmd, consumedCmd *redis.StringCmd) bool {
-	metaBytes, err := metaCmd.Bytes()
-	if err != nil {
+func (m *RelayMeter) warmPair(sessionID, supplier string, metaBytes, consumedBytes []byte) bool {
+	if metaBytes == nil {
 		return false
 	}
 	var meta SessionMeterMeta
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
 		return false
 	}
-	consumed, err := consumedCmd.Int64()
-	if errors.Is(err, redis.Nil) {
-		consumed, err = 0, nil
-	}
+	consumed, err := parseCounter(consumedBytes)
 	if err != nil {
 		return false
 	}
@@ -731,7 +721,7 @@ func (m *RelayMeter) CheckRelayHealth(ctx context.Context, serviceID string) err
 	}
 
 	// Proves Redis reachability without mutating any key.
-	if err := m.redisClient.Ping(ctx).Err(); err != nil {
+	if err := m.store.Ping(ctx); err != nil {
 		return fmt.Errorf("redis meter unreachable: %w", err)
 	}
 
@@ -759,8 +749,8 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 	m.accMu.Unlock()
 
 	// Remove from active sessions tracking set
-	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
-	if err := m.redisClient.SRem(ctx, activeKey, cacheKey).Err(); err != nil {
+	activeKey := m.store.KB().MeterActiveSessionsKey()
+	if err := m.store.SRem(ctx, activeKey, cacheKey); err != nil {
 		m.logger.Warn().Err(err).
 			Str(logging.FieldSessionID, sessionID).
 			Str(logging.FieldSupplier, supplierAddress).
@@ -773,7 +763,7 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 		consumedKey,
 	}
 
-	if err := m.redisClient.Del(ctx, keys...).Err(); err != nil {
+	if err := m.store.Del(ctx, keys...); err != nil {
 		return fmt.Errorf("failed to clear session meter: %w", err)
 	}
 
@@ -867,7 +857,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 		meta.CreatedWithAppStake = newAppStake
 		if metaBytes, mErr := json.Marshal(meta); mErr == nil {
 			// Best-effort overwrite; preserve remaining TTL.
-			m.redisClient.Set(ctx, m.metaKey(sessionID, supplierAddress), metaBytes, redis.KeepTTL)
+			_ = m.store.SetKeepTTL(ctx, m.metaKey(sessionID, supplierAddress), metaBytes) //nolint:errcheck // best effort, as before
 		}
 		m.localCacheMu.Lock()
 		m.localCache[cacheKey] = meta
@@ -910,7 +900,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 
 	// Use SETNX to handle race conditions
 	metaKey := m.metaKey(sessionID, supplierAddress)
-	set, err := m.redisClient.SetNX(ctx, metaKey, metaBytes, m.config.CacheTTL).Result()
+	set, err := m.store.SetNX(ctx, metaKey, metaBytes, m.config.CacheTTL)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create session meter: %w: %w", ErrMeterStoreUnavailable, err)
 	}
@@ -931,9 +921,9 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	// ("active meters") and mirrors how the meter counter is keyed.
 	// Refresh TTL on every SADD so the set self-cleans if a relayer
 	// crashes between SADD and SREM (entries expire with the set).
-	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
-	m.redisClient.SAdd(ctx, activeKey, cacheKey)
-	m.redisClient.Expire(ctx, activeKey, m.config.CacheTTL)
+	activeKey := m.store.KB().MeterActiveSessionsKey()
+	_ = m.store.SAdd(ctx, activeKey, cacheKey)               //nolint:errcheck // best effort, as before
+	_, _ = m.store.Expire(ctx, activeKey, m.config.CacheTTL) //nolint:errcheck // best effort, as before
 
 	// Cache locally
 	m.localCacheMu.Lock()
@@ -946,9 +936,9 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 // getSessionMeta retrieves session metadata from Redis for the given
 // (session, supplier) pair.
 func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddress string) (*SessionMeterMeta, error) {
-	data, err := m.redisClient.Get(ctx, m.metaKey(sessionID, supplierAddress)).Bytes()
+	data, err := m.store.Get(ctx, m.metaKey(sessionID, supplierAddress))
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, kv.ErrNotFound) {
 			return nil, nil
 		}
 		// Marked at the call that failed, not sniffed from the error later:
@@ -970,7 +960,7 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddr
 		// (MaxStakeUpokt and the inputs it came from) -- the consumed counter is
 		// a SEPARATE key, so nothing about what was already spent is lost, and
 		// the next relay re-derives the allowance.
-		if delErr := m.redisClient.Del(ctx, m.metaKey(sessionID, supplierAddress)).Err(); delErr != nil {
+		if delErr := m.store.Del(ctx, m.metaKey(sessionID, supplierAddress)); delErr != nil {
 			m.logger.Debug().
 				Err(delErr).
 				Str("session_id", sessionID).
@@ -1336,23 +1326,30 @@ func (m *RelayMeter) handleMeterError(operation string, cause error) (allowed bo
 	return true, fmt.Errorf("could not meter relay (%s): %w", operation, cause)
 }
 
-// cleanupSubscriber subscribes to cleanup signals from miners.
+// cleanupSubscriber subscribes to cleanup signals from miners, subscribing
+// again whenever the subscription fails or is lost.
 func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 	defer m.wg.Done()
+	redisutil.NewReconnectionLoop(m.logger, "pubsub_meter_cleanup", m.store.Ping, m.runCleanupSubscription).Run(ctx)
+}
 
-	channel := m.redisClient.KB().MeterCleanupChannel()
-	pubsub := m.redisClient.Subscribe(ctx, channel)
-	defer func() { _ = pubsub.Close() }()
+func (m *RelayMeter) runCleanupSubscription(ctx context.Context) error {
+	channel := m.store.KB().MeterCleanupChannel()
+	sub, err := m.store.Subscribe(ctx, channel)
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to meter cleanup: %w", err)
+	}
+	defer func() { _ = sub.Close() }()
 
-	ch := pubsub.Channel()
+	ch := sub.Messages()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case msg, ok := <-ch:
 			if !ok {
-				return
+				return fmt.Errorf("meter cleanup subscription closed")
 			}
 			// Received cleanup signal. Payload format: "sessionID|supplierAddress".
 			// Payload without a '|' is treated as a legacy per-session cleanup
@@ -1387,7 +1384,7 @@ func (m *RelayMeter) activeSessionsMetricTicker(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
+	activeKey := m.store.KB().MeterActiveSessionsKey()
 
 	for {
 		select {
@@ -1396,7 +1393,7 @@ func (m *RelayMeter) activeSessionsMetricTicker(ctx context.Context) {
 			return
 		case <-ticker.C:
 			// Total count from Redis SET via SCARD — O(1), no scanning
-			totalCount, err := m.redisClient.SCard(ctx, activeKey).Result()
+			totalCount, err := m.store.SCard(ctx, activeKey)
 			if err != nil {
 				m.logger.Warn().Err(err).Msg("failed to count active sessions")
 				continue
@@ -1468,11 +1465,11 @@ func (m *RelayMeter) Close() error {
 // schema keyed only by sessionID, which caused every supplier after the
 // first to starve because they shared one consumed counter.
 func (m *RelayMeter) metaKey(sessionID, supplierAddress string) string {
-	return m.redisClient.KB().MeterMetaKey(sessionID, supplierAddress)
+	return m.store.KB().MeterMetaKey(sessionID, supplierAddress)
 }
 
 func (m *RelayMeter) consumedKey(sessionID, supplierAddress string) string {
-	return m.redisClient.KB().MeterConsumedKey(sessionID, supplierAddress)
+	return m.store.KB().MeterConsumedKey(sessionID, supplierAddress)
 }
 
 // localCacheKey joins sessionID and supplierAddress with a separator that
@@ -1490,3 +1487,22 @@ type RelayMeterSnapshot struct {
 // calculateAppStakePerSessionSupplier calculates the portion of app stake
 // available to a single supplier in a single session.
 // Kept for backwards compatibility with existing callers.
+
+// readCounter reads a consumed counter from a Get: 0 when it does not exist.
+func readCounter(raw []byte, err error) (int64, error) {
+	if errors.Is(err, kv.ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return parseCounter(raw)
+}
+
+// parseCounter parses a counter's stored value; nil is a counter not written.
+func parseCounter(raw []byte) (int64, error) {
+	if raw == nil {
+		return 0, nil
+	}
+	return strconv.ParseInt(string(raw), 10, 64)
+}

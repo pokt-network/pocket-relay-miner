@@ -5,15 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
-	"strings"
 	"sync"
-	"time"
-
-	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // ErrRelayBatched is what the relay handler returns when it has handed the
@@ -112,11 +107,12 @@ type flushPoint int
 
 const (
 	// flushPointBeforeScript sits between the live_root checkpoint and the
-	// script: whatever comes first has happened, whatever comes second has not.
+	// commit (relayCommitter.CommitSession; the Redis one runs a script):
+	// whatever comes first has happened, whatever comes second has not.
 	flushPointBeforeScript flushPoint = iota
 	// flushPointFallbackRelay runs before each relay of the per-relay fallback.
 	flushPointFallbackRelay
-	// flushPointAfterScript follows a script that ran: an error there stands
+	// flushPointAfterScript follows a commit that ran: an error there stands
 	// for its answer lost on the way back, so the flush is retried.
 	flushPointAfterScript
 )
@@ -132,7 +128,7 @@ const (
 
 // relayBatch holds, per session, the relays of one supplier that are already in
 // the SMST but not yet marked, counted and acknowledged, and finishes them
-// together: one live_root checkpoint and one script per session, instead of
+// together: one live_root checkpoint and one commit per session, instead of
 // three round trips per relay.
 //
 // What is held is SAFE to lose to a crash: the entries are still pending in the
@@ -158,13 +154,12 @@ const (
 // flush decided their fate: a retained batch is simply still there.
 type relayBatch struct {
 	logger       logging.Logger
-	redisClient  *redisutil.Client
 	supplierAddr string
-	store        *RedisSessionStore
-	dedup        *RedisDeduplicator
+	dedup        Deduplicator
 	smst         *RedisSMSTManager
 	coordinator  *SessionCoordinator
-	consumer     *redisutil.StreamsConsumer
+	consumer     transport.MinedRelayConsumer
+	commit       relayCommitter
 
 	// hook is nil in production. A test sets it before the batch is used, to
 	// cut a flush at a point (return an error) or to panic there.
@@ -174,46 +169,36 @@ type relayBatch struct {
 	sessions map[string]*sessionBatch
 
 	// acks are the stream entries of rejected relays -- dropped before the tree
-	// or refused by it -- waiting to be acknowledged together, in one XACKDEL
-	// (flushAcksLocked), instead of one each. Nothing about them is counted or
-	// marked, so a crash before that XACKDEL only redelivers them, and the
+	// or refused by it -- waiting to be acknowledged together, in one
+	// AckRejected (flushAcksLocked), instead of one each. Nothing about them is
+	// counted or marked, so a crash before that only redelivers them, and the
 	// redelivery is rejected again. Protected by mu.
 	acks []string
 }
 
-// newRelayBatch returns nil when the deduplicator is not the Redis one whose set
-// the script writes; the supplier then finishes every relay on its own, as
-// before the batch existed.
-//
-// The script touches the session hash, the dedup set and the stream, three keys
-// with no hash tag, which a Redis Cluster refuses as CROSSSLOT. That is not
-// handled on purpose: no deployment of this miner runs a cluster and none is
-// planned (Jorge, 2026-09-10). Session creation has the same limit already --
-// CreateIfAbsent's index pipeline spans two slots -- which was read in
-// go-redis's source, not run against a cluster.
+// newRelayBatch returns nil when there is no committer (newRedisRelayCommitter
+// returns none for a deduplicator that is not the Redis one): the supplier then
+// finishes every relay on its own, as before the batch existed.
 func newRelayBatch(
 	logger logging.Logger,
-	redisClient *redisutil.Client,
 	supplierAddr string,
-	store *RedisSessionStore,
 	dedup Deduplicator,
 	smst *RedisSMSTManager,
 	coordinator *SessionCoordinator,
-	consumer *redisutil.StreamsConsumer,
+	consumer transport.MinedRelayConsumer,
+	commit relayCommitter,
 ) *relayBatch {
-	redisDedup, ok := dedup.(*RedisDeduplicator)
-	if !ok || redisDedup == nil {
+	if commit == nil {
 		return nil
 	}
 	return &relayBatch{
 		logger:       logging.ForSupplierComponent(logger, "relay_batch", supplierAddr),
-		redisClient:  redisClient,
 		supplierAddr: supplierAddr,
-		store:        store,
-		dedup:        redisDedup,
+		dedup:        dedup,
 		smst:         smst,
 		coordinator:  coordinator,
 		consumer:     consumer,
+		commit:       commit,
 		sessions:     make(map[string]*sessionBatch),
 	}
 }
@@ -255,15 +240,15 @@ func (b *relayBatch) AddAck(ctx context.Context, id string) bool {
 	return true
 }
 
-// flushAcksLocked acknowledges every waiting rejected entry in one XACKDEL and
-// reports whether they are still waiting: an error keeps them for the next
-// flush. At most relayBatchCap ids go in one call, the size the flush script
-// already sends XACKDEL.
+// flushAcksLocked acknowledges every waiting rejected entry in one AckRejected
+// and reports whether they are still waiting: an error keeps them for the next
+// flush. At most relayBatchCap ids go in one call, the size a session's commit
+// already acknowledges.
 func (b *relayBatch) flushAcksLocked(ctx context.Context) (retained bool) {
 	if len(b.acks) == 0 {
 		return false
 	}
-	if err := b.redisClient.XAckDel(ctx, b.consumer.StreamName(), b.consumer.ConsumerGroup(), "DELREF", b.acks...).Err(); err != nil {
+	if err := b.commit.AckRejected(ctx, b.acks); err != nil {
 		b.logger.Debug().Err(err).Int("entries", len(b.acks)).
 			Msg("relay batch: acknowledging rejected relays failed, keeping them for the next flush")
 		return true
@@ -368,7 +353,7 @@ func (b *relayBatch) flushLocked(ctx context.Context, sb *sessionBatch) (retaine
 }
 
 // flushSession runs the two round trips of a flush: the live_root checkpoint,
-// then the script. The order is the money invariant: the script acknowledges
+// then the commit. The order is the money invariant: the commit acknowledges
 // the entries, an acknowledged entry is never delivered again, so the tree has
 // to be reachable from a stored root that contains those relays BEFORE.
 func (b *relayBatch) flushSession(ctx context.Context, sb *sessionBatch) (outcome flushOutcome) {
@@ -427,17 +412,7 @@ func (b *relayBatch) flushSession(ctx context.Context, sb *sessionBatch) (outcom
 		}
 	}
 
-	result, err := b.runScript(ctx, sb)
-	if isLegacyKeyErr(err) {
-		// Same rescue IncrementRelayCount has: rewrite the pre-hash session and
-		// run again. The script refused before writing, so nothing is doubled.
-		if migrateErr := b.store.migrateLegacyKey(ctx, sessionID); migrateErr != nil {
-			b.logger.Debug().Err(migrateErr).Str(logging.FieldSessionID, sessionID).
-				Msg("relay batch: legacy session key could not be migrated, finishing relays one at a time")
-			return flushPerRelay
-		}
-		result, err = b.runScript(ctx, sb)
-	}
+	result, err := b.commit.CommitSession(ctx, sessionID, sb.relays)
 	if err == nil && b.hook != nil {
 		err = b.hook(flushPointAfterScript, sessionID)
 	}
@@ -445,10 +420,10 @@ func (b *relayBatch) flushSession(ctx context.Context, sb *sessionBatch) (outcom
 	case err == nil:
 		b.recordFlushed(sb, result)
 		return flushDone
-	case isLegacyKeyErr(err) || isRelayBatchRefusal(err):
+	case errors.Is(err, errCommitRefused):
 		// Refused before the first write, and it would be refused again.
 		b.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
-			Msg("relay batch: script refused the batch, finishing relays one at a time")
+			Msg("relay batch: commit refused the batch, finishing relays one at a time")
 		return flushPerRelay
 	default:
 		b.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
@@ -457,7 +432,7 @@ func (b *relayBatch) flushSession(ctx context.Context, sb *sessionBatch) (outcom
 	}
 }
 
-// relayBatchResult is what relayBatchScript reports.
+// relayBatchResult is what a relayCommitter reports for one session batch.
 type relayBatchResult struct {
 	status          int64 // 0 counted, 1 session not found, 2 session terminal
 	newRelays       int64 // members the SADD added
@@ -467,34 +442,6 @@ type relayBatchResult struct {
 	// was lost finds its own members added and its entries gone, and counts
 	// none.
 	freshDups int64
-}
-
-func (b *relayBatch) runScript(ctx context.Context, sb *sessionBatch) (relayBatchResult, error) {
-	keys := []string{
-		b.store.sessionKey(sb.session.sessionID),
-		b.dedup.sessionKey(sb.session.sessionID),
-		b.consumer.StreamName(),
-	}
-	args := make([]any, 0, 5+3*len(sb.relays))
-	args = append(args,
-		b.consumer.ConsumerGroup(),
-		time.Now().Format(time.RFC3339Nano),
-		int64(b.store.config.SessionTTL.Seconds()),
-		int64(b.dedup.getTTL().Seconds()),
-		len(sb.relays),
-	)
-	for _, r := range sb.relays {
-		args = append(args, r.id, hashMember(r.hash), r.computeUnits)
-	}
-
-	vals, err := relayBatchScript.Run(ctx, b.redisClient, keys, args...).Int64Slice()
-	if err != nil {
-		return relayBatchResult{}, err
-	}
-	if len(vals) != 4 {
-		return relayBatchResult{}, fmt.Errorf("relay batch: script returned %d values, expected 4", len(vals))
-	}
-	return relayBatchResult{status: vals[0], newRelays: vals[1], newComputeUnits: vals[2], freshDups: vals[3]}, nil
 }
 
 // recordFlushed moves the metrics the per-relay path moves once per relay, by
@@ -584,113 +531,3 @@ func (b *relayBatch) finishOneByOne(ctx context.Context, sb *sessionBatch) {
 		}()
 	}
 }
-
-func isLegacyKeyErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "legacy key")
-}
-
-// isRelayBatchRefusal matches the refusals relayBatchScript makes before its
-// first write, all of which it would make again.
-func isRelayBatchRefusal(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "relay batch:")
-}
-
-// relayBatchScript marks, counts and acknowledges one session's batch in one
-// call.
-//
-// KEYS[1] = session hash, KEYS[2] = dedup set, KEYS[3] = stream
-// ARGV[1] = consumer group, ARGV[2] = RFC3339Nano now, ARGV[3] = session TTL s,
-// ARGV[4] = dedup TTL s, ARGV[5] = n, then n triples (id, relay hash, compute
-// units): triple j is ARGV[3j+3], ARGV[3j+4], ARGV[3j+5].
-//
-// Returns {status, new relays, their compute units, fresh duplicates}; status
-// is incrementRelayCountScript's: 0 counted, 1 session not found, 2 terminal.
-// A fresh duplicate is a relay the SADD already had whose entry XACKDEL
-// acknowledged in this run (it answers 1 per id acknowledged and deleted, -1
-// per id not there -- measured on 8.10.0): a copy delivered here after another
-// consumer finished the relay, not an entry a lost-answer run already took.
-//
-// Everything that can refuse is checked BEFORE the first write, because a
-// script that fails halfway is not rolled back (measured on Redis 8.10.0: a
-// SADD before a WRONGTYPE stayed written). XACKDEL does not fail on a missing
-// stream, group or id -- it answers -1 (measured on 8.10.0, 2026-09-10) -- so
-// once the writes start, nothing after them refuses.
-//
-// The branches copy the per-relay path: there the dedup mark comes first and the
-// counter second, so a missing or terminal session gets its relays marked and
-// acknowledged but not counted. Counting only what the SADD added is what keeps
-// a redelivery from counting twice, in either order of two consumers; and
-// adding each new member's OWN compute units matters because one session can
-// hold relays mined at different CUPRs.
-//
-// Re-running it is harmless: the SADD adds nothing, so nothing is counted, and
-// the ids are already gone, so nothing is a duplicate either. An error whose
-// outcome is unknown can be retried.
-var relayBatchScript = redis.NewScript(luaIsTerminal + `
-local n = tonumber(ARGV[5])
-if n == nil or n < 1 or #ARGV ~= 5 + 3 * n then
-	return redis.error_reply('relay batch: malformed arguments')
-end
-local total = 0
-for j = 1, n do
-	local cu = tonumber(ARGV[3 * j + 5])
-	if cu == nil or cu < 0 then
-		return redis.error_reply('relay batch: bad compute units')
-	end
-	total = total + cu
-end
-if total > 9007199254740991 then
-	return redis.error_reply('relay batch: compute units exceed exact integer range')
-end
-local ktype = redis.call('TYPE', KEYS[1])['ok']
-if ktype ~= 'hash' and ktype ~= 'none' then
-	return redis.error_reply('legacy key')
-end
-local stype = redis.call('TYPE', KEYS[3])['ok']
-if stype ~= 'stream' and stype ~= 'none' then
-	return redis.error_reply('relay batch: stream key is not a stream')
-end
-
-local new_relays, new_cu = 0, 0
-local marked_before = {}
-for j = 1, n do
-	if redis.call('SADD', KEYS[2], ARGV[3 * j + 4]) == 1 then
-		new_relays = new_relays + 1
-		new_cu = new_cu + tonumber(ARGV[3 * j + 5])
-	else
-		marked_before[j] = true
-	end
-end
-redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
-
-local status = 0
-if ktype == 'none' then
-	status = 1
-elseif is_terminal(redis.call('HGET', KEYS[1], 'state')) then
-	status = 2
-elseif new_relays > 0 then
-	redis.call('HINCRBY', KEYS[1], 'relay_count', new_relays)
-	redis.call('HINCRBY', KEYS[1], 'total_compute_units', new_cu)
-	redis.call('HSET', KEYS[1], 'last_updated_at', ARGV[2])
-	redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
-end
-
-local fresh_dups = 0
-local first = 1
-while first <= n do
-	local last = math.min(first + 999, n)
-	local cmd = {'XACKDEL', KEYS[3], ARGV[1], 'DELREF', 'IDS', last - first + 1}
-	for j = first, last do
-		cmd[#cmd + 1] = ARGV[3 * j + 3]
-	end
-	local acked = redis.call(unpack(cmd))
-	for k = 1, #acked do
-		if acked[k] == 1 and marked_before[first + k - 1] then
-			fresh_dups = fresh_dups + 1
-		end
-	end
-	first = last + 1
-end
-
-return {status, new_relays, new_cu, fresh_dups}
-`)

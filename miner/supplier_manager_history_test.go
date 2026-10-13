@@ -13,11 +13,13 @@ import (
 	"github.com/alitto/pond/v2"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/hashicorp/go-version"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/storage/kv"
 
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -127,14 +129,14 @@ func newManagerForHistoryTest(t *testing.T, km *fakeKeyManager, qc *historySuppl
 
 	supplierCache := cache.NewSupplierCache(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		cache.SupplierCacheConfig{},
 	)
 	require.NoError(t, supplierCache.Start(ctx))
 
 	registry := NewSupplierRegistry(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		redisClient,
+		kv.NewRedis(zerolog.Nop(), redisClient),
 		SupplierRegistryConfig{},
 	)
 

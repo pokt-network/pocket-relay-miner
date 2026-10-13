@@ -30,6 +30,7 @@ Start with AGENTS.md or docs/deploy/README.md in the repository.`,
 	// Add relayer and miner subcommands directly under root
 	rootCmd.AddCommand(cmd.RelayerCmd())
 	rootCmd.AddCommand(cmd.MinerCmd())
+	rootCmd.AddCommand(cmd.StandaloneCmd())
 	rootCmd.AddCommand(cmd.RedisCmd())
 	rootCmd.AddCommand(cmd.RelayCmd())
 	rootCmd.AddCommand(cmd.VersionCmd())

@@ -33,6 +33,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -285,6 +286,11 @@ type sharedQueryClient struct {
 	// when they end every supplier asks for the same height at once, and each
 	// caller that missed the cache would otherwise send its own identical RPC.
 	paramsAtHeightFlight singleflight.Group
+
+	// onFlightJoin, when set, is called once a caller has joined the
+	// ParamsAtHeight flight for height. Tests use it to know every caller shares
+	// the in-flight RPC before letting it answer.
+	onFlightJoin func(height int64)
 }
 
 // paramsAtHeightEntry is an immutable params-at-height value plus its fetch time,
@@ -533,6 +539,9 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 		c.storeParamsAtHeight(queryHeight, params)
 		return params, nil
 	})
+	if c.onFlightJoin != nil {
+		c.onFlightJoin(queryHeight)
+	}
 	select {
 	case r := <-ch:
 		if r.Err != nil {
@@ -1206,12 +1215,13 @@ func (c *proofQueryClient) GetClaim(ctx context.Context, supplierOperatorAddress
 		func() (*prooftypes.Claim, error) {
 			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
 			defer cancel()
+			var md metadata.MD
 			res, err := c.queryClient.Claim(queryCtx, &prooftypes.QueryGetClaimRequest{
 				SupplierOperatorAddress: supplierOperatorAddress,
 				SessionId:               sessionId,
-			})
+			}, grpc.Header(&md))
 			if err != nil {
-				return nil, fmt.Errorf("failed to query claim: %w", err)
+				return nil, &answeredError{height: answeredHeight(md), err: fmt.Errorf("failed to query claim: %w", err)}
 			}
 			return &res.Claim, nil
 		},

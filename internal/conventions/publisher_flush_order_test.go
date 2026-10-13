@@ -11,7 +11,7 @@ import (
 // that flush writes THROUGH the Redis client -- p.client.TxPipelined in
 // transport/redis/batching_publisher.go.
 //
-// So the two deferred Close() calls in runHARelayer are ordered, and the order
+// So the two deferred Close() calls in serveRelayer are ordered, and the order
 // is the opposite of the one they are written in: defers run LIFO, so the
 // publisher's Close must be DECLARED AFTER the Redis client's in order to RUN
 // BEFORE it.
@@ -22,7 +22,7 @@ import (
 // TxPipelined fails, dispatchAll puts the chunk back on a queue nobody will
 // drain again, and the process exits. Every relay in it was served, signed and
 // answered to a client, and it is never written: money served and not billed.
-// No test covers it -- runHARelayer builds a whole process and has none -- and
+// No test covers it -- serveRelayer builds a whole process and has none -- and
 // no run shows it either, because the loss only happens on a shutdown that had
 // a backlog.
 //
@@ -76,11 +76,31 @@ func TestPublisherFlushIsDeferredAfterTheRedisClient(t *testing.T) {
 		t.Fatalf("%s not found: if it moved, point this rule at its new path", path)
 	}
 
-	client := deferredCloseOf(f, "redisClient")
+	// The Redis client is opened by openRelayerRedisStore, which hands its
+	// Close back as the side's closeStore; serveRelayer defers that.
+	if !closesInFuncLit(f, "closeClient", "redisClient") {
+		t.Fatalf("%s: the closer openRelayerRedisStore returns must close redisClient.\n"+
+			"  If the client is now closed some other way, this rule has to be rewritten\n"+
+			"  against that shape -- not deleted: the ordering it protects still exists.", path)
+	}
+	// And that closer is the one closeStore holds: openRelayerRedisStore
+	// returns closeClient, and serveRelayer's default openStore returns what
+	// openRelayerRedisStore returns, into the closeStore it defers.
+	if !returnsIdentAt(f, "openRelayerRedisStore", 1, "closeClient") {
+		t.Fatalf("%s: openRelayerRedisStore must return closeClient as the side's closer.\n"+
+			"  If the client is now closed some other way, this rule has to be rewritten\n"+
+			"  against that shape -- not deleted: the ordering it protects still exists.", path)
+	}
+	if !returnsCallOf(f, "serveRelayer", "openRelayerRedisStore") {
+		t.Fatalf("%s: serveRelayer's default store must be what openRelayerRedisStore returns.\n"+
+			"  If the client is now closed some other way, this rule has to be rewritten\n"+
+			"  against that shape -- not deleted: the ordering it protects still exists.", path)
+	}
+	client := deferredCallOf(f, "closeStore")
 	publisher := deferredCloseOf(f, "publisher")
 
 	if client == token.NoPos {
-		t.Fatalf("%s has no deferred redisClient.Close().\n"+
+		t.Fatalf("%s has no deferred closeStore(), which closes the Redis client.\n"+
 			"  If the client is now closed some other way, this rule has to be rewritten\n"+
 			"  against that shape -- not deleted: the ordering it protects still exists.", path)
 	}
@@ -90,13 +110,13 @@ func TestPublisherFlushIsDeferredAfterTheRedisClient(t *testing.T) {
 			"  defer, a shutdown with a backlog drops every relay in it.", path)
 	}
 	if publisher <= client {
-		t.Errorf("%s defers publisher.Close() BEFORE redisClient.Close().\n"+
+		t.Errorf("%s defers publisher.Close() BEFORE closeStore().\n"+
 			"  Defers run LIFO, so declaring the publisher's first makes it run LAST: the\n"+
 			"  Redis client is already closed when the final flush tries to write through\n"+
 			"  it, every command returns redis: client is closed, and the queued chunk is\n"+
 			"  put back on a queue nobody drains again. Those relays were served, signed\n"+
 			"  and answered -- they are simply never written.\n"+
-			"  Declare the publisher's defer AFTER the client's.", path)
+			"  Declare the publisher's defer AFTER closeStore's.", path)
 	}
 }
 
@@ -149,4 +169,43 @@ func a() {
 	if c, p := deferredCloseOf(f, "redisClient"), deferredCloseOf(f, "publisher"); p <= c {
 		t.Fatal("matcher does not order two defers by source position")
 	}
+}
+
+// returns walks the return statements of the top-level function fn.
+func returns(f *ast.File, fn string, visit func(*ast.ReturnStmt) bool) bool {
+	for _, decl := range f.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if !ok || d.Recv != nil || d.Name.Name != fn || d.Body == nil {
+			continue
+		}
+		found := false
+		ast.Inspect(d.Body, func(n ast.Node) bool {
+			if r, ok := n.(*ast.ReturnStmt); ok && visit(r) {
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
+	return false
+}
+
+// returnsIdentAt reports whether fn has a return whose result at idx is the
+// identifier name.
+func returnsIdentAt(f *ast.File, fn string, idx int, name string) bool {
+	return returns(f, fn, func(r *ast.ReturnStmt) bool {
+		return len(r.Results) > idx && isIdentNamed(r.Results[idx], name)
+	})
+}
+
+// returnsCallOf reports whether fn, or a function literal inside it, returns
+// the results of a call to callee directly.
+func returnsCallOf(f *ast.File, fn, callee string) bool {
+	return returns(f, fn, func(r *ast.ReturnStmt) bool {
+		if len(r.Results) != 1 {
+			return false
+		}
+		call, ok := r.Results[0].(*ast.CallExpr)
+		return ok && isIdentNamed(call.Fun, callee)
+	})
 }

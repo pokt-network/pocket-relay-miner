@@ -229,7 +229,7 @@ func TestRelayEntry_ARelayAfterAClaimIsReactivatedIsRejectedAsSealed(t *testing.
 	require.NoError(t, w.smst.DeleteTree(w.ctx, sessionID))
 	reactivated, err := w.store.ReactivateClaimed(w.ctx, sessionID, bytes.Repeat([]byte{1}, SMSTRootLen), "claim-tx")
 	require.NoError(t, err)
-	require.True(t, reactivated, "CONTROL: the session is back to claimed")
+	require.Equal(t, SessionStateClaimTxError, reactivated.From, "CONTROL: the session is back to claimed")
 
 	sealed := relaysRejected.WithLabelValues(w.supplier, "session_sealed", "svc-1")
 	before := testutil.ToFloat64(sealed)

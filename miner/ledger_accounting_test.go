@@ -64,6 +64,12 @@ func relaysLost(supplier, service, reason string) float64 {
 	return testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, service, reason))
 }
 
+// priced is a session priced at amount uPOKT: these tests are about which book
+// money goes to, and session_price_test.go about what it is priced at.
+func priced(amount uint64) Upokt {
+	return Upokt{Amount: amount, OK: true}
+}
+
 func relaysForgone(supplier, service, reason string) float64 {
 	return testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, service, reason))
 }
@@ -75,14 +81,14 @@ func relaysForgone(supplier, service, reason string) float64 {
 // A retryable claim submission failure is an ATTEMPT. It counts the session and
 // NO money: the claim never reached the chain, so the money was never in the
 // book, and the reconciler will either put it there (on_chain_found) or write it
-// off (on_chain_missing). Putting uPOKT here is what made upokt_lost_total read
+// off (on_chain_missing). Putting uPOKT here is what made chain_upokt_lost_total read
 // 45% of revenue on a run that lost nothing.
 func TestClaimTxError_Resolvable_CountsTheSessionAndNoMoney(t *testing.T) {
 	const supplier, service = "pokt1ledger_claim_attempt", "svc-1"
 	before := readLedger(supplier, service, "claim_tx_error", string(RebroadcastPhaseClaim))
 	relaysLostBefore := relaysLost(supplier, service, "claim_tx_error")
 
-	RecordClaimTxError(supplier, service, true, 9, 9_000_000)
+	RecordClaimTxError(supplier, service, true, 9, 9_000_000, priced(9))
 
 	after := readLedger(supplier, service, "claim_tx_error", string(RebroadcastPhaseClaim))
 	require.Equal(t, before.sessions+1, after.sessions,
@@ -102,14 +108,14 @@ func TestClaimTxError_NoResolver_IsForgoneNotAnAttempt(t *testing.T) {
 	const supplier, service = "pokt1ledger_claim_noresolver", "svc-1"
 	before := readLedger(supplier, service, "claim_tx_error", string(RebroadcastPhaseClaim))
 
-	RecordClaimTxError(supplier, service, false, 4, 4_000_000)
+	RecordClaimTxError(supplier, service, false, 4, 4_000_000, priced(4))
 
 	after := readLedger(supplier, service, "claim_tx_error", string(RebroadcastPhaseClaim))
 	require.Equal(t, before.sessions+1, after.sessions)
 	require.Equal(t, before.forgone+4, after.forgone,
 		"no resolver exists, so this is final: count it where work that never entered the book is counted")
 	require.Equal(t, before.lost, after.lost,
-		"forgone and not lost: it was never in upokt_claimed_total, so subtracting it from claimed is wrong")
+		"forgone and not lost: it was never in chain_upokt_claimed_total, so subtracting it from claimed is wrong")
 	require.Equal(t, before.unresolvedOpen, after.unresolvedOpen,
 		"a balance nothing can close must never be opened: that is the signal this family exists to avoid faking")
 }
@@ -123,7 +129,7 @@ func TestProofTxError_Resolvable_OpensUnresolvedAndNotLoss(t *testing.T) {
 	before := readLedger(supplier, service, "proof_tx_error", string(RebroadcastPhaseProof))
 	relaysLostBefore := relaysLost(supplier, service, "proof_tx_error")
 
-	RecordProofTxError(supplier, service, true, 6, 6_000_000)
+	RecordProofTxError(supplier, service, true, 6, 6_000_000, priced(6))
 
 	after := readLedger(supplier, service, "proof_tx_error", string(RebroadcastPhaseProof))
 	require.Equal(t, before.sessions+1, after.sessions)
@@ -144,7 +150,7 @@ func TestProofTxError_NoResolver_IsLostNotUnresolved(t *testing.T) {
 	const supplier, service = "pokt1ledger_proof_noresolver", "svc-1"
 	before := readLedger(supplier, service, "proof_tx_error", string(RebroadcastPhaseProof))
 
-	RecordProofTxError(supplier, service, false, 5, 5_000_000)
+	RecordProofTxError(supplier, service, false, 5, 5_000_000, priced(5))
 
 	after := readLedger(supplier, service, "proof_tx_error", string(RebroadcastPhaseProof))
 	require.Equal(t, before.sessions+1, after.sessions)
@@ -162,7 +168,7 @@ func TestProofTxError_NoResolver_IsLostNotUnresolved(t *testing.T) {
 
 // The claim tx hash is read off the snapshot, never inferred. Empty means no
 // claim transaction ever went out, so this session was never in
-// upokt_claimed_total: counting it lost is exactly what drove the residual
+// chain_upokt_claimed_total: counting it lost is exactly what drove the residual
 // negative. Non-empty means the claim was accepted, the money IS in the book,
 // and a window closing on it now means it will never be proved.
 func TestClaimWindowClosed_TheTxHashDecidesForgoneOrLost(t *testing.T) {
@@ -172,7 +178,7 @@ func TestClaimWindowClosed_TheTxHashDecidesForgoneOrLost(t *testing.T) {
 		relaysForgoneBefore := relaysForgone(supplier, service, "claim_window_closed")
 		relaysLostBefore := relaysLost(supplier, service, "claim_window_closed")
 
-		RecordClaimWindowClosed(supplier, service, "", 3, 3_000_000)
+		RecordClaimWindowClosed(supplier, service, "", 3, 3_000_000, priced(3))
 
 		after := readLedger(supplier, service, "claim_window_closed", string(RebroadcastPhaseClaim))
 		require.Equal(t, before.sessions+1, after.sessions)
@@ -190,7 +196,7 @@ func TestClaimWindowClosed_TheTxHashDecidesForgoneOrLost(t *testing.T) {
 		const supplier, service = "pokt1ledger_cwc_lost", "svc-1"
 		before := readLedger(supplier, service, "claim_window_closed", string(RebroadcastPhaseClaim))
 
-		RecordClaimWindowClosed(supplier, service, "DEADBEEF", 3, 3_000_000)
+		RecordClaimWindowClosed(supplier, service, "DEADBEEF", 3, 3_000_000, priced(3))
 
 		after := readLedger(supplier, service, "claim_window_closed", string(RebroadcastPhaseClaim))
 		require.Equal(t, before.lost+3, after.lost,
@@ -201,7 +207,7 @@ func TestClaimWindowClosed_TheTxHashDecidesForgoneOrLost(t *testing.T) {
 
 // The proof side reads ProofTxHash, and its non-empty case is NOT a loss for a
 // reason that is easy to get backwards: a submitted proof was already counted
-// into upokt_proved_total at submission, so counting anything here would be the
+// into chain_upokt_proved_total at submission, so counting anything here would be the
 // session leaving the book through a second door. Measured 2026-09-17: 12
 // proof_window_closed sessions whose proof was already on chain.
 func TestProofWindowClosed_TheTxHashDecidesLostOrAttempt(t *testing.T) {
@@ -209,7 +215,7 @@ func TestProofWindowClosed_TheTxHashDecidesLostOrAttempt(t *testing.T) {
 		const supplier, service = "pokt1ledger_pwc_lost", "svc-1"
 		before := readLedger(supplier, service, "proof_window_closed", string(RebroadcastPhaseProof))
 
-		RecordProofWindowClosed(supplier, service, "", 8, 8_000_000)
+		RecordProofWindowClosed(supplier, service, "", 8, 8_000_000, priced(8))
 
 		after := readLedger(supplier, service, "proof_window_closed", string(RebroadcastPhaseProof))
 		require.Equal(t, before.sessions+1, after.sessions)
@@ -225,13 +231,13 @@ func TestProofWindowClosed_TheTxHashDecidesLostOrAttempt(t *testing.T) {
 		const supplier, service = "pokt1ledger_pwc_attempt", "svc-1"
 		before := readLedger(supplier, service, "proof_window_closed", string(RebroadcastPhaseProof))
 
-		RecordProofWindowClosed(supplier, service, "CAFEBABE", 8, 8_000_000)
+		RecordProofWindowClosed(supplier, service, "CAFEBABE", 8, 8_000_000, priced(8))
 
 		after := readLedger(supplier, service, "proof_window_closed", string(RebroadcastPhaseProof))
 		require.Equal(t, before.sessions+1, after.sessions,
 			"the operator still sees the window closed")
 		require.Equal(t, before.lost, after.lost,
-			"this proof was submitted, so upokt_proved_total already counted it; "+
+			"this proof was submitted, so chain_upokt_proved_total already counted it; "+
 				"counting it lost too is the double count that read 108.4%")
 		require.Equal(t, before.unresolvedOpen, after.unresolvedOpen,
 			"and it must not open a balance either, for the same reason: proved already took it")
@@ -246,7 +252,7 @@ func TestUnresolvedResolution_TouchesNoSessionCounter(t *testing.T) {
 	before := testutil.ToFloat64(sessionsFailedTotal.WithLabelValues(supplier, service, "proof_tx_error"))
 	closedBefore := testutil.ToFloat64(upoktUnresolvedResolvedTotal.WithLabelValues(supplier, service, string(RebroadcastPhaseProof)))
 
-	RecordSessionUnresolvedResolved(supplier, service, string(RebroadcastPhaseProof), 2, 2_000_000)
+	RecordSessionUnresolvedResolved(supplier, service, string(RebroadcastPhaseProof), 2, 2_000_000, priced(2))
 
 	require.Equal(t, before,
 		testutil.ToFloat64(sessionsFailedTotal.WithLabelValues(supplier, service, "proof_tx_error")),
@@ -285,18 +291,18 @@ func TestMoneyLedgerCloses_OverAFailedProofThatLandsOnRetry(t *testing.T) {
 	require.Zero(t, residual(), "an empty book closes")
 
 	// The claim is accepted: the money enters the book.
-	RecordRevenueClaimed(supplier, service, cu, relays)
+	RecordRevenueClaimed(supplier, service, cu, relays, priced(10))
 	require.Equal(t, float64(10), residual(),
 		"claimed and not yet settled: the residual IS the open balance, and that is the honest reading")
 
 	// The proof submission fails, retryably. The money moves to `unresolved`.
-	RecordProofTxError(supplier, service, true, relays, cu)
+	RecordProofTxError(supplier, service, true, relays, cu, priced(10))
 	require.Zero(t, residual(),
 		"claimed = proved + lost + unresolved: the session is accounted for while its fate is unknown")
 
 	// The reconciler finds the proof on chain: the balance closes into proved.
-	RecordSessionUnresolvedResolved(supplier, service, string(RebroadcastPhaseProof), relays, cu)
-	RecordRevenueProved(supplier, service, cu, relays)
+	RecordSessionUnresolvedResolved(supplier, service, string(RebroadcastPhaseProof), relays, cu, priced(10))
+	RecordRevenueProved(supplier, service, cu, relays, priced(10))
 	require.Zero(t, residual(),
 		"and it still closes once the chain has answered -- this is the case that read 108.4%")
 
@@ -324,7 +330,7 @@ func TestMarkAndCountProofWindowClosed_ASubmittedProofIsNotCountedLost(t *testin
 	}
 	require.NoError(t, f.coordinator.OnSessionCreated(f.ctx, sessionID, supplier, service, "pokt1app", 1, 10))
 
-	// The proof WAS submitted: upokt_proved_total already counted this session at
+	// The proof WAS submitted: chain_upokt_proved_total already counted this session at
 	// submission, so the window closing on it must not name a second exit.
 	snapshot := &SessionSnapshot{
 		SessionID:               sessionID,
