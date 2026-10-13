@@ -112,18 +112,6 @@ const (
 	flagNode       = "node"
 )
 
-// relayerValidateCmd runs the exact config checks the relayer runs at startup —
-// parse, Validate(), and BuildPools() — without starting anything, and exits
-// non-zero on the first error. Run it before deploying a config change: a
-// config the relayer rejects will not boot, so catching it here beats finding
-// out when the pod fails to come up.
-//
-// With --check-stake it additionally queries the chain for each configured
-// supplier's on-chain service configs and cross-checks the staked
-// (service, transport) pairs against the local backends: a pair you are staked
-// for but have no backend to serve is an ERROR (you earn nothing on it,
-// silently); a backend you configured that no supplier stakes is surplus,
-// reported as info.
 // printSimulationWarnings is what validate reports about the simulation block
 // beyond the checks that would stop the process. Advisory only: the exit
 // status stays 0.
@@ -155,6 +143,18 @@ func printSimulationWarnings(w io.Writer, sim *relayer.SimulationConfig) {
 	}
 }
 
+// relayerValidateCmd runs the exact config checks the relayer runs at startup —
+// parse, Validate(), and BuildPools() — without starting anything, and exits
+// non-zero on the first error. Run it before deploying a config change: a
+// config the relayer rejects will not boot, so catching it here beats finding
+// out when the pod fails to come up.
+//
+// With --check-stake it additionally queries the chain for each configured
+// supplier's on-chain service configs and cross-checks the staked
+// (service, transport) pairs against the local backends: a pair you are staked
+// for but have no backend to serve is an ERROR (you earn nothing on it,
+// silently); a backend you configured that no supplier stakes is surplus,
+// reported as info.
 func relayerValidateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "validate",
