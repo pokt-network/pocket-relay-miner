@@ -47,28 +47,30 @@ response; the **miner** builds the claim and the proof from the served relays
 and submits them to the chain. It runs in 1 of 2 modes:
 
 - **High-availability mode**: 2 processes from 1 binary (`relayer`, `miner`),
-  sharing 1 Redis; relayers and miners can have replicas. Released (v0.1.2),
-  and its Docker Compose runbook was verified on beta.
+  sharing 1 Redis; relayers and miners can have replicas. Released (v0.1.3);
+  its Docker Compose runbook was verified on beta with an image built before
+  v0.1.0.
 - **Standalone mode**: 1 process (`standalone`) that runs both, its state in an
-  embedded store on local disk, no Redis, no replicas. Built from source until
-  a release ships it. On a local chain (Tilt, level 3) it served, claimed,
-  proved and settled every relay, as high-availability mode did; not yet run
-  on beta.
+  embedded store on local disk, no Redis, no replicas. Released (v0.1.3).
+  On a local chain (Tilt, level 3) it served, claimed, proved and settled
+  every relay, as high-availability mode did; its runbooks are not yet
+  verified on beta.
 
 [docs/deploy/README.md, "Choose a mode"](docs/deploy/README.md#choose-a-mode)
 compares them. **Choosing the mode is the human's decision.** When they have not
-said, ask these 3 questions, in 1 message, and recommend from the answers:
+said, ask these 2 questions, in 1 message, and recommend from the answers:
 
 1. Must serving and claiming survive a host or process dying (more than one
    host, replicas, failover)? Yes: high-availability mode.
 2. Will it run on 1 host, and would they rather not operate Redis? Yes to both:
    standalone mode.
-3. Do they need a released image today? Yes: high-availability mode until a
-   release ships standalone mode; otherwise standalone mode is built from source.
+
+If neither answer decides it, recommend high-availability mode.
 
 Say why in 1 line ("1 host, no Redis: standalone mode"), name the runbook, and
 let them confirm. If they do not answer, start with high-availability mode (the
-released one) and tell them standalone mode exists, in 1 line. Moving between
+one whose runbook was verified on beta) and tell them standalone mode exists,
+in 1 line. Moving between
 the modes later is a fresh start: their state lives in different stores.
 
 ## Where to go
@@ -85,7 +87,7 @@ the modes later is a fresh start: their state lives in different stores.
   [docs/deploy/README.md](docs/deploy/README.md#words-you-will-meet).
 - **The human has nothing yet** (no key, no POKT, no stake): the usual case,
   and not a blocker. In this order:
-  1. Start now: the Docker Compose runbook of the mode they chose (the 3
+  1. Start now: the Docker Compose runbook of the mode they chose (the 2
      questions above; high availability when they do not answer) on beta
      with the public example key, steps 0 to 8, with the dashboards if they
      want graphs. It starts as shipped, with the example's `my-service`:
@@ -157,7 +159,7 @@ high-availability mode's; standalone mode's are after the list.
    on 1 relayer + 1 miner and on 2 relayers + 2 miners, the latter at lower
    load; the load tests and every capacity figure are from 1 relayer + 1 miner.
 2. **Same version for relayer and miner**: image
-   `ghcr.io/pokt-network/pocket-relay-miner:v0.1.2` for both, or the binary of
+   `ghcr.io/pokt-network/pocket-relay-miner:v0.1.3` for both, or the binary of
    the same tag. Mixed versions are not supported. Never use a moving tag.
 3. **Redis 8.10 or newer, with `maxmemory` set and `maxmemory-policy
    noeviction`.** Both binaries refuse to start when `redis_version` is below

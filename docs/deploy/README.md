@@ -1,4 +1,4 @@
-# Deploying Pocket RelayMiner v0.1.2
+# Deploying Pocket RelayMiner v0.1.3
 
 Start here, pick a mode and a path, and follow its runbook from the first step.
 
@@ -57,7 +57,7 @@ Start here, pick a mode and a path, and follow its runbook from the first step.
 | Replicas and failover | no: 1 process per set of supplier keys | yes: miners share the suppliers through leases, relayers scale out |
 | What you operate | 1 process and 1 directory | the processes and a Redis with `maxmemory` and `noeviction` |
 | Config | 1 file ([config.standalone.example.yaml](../../config.standalone.example.yaml)) | 1 per process ([relayer](../../config.relayer.example.yaml), [miner](../../config.miner.example.yaml)) |
-| Since | not in v0.1.2: build from source until a release ships it | v0.1.0 |
+| Since | v0.1.3 | v0.1.0 |
 | Load-tested | no: the capacity figures below are high-availability mode's | 1 relayer + 1 miner ([capacity report](../benchmarks/v0.1.0/Relay-Miner-Capacity.pdf)) |
 
 Choose standalone mode for one host that serves and claims for its own
@@ -71,7 +71,7 @@ between them is a fresh start: their state is in different stores.
 | Path | Mode | Use it when | Runbook | Verified |
 |---|---|---|---|---|
 | Docker Compose | high availability | you want the fastest start, on beta through public endpoints | [DOCKER_COMPOSE.md](DOCKER_COMPOSE.md) | on beta with an unstaked key: configs validated, Redis, node connection, blocks reaching both processes, relayer ready. Not verified: relays, claims and proofs on beta or mainnet |
-| Docker Compose | standalone | the fastest start without Redis | [DOCKER_COMPOSE_STANDALONE.md](DOCKER_COMPOSE_STANDALONE.md) | config validated; the process starts with no Redis and stops only where it needs the node. Not verified: the image build, and the run on beta |
+| Docker Compose | standalone | the fastest start without Redis | [DOCKER_COMPOSE_STANDALONE.md](DOCKER_COMPOSE_STANDALONE.md) | config validated; the process starts with no Redis and stops only where it needs the node. Not verified: the pull of the released image, and the run on beta |
 | Host (binary + systemd) | high availability | you run services on VMs or bare metal without containers | [HOST.md](HOST.md) | configs and units checked; not verified end to end under systemd |
 | Host (binary + systemd) | standalone | 1 VM or bare-metal host, no containers, no Redis | [HOST_STANDALONE.md](HOST_STANDALONE.md) | config and unit checked; not verified end to end under systemd |
 | Kubernetes | either | you already run Kubernetes | no example in v0.1.0 | not verified |
@@ -132,7 +132,7 @@ produces, where there is one.
 
 | # | Invariant | If broken |
 |---|---|---|
-| 1 | High-availability mode: relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.2`, or binaries built from tag `v0.1.2`. Standalone mode runs 1 binary | mixed versions are not supported |
+| 1 | High-availability mode: relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.3`, or binaries built from tag `v0.1.3`. Standalone mode runs 1 binary | mixed versions are not supported |
 | 2 | High-availability mode: Redis 8.10 or newer with `maxmemory` set and `maxmemory-policy noeviction` ([config.redis.example.conf](../../config.redis.example.conf)). Checked when the process starts, not by `validate`. Standalone mode: `storage.path` on local disk with room; new work stops below 1 GiB free | Redis older than 8.10, `maxmemory` 0 or another policy: [both refuse to start](TROUBLESHOOTING.md#redis). A full disk: [work stops](TROUBLESHOOTING.md#standalone-mode) |
 | 3 | `GOMEMLIMIT` and `GOMAXPROCS` set, or container / systemd memory and CPU limits | [each process sizes itself from the whole host](TROUBLESHOOTING.md#memory-and-cpu) |
 | 4 | Miner config has `block_time_seconds` and the right `pocket_node.chain_id`, and the node is reachable | [the miner exits](TROUBLESHOOTING.md#miner-does-not-start) |

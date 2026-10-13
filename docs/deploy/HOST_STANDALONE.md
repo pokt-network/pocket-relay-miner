@@ -28,9 +28,11 @@ in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
   [prerequisites](README.md#prerequisites) of standalone mode: a reachable
   node, a staked supplier key, a backend per service, a funded supplier
   account, and free space on the disk of `/var/lib`.
-- A copy of this repository, for `examples/host/`. Standalone mode is not in
-  `v0.1.2`: use a checkout that has `docs/deploy/HOST_STANDALONE.md` (this
-  file).
+- A copy of this repository at tag `v0.1.3`, for `examples/host/`:
+
+```bash
+git clone --branch v0.1.3 https://github.com/pokt-network/pocket-relay-miner.git && cd pocket-relay-miner
+```
 
 **Run**
 
@@ -43,10 +45,20 @@ takes no new work below 1 GiB free.
 
 ## Step 1: get the binary
 
-Standalone mode is not in a release yet: build it from this checkout (needs Go
-1.26.5 and make).
+Pick 1 of 2 ways. Both give the same binary.
 
-**Run**
+**Run** (download it from the release; `arm64` instead of `amd64` on ARM)
+
+```bash
+curl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.3/pocket-relay-miner_v0.1.3_linux_amd64.tar.gz
+curl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.3/checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+mkdir -p bin && tar -xzf pocket-relay-miner_v0.1.3_linux_amd64.tar.gz -C bin
+```
+
+**Expect**: `pocket-relay-miner_v0.1.3_linux_amd64.tar.gz: OK`
+
+Or **Run** (build from source; needs Go 1.26.5 and make)
 
 ```bash
 make build-release

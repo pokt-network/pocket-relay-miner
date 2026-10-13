@@ -97,8 +97,8 @@ version. v0.1.0 was tested on 1 relayer + 1 miner and on 2 relayers + 2 miners
 
 **Standalone mode**: 1 process (`pocket-relay-miner standalone`) runs the
 relayer and the miner together, keeps its state in an embedded store on local
-disk, and needs no Redis; no replicas. Built from source until a release ships
-it, and not yet load-tested:
+disk, and needs no Redis; no replicas. Released in v0.1.3, and not yet
+load-tested:
 
 ```
    gateways ──> ┌──────────── standalone ────────────┐ ──> your backends

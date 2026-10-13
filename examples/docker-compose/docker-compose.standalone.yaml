@@ -3,7 +3,7 @@
 # no Redis. Pointed at the beta testnet (chain id pocket-lego-testnet) through
 # the public Sauron endpoints. No chain runs here: the node is remote.
 #
-#   docker compose -p prm-standalone -f docker-compose.standalone.yaml up -d --build   # start
+#   docker compose -p prm-standalone -f docker-compose.standalone.yaml up -d           # start
 #   docker compose -p prm-standalone -f docker-compose.standalone.yaml ps              # standalone healthy
 #   docker compose -p prm-standalone -f docker-compose.standalone.yaml down -v         # stop and delete the store
 #
@@ -25,13 +25,9 @@
 
 services:
   standalone:
-    # Standalone mode is not in v0.1.2, the release the high-availability
-    # example pins: the image is built from this checkout, and named after it
-    # rather than after a release. Once a release ships standalone, pin that
-    # release's image here instead and drop build:.
-    build:
-      context: ../..
-    image: pocket-relay-miner:standalone-local
+    # The same image and tag as the high-availability example: standalone
+    # mode is a subcommand of the one binary, released since v0.1.3.
+    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.3
     command: ["standalone", "--config", "/config/standalone.yaml"]
     volumes:
       - ./config/standalone.yaml:/config/standalone.yaml:ro
