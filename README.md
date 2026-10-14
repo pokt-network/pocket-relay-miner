@@ -15,6 +15,12 @@ partial rejections.
 > suppliers each, and **1,501 of 1,501 claims settled**, with the miner killed
 > twice on purpose along the way. The numbers are in the
 > [capacity report](docs/benchmarks/v0.1.0/Relay-Miner-Capacity.pdf).
+>
+> **Standalone mode, measured for v0.1.3** with the same load and tests on 1
+> process: **10.5 M relays at ~2,400 relays/s** and **1,500 of 1,500 claims
+> settled**, with the process killed twice. The numbers, request latency
+> included, are in the
+> [standalone capacity report](docs/benchmarks/v0.1.3/Relay-Miner-Standalone-Capacity.pdf).
 
 ## Why operators run it
 
@@ -144,7 +150,7 @@ every change.
 | run Prometheus and Grafana with ready dashboards | [examples/observability/](examples/observability/README.md) |
 | know which metrics to read, in order | [docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md), and [scripts/observability/triage.sh](scripts/observability/triage.sh) to check them against Prometheus |
 | inspect what is in Redis (high-availability mode) | `pocket-relay-miner redis --help`; what each key holds: [docs/REDIS.md](docs/REDIS.md). In standalone mode: the metrics and the logs ([docs/STANDALONE.md](docs/STANDALONE.md)) |
-| size memory, CPU and Redis for your load | [docs/benchmarks/](docs/benchmarks/README.md): the v0.1.0 capacity report and how to read it |
+| size memory, CPU and Redis for your load | [docs/benchmarks/](docs/benchmarks/README.md): the v0.1.0 capacity report (high-availability mode), the v0.1.3 one (standalone mode), and how to read them |
 
 **Test and measure.**
 
