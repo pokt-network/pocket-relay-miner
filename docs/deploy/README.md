@@ -1,4 +1,4 @@
-# Deploying Pocket RelayMiner v0.1.3
+# Deploying Pocket RelayMiner v0.1.4
 
 Start here, pick a mode and a path, and follow its runbook from the first step.
 
@@ -132,7 +132,7 @@ produces, where there is one.
 
 | # | Invariant | If broken |
 |---|---|---|
-| 1 | High-availability mode: relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.3`, or binaries built from tag `v0.1.3`. Standalone mode runs 1 binary | mixed versions are not supported |
+| 1 | High-availability mode: relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.4`, or binaries built from tag `v0.1.4`. Standalone mode runs 1 binary | mixed versions are not supported |
 | 2 | High-availability mode: Redis 8.10 or newer with `maxmemory` set and `maxmemory-policy noeviction` ([config.redis.example.conf](../../config.redis.example.conf)). Checked when the process starts, not by `validate`. Standalone mode: `storage.path` on local disk with room; new work stops below 1 GiB free | Redis older than 8.10, `maxmemory` 0 or another policy: [both refuse to start](TROUBLESHOOTING.md#redis). A full disk: [work stops](TROUBLESHOOTING.md#standalone-mode) |
 | 3 | `GOMEMLIMIT` and `GOMAXPROCS` set, or container / systemd memory and CPU limits | [each process sizes itself from the whole host](TROUBLESHOOTING.md#memory-and-cpu) |
 | 4 | Miner config has `block_time_seconds` and the right `pocket_node.chain_id`, and the node is reachable | [the miner exits](TROUBLESHOOTING.md#miner-does-not-start) |
