@@ -31,7 +31,10 @@ StateDirectoryMode=0750
 # The relayer drains first, then the miner checkpoints its trees.
 TimeoutStopSec=120
 # Sizing: the sum of the high-availability units' limits (relayer 4G, miner
-# 8G). Not measured for standalone mode: watch memory as traffic grows.
+# 8G). The standalone load run (docs/benchmarks/v0.1.3/), at ~2,400 relays/s,
+# used 4.35 cores on average and 5.72 at a claim (per-block averages), and at
+# most 4.7 GiB outside a 1 MiB burst (its peak not sampled). Compare CPUQuota
+# with your relay rate, and watch memory as traffic grows.
 # Hard limits. Keep GOMEMLIMIT in standalone.env about 10% below MemoryMax,
 # and GOMAXPROCS equal to CPUQuota / 100%.
 MemoryMax=12G

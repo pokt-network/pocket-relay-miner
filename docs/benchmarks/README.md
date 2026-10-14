@@ -1,59 +1,50 @@
-# Benchmarks
 
-Capacity reports for released versions. Each one is a load run on 1 machine,
-kept here so the figures quoted in the other docs have a source you can open.
 
-## v0.1.0
+## v0.1.3, standalone mode
 
-[Relay-Miner-Capacity.pdf](v0.1.0/Relay-Miner-Capacity.pdf) (13 pages).
+[Relay-Miner-Standalone-Capacity.pdf](v0.1.3/Relay-Miner-Standalone-Capacity.pdf) (15 pages).
 
-What it measured:
+The same load and tests as the v0.1.0 report, run against 1 standalone
+process. What it measured:
 
-- **Topology**: 1 relayer, 1 miner and 1 Redis, each in its own container
-  (relayer 8 GiB, miner 8 GiB, Redis 16 GiB with `maxmemory` 12.8 GiB), against
-  a local chain with ~60 s blocks. The 2 relayers + 2 miners topology was tested
-  at lower load and is not in the report.
-- **Load**: 6 services on 3 transports (JSON-RPC, WebSocket, gRPC), each
-  session served by 50 suppliers, sent by the project's own
-  `pocket-relay-miner relay` client straight to the relayer, every response
-  verified. **10.7 M relays served at ~2,400 relays/s** on average.
-- **Settlement**: **1,501 of 1,501 claims settled** with valid proofs, none
-  expired, none slashed, with the miner **killed twice** on purpose (`kill -9`,
-  once in a claim window and once in a proof window).
+- **Topology**: 1 process (`pocket-relay-miner standalone`), memory limit
+  16 GiB with `GOMEMLIMIT` 14 GiB, CPU limit 20, its store on a local volume,
+  against a local chain with ~60 s blocks.
+- **Load**: the v0.1.0 report's 6 services on 3 transports, each session served
+  by 50 suppliers, sent by `pocket-relay-miner relay` straight to the process,
+  each response verified by the client. **10.5 M relays served at ~2,400
+  relays/s** over 73 minutes of load (2,420 relays/s in steady state).
+- **Settlement**: **1,500 of 1,500 claims settled**, each after its proof, none
+  expired, none slashed, with the process **killed twice** on purpose
+  (`kill -9`, once in a proof window under load and once in a claim window
+  with the load stopped). Each time it was ready again in 13 s.
 - **A burst**: 128 concurrent 1 MiB requests for 15 s on top of the full load.
-- **A comparison** with the build that preceded the release, run on the same
-  machine and load.
+  The process kept running; it refused 31 develop-http relays because that
+  service's validation queue (128 MiB) was full. The burst's memory peak was
+  not sampled.
 
-## The figures, in text
+### The figures, in text
 
-From the report's "Sizing this release" section (highest reading outside the
-1 MiB burst unless stated):
+From the report's "Sizing standalone mode" section (highest reading of the run
+unless stated):
 
-| Component | Sustained | What it cost |
+| Resource | At ~2,400 relays/s | Read it as |
 |---|---|---|
-| relayer | ~2,400 relays/s (the test load, not a ceiling) | at most 3.9 cores, at most 128 MiB |
-| miner | 300 to 600 live claim trees | 0.5 cores steady, 1.9 while ~300 claims are built; at most 2.9 GiB |
-| miner, 1 MiB burst | 128 concurrent 1 MiB requests for 15 s | 6.8 GiB of its 8 GiB limit |
-| Redis | 4.9 GiB peak | at most 0.7 cores; 38 % of the 12.8 GiB `maxmemory` |
+| CPU | 4.35 cores steady, 5.72 at a claim (per-block averages) | set by the relays; never throttled |
+| memory | working set at most 3.8 GiB steady, 4.7 GiB in the last reading before a kill in a proof window | the 1 MiB burst's peak was not sampled; 29 % of the 16 GiB limit; follows the live trees (600 at the peak) and falls at every claim |
+| disk | at most 2.8 GiB | released at every claim, 202 MiB once every generation settled |
+| disk writes | ~28,000 tree writes/s | the write-ahead log synced about once a second; its fsync to disk (not request latency) p99 17 ms steady, 0 sync failures |
+| request latency | p50 1.4 ms, p99 7.3 ms per block (jsonrpc and grpc) | median of the steady blocks, bucket-interpolated; p99 607.7 ms in the block of the 1 MiB burst; on the burst's service the mean was 54.7 ms, 40.1 of it the backend call |
 
-## How to read it against your load
+### How to read it against your load
 
-- The figures come from 1 topology on 1 machine. Supplier count, services,
-  validation mode, transports and hardware all change them: use them as a
-  reference for sizing, not as a guarantee.
-- **Relayer**: size it by CPU. It keeps no state, so more relays/s means more
-  cores or more relayers. The ~2,400 relays/s is the load the test chose, not a
-  ceiling.
-- **Miner and Redis**: size them by the sessions they hold at once, not by
-  relays/s. Both follow the number of live claim trees (1 per session and
-  supplier), and the protocol's session, claim and proof windows set how many
-  overlap. The report's "Sizing this release" section gives the memory per
-  number of live trees and explains the peak.
-- A burst of large relays adds to the miner's memory on top of that; the 1 MiB
-  burst is the thinnest margin in the run.
-- The limits shipped in [examples/](../../examples/) fit a few suppliers, well
-  below this run. The comments above each limit in
-  [docker-compose.yaml](../../examples/docker-compose/docker-compose.yaml) say
-  what to set at the report's scale, and
-  [config.redis.example.conf](../../config.redis.example.conf) is the Redis
-  configuration it ran with.
+- The same caveat as v0.1.0: 1 topology on 1 machine, a reference for sizing,
+  not a guarantee.
+- **CPU**: size it for the relay rate; at this load the process used 4.35
+  cores on average, and 5.72 at one generation's claims (per-block averages).
+- **Memory and disk**: size them by the sessions held at once: both follow the
+  live claim trees and fall at each claim. Keep the store's free disk well above the 1 GiB floor below which new
+  work stops; this run never came near it.
+- The limits in the standalone examples (`docker-compose.standalone.yaml`
+  6 GiB and 2 CPUs; the host unit `MemoryMax=12G`, `CPUQuota=400%`) are below
+  this run's measured CPU use: 4.35 cores on average and 5.72 at a claim.
