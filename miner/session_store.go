@@ -1126,7 +1126,9 @@ if ARGV[1] == 'claimed' then
 	end
 end
 redis.call('HSET', KEYS[1], 'state', ARGV[1], 'last_updated_at', ARGV[2])
-if ARGV[4] and ARGV[4] ~= '' then
+-- The verdict says how the move into this state was counted: a write that
+-- moves nothing counted nothing and must not replace it.
+if ARGV[4] and ARGV[4] ~= '' and old_state ~= ARGV[1] then
 	redis.call('HSET', KEYS[1], 'claim_missing_verdict', ARGV[4])
 end
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))

@@ -698,6 +698,11 @@ func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID strin
 		return nil
 	}
 
+	// Without the stored session nothing can be weighed, so nothing is counted,
+	// and no verdict is written for a reactivation to reverse.
+	if current == nil {
+		verdict = ""
+	}
 	flipped, err := c.sessionStore.MarkClaimTxError(ctx, sessionID, verdict)
 	if err != nil {
 		if errors.Is(err, ErrClaimAlreadyOnChain) {

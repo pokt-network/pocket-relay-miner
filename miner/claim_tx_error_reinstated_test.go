@@ -166,3 +166,55 @@ func TestOnSessionsNeedClaim_ASessionClaimedElsewhereIsNotCountedFailed(t *testi
 	require.NoError(t, err)
 	require.Equal(t, SessionStateClaimed, got.State, "and it is still claimed")
 }
+
+// The verdict says how the move into claim_tx_error was counted, so a write
+// that moves nothing keeps it: in both stores.
+func TestMarkClaimTxError_AWriteThatMovesNothingKeepsTheVerdict(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, _ *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		seedUnsentClaim(t, store, "sess-parity", service)
+
+		flipped, err := store.MarkClaimTxError(ctx, "sess-parity", ClaimTxErrorAttempt)
+		require.NoError(t, err)
+		require.True(t, flipped, "CONTROL: the first write moves the session")
+
+		flipped, err = store.MarkClaimTxError(ctx, "sess-parity", ClaimTxErrorForgone)
+		require.NoError(t, err)
+		require.False(t, flipped, "a second write moves nothing")
+
+		got, err := store.Get(ctx, "sess-parity")
+		require.NoError(t, err)
+		require.Equal(t, ClaimTxErrorAttempt, got.ClaimMissingVerdict, "and replaces nothing")
+	})
+}
+
+// unreadableSessions is a session store whose reads fail while its writes work.
+type unreadableSessions struct{ SessionStore }
+
+func (unreadableSessions) Get(context.Context, string) (*SessionSnapshot, error) {
+	return nil, errReadInjected
+}
+
+// A session that could not be read was not counted, so it carries no verdict
+// for a reactivation to reverse.
+func TestClaimTxError_AnUnreadSessionIsNeitherCountedNorTakenBack(t *testing.T) {
+	claimMissingStores(t, func(t *testing.T, coord *SessionCoordinator, store SessionStore, service string) {
+		ctx := context.Background()
+		seedUnsentClaim(t, store, "sess-unread", service)
+		before := readTxErrorProbe(service, "claim_tx_error")
+
+		blind := NewSessionCoordinator(testLogger(), unreadableSessions{store}, SMSTRecoveryConfig{SupplierAddress: "pokt1test"})
+		t.Cleanup(func() { _ = blind.Close() })
+		blind.SetPricer(perMillionPricer{})
+		require.NoError(t, blind.OnClaimTxError(ctx, "sess-unread", ClaimTxErrorForgone))
+
+		got, err := store.Get(ctx, "sess-unread")
+		require.NoError(t, err)
+		require.Equal(t, SessionStateClaimTxError, got.State, "CONTROL: the state was written")
+		require.Empty(t, got.ClaimMissingVerdict, "with no verdict: nothing was counted")
+
+		require.NoError(t, coord.OnClaimObservedOnChain(ctx, "sess-unread", make([]byte, SMSTRootLen), "deadbeef"))
+		require.Equal(t, txErrorProbe{}, readTxErrorProbe(service, "claim_tx_error").minus(before),
+			"nothing counted, nothing taken back")
+	})
+}
