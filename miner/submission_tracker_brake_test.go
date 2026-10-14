@@ -98,7 +98,7 @@ func TestSubmissionTracker_WritesEveryKindWhileTheStoreIsClosed(t *testing.T) {
 	require.NoError(t, tr.TrackProofSubmission(ctx, supplier, 110, sessionID,
 		[]byte("proof"), "0xprooftx", true, "", 105, 110, true, ""))
 	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
-		Supplier: supplier, TxHash: txHash, Outcome: "on_chain_found", InclusionHeight: 111,
+		Supplier: supplier, SessionEnd: 110, SessionID: sessionID, TxHash: txHash, Outcome: "on_chain_found", InclusionHeight: 111,
 	}))
 	require.NoError(t, tr.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
 		Supplier: supplier, SessionEnd: 110, SessionID: sessionID,
@@ -190,14 +190,14 @@ func TestSubmissionTracker_AnOutcomeWithNoRecordIsCounted(t *testing.T) {
 	missed := testutil.ToFloat64(trackingOutcomesWithoutRecord.WithLabelValues("claim"))
 
 	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
-		Supplier: supplier, TxHash: "0xtx-nobody", Outcome: "on_chain_found", InclusionHeight: 111,
+		Supplier: supplier, SessionEnd: 110, SessionID: "sess-a", TxHash: "0xtx-nobody", Outcome: "on_chain_found", InclusionHeight: 111,
 	}))
 	require.Equal(t, missed+1, testutil.ToFloat64(trackingOutcomesWithoutRecord.WithLabelValues("claim")),
 		"LINK outcome-without-record: an outcome that annotated nothing is counted")
 
 	// Control: the outcome that does find its record is not counted as missing.
 	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
-		Supplier: supplier, TxHash: "0xtx-a", Outcome: "on_chain_found", InclusionHeight: 111,
+		Supplier: supplier, SessionEnd: 110, SessionID: "sess-a", TxHash: "0xtx-a", Outcome: "on_chain_found", InclusionHeight: 111,
 	}))
 	require.Equal(t, missed+1, testutil.ToFloat64(trackingOutcomesWithoutRecord.WithLabelValues("claim")))
 }

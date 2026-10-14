@@ -3273,7 +3273,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 		inclusionQuery := m.config.ProofQueryClient
 		m.rebroadcastStore = m.storeBackend().rebroadcastStore()
 
-		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, inclusionHeight int64) error {
+		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error {
 			if outcome == inclusionFound {
 				// The chain holds this claim. Whatever the broadcast reported,
 				// the session must go back to `claimed` or its proof never goes
@@ -3301,7 +3301,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			if m.sharedSubmissionTracker != nil {
 				// Claim outcome is matched by the ORIGINAL submit tx hash (the one
 				// stored on the submission record); a rebroadcast changes the
-				// latest hash but the record key does not, so look up by OrigTxHash.
+				// latest hash but the record does not, so match on OrigTxHash.
 				origHash := e.OrigTxHash
 				if origHash == "" {
 					origHash = e.TxHash
@@ -3325,6 +3325,8 @@ func (m *SupplierManager) ensureSharedTrackers() {
 				// double up with.
 				if err := m.sharedSubmissionTracker.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
 					Supplier:        supplier,
+					SessionEnd:      sessionEnd,
+					SessionID:       sessionID,
 					TxHash:          origHash,
 					Outcome:         outcome,
 					InclusionHeight: inclusionHeight,

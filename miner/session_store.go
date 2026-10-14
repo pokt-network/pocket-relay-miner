@@ -176,9 +176,11 @@ type SessionSnapshot struct {
 	// ProofTxHash is the transaction hash of the submitted proof (for deduplication).
 	ProofTxHash string `json:"proof_tx_hash,omitempty"`
 
-	// ClaimMissingVerdict is where marking the session claim_missing counted
-	// its money (ClaimMissingLost or ClaimMissingForgone), written with that
-	// state; a later reactivation reverses exactly that and clears it.
+	// ClaimMissingVerdict is how marking the session failed counted it:
+	// claim_missing writes where its money went (ClaimMissingLost or
+	// ClaimMissingForgone), claim_tx_error one of the ClaimTxError verdicts.
+	// It is written with that state; a later reactivation reverses exactly that
+	// and clears it.
 	ClaimMissingVerdict string `json:"claim_missing_verdict,omitempty"`
 
 	// LastUpdatedAt is when the snapshot was last updated.
@@ -223,6 +225,11 @@ type SessionStore interface {
 	// MarkClaimMissing is UpdateState to SessionStateClaimMissing that also
 	// records, in the same write, where its money was counted (verdict).
 	MarkClaimMissing(ctx context.Context, sessionID string, verdict string) error
+
+	// MarkClaimTxError is UpdateState to SessionStateClaimTxError that also
+	// records, in the same write, how its failure was counted (verdict), and
+	// reports whether this call moved the session into that state.
+	MarkClaimTxError(ctx context.Context, sessionID string, verdict string) (bool, error)
 
 	// ReactivateClaimed atomically returns a session to SessionStateClaimed
 	// after the chain was observed to hold its claim, filling the claimed root
@@ -799,15 +806,23 @@ func (s *RedisSessionStore) Delete(ctx context.Context, sessionID string) error 
 // write goes through the same DEL+HSET+index transaction, which also
 // migrates any legacy JSON keys seen during a rolling upgrade.
 func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, newState SessionState) error {
-	return s.updateState(ctx, sessionID, newState, "")
+	_, err := s.updateState(ctx, sessionID, newState, "")
+	return err
 }
 
 // MarkClaimMissing implements SessionStore.
 func (s *RedisSessionStore) MarkClaimMissing(ctx context.Context, sessionID string, verdict string) error {
-	return s.updateState(ctx, sessionID, SessionStateClaimMissing, verdict)
+	_, err := s.updateState(ctx, sessionID, SessionStateClaimMissing, verdict)
+	return err
 }
 
-func (s *RedisSessionStore) updateState(ctx context.Context, sessionID string, newState SessionState, verdict string) error {
+// MarkClaimTxError implements SessionStore.
+func (s *RedisSessionStore) MarkClaimTxError(ctx context.Context, sessionID string, verdict string) (bool, error) {
+	return s.updateState(ctx, sessionID, SessionStateClaimTxError, verdict)
+}
+
+// updateState reports whether the session moved into newState.
+func (s *RedisSessionStore) updateState(ctx context.Context, sessionID string, newState SessionState, verdict string) (bool, error) {
 	key := s.sessionKey(sessionID)
 	now := time.Now().Format(time.RFC3339Nano)
 
@@ -826,38 +841,42 @@ func (s *RedisSessionStore) updateState(ctx context.Context, sessionID string, n
 	if err != nil {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "session not found") {
-			return fmt.Errorf("session not found: %s", sessionID)
+			return false, fmt.Errorf("session not found: %s", sessionID)
 		}
 		if strings.Contains(errMsg, "claim already on chain") {
-			return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
+			return false, fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
 		}
 		if strings.Contains(errMsg, "not an unsent claim") || strings.Contains(errMsg, "not an unsent proof") {
-			return fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, sessionID, newState)
+			return false, fmt.Errorf("%w: %s to %s", ErrSessionNotDeferred, sessionID, newState)
 		}
 		if strings.Contains(errMsg, "legacy key") {
 			// Legacy JSON string key — fall back to Get→Save migration path
 			snapshot, getErr := s.Get(ctx, sessionID)
 			if getErr != nil {
-				return getErr
+				return false, getErr
 			}
 			if snapshot == nil {
-				return fmt.Errorf("session not found: %s", sessionID)
+				return false, fmt.Errorf("session not found: %s", sessionID)
 			}
 			if err := checkStateWrite(snapshot, newState); err != nil {
-				return err
+				return false, err
 			}
+			flipped := snapshot.State != newState
 			snapshot.State = newState
 			if verdict != "" {
 				snapshot.ClaimMissingVerdict = verdict
 			}
-			return s.Save(ctx, snapshot)
+			if err := s.Save(ctx, snapshot); err != nil {
+				return false, err
+			}
+			return flipped, nil
 		}
-		return fmt.Errorf("failed to update session state: %w", err)
+		return false, fmt.Errorf("failed to update session state: %w", err)
 	}
 
 	oldState := SessionState(oldStateStr)
 	if oldState == newState {
-		return nil
+		return false, nil
 	}
 
 	s.reindexState(ctx, sessionID, oldState, newState)
@@ -868,7 +887,7 @@ func (s *RedisSessionStore) updateState(ctx context.Context, sessionID string, n
 		Str("new_state", string(newState)).
 		Msg("updated session state")
 
-	return nil
+	return true, nil
 }
 
 // checkStateWrite returns why newState may not be written over snap, or nil.
@@ -1107,7 +1126,9 @@ if ARGV[1] == 'claimed' then
 	end
 end
 redis.call('HSET', KEYS[1], 'state', ARGV[1], 'last_updated_at', ARGV[2])
-if ARGV[4] and ARGV[4] ~= '' then
+-- The verdict says how the move into this state was counted: a write that
+-- moves nothing counted nothing and must not replace it.
+if ARGV[4] and ARGV[4] ~= '' and old_state ~= ARGV[1] then
 	redis.call('HSET', KEYS[1], 'claim_missing_verdict', ARGV[4])
 end
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))

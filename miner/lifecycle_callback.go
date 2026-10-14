@@ -682,30 +682,21 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 	// operator watches. A nil store is deliberately NOT counted as unrecoverable:
 	// an operator who disabled the reconciler already knows no retry is coming,
 	// and stamping every ejection would drown the case that is a surprise.
-	if recoverable || lc.rebroadcastStore == nil {
-		// `recoverable` is exactly "an entry landed, so the reconciler will
-		// answer for this session". With no store at all nothing will answer,
-		// and the money is counted forgone rather than left waiting forever.
-		RecordClaimTxError(
-			snapshot.SupplierOperatorAddress,
-			snapshot.ServiceID,
-			recoverable,
-			snapshot.RelayCount,
-			int64(snapshot.TotalComputeUnits),
-			lc.price(ctx, snapshot),
-		)
-	} else {
-		RecordClaimEjectedUnrecoverable(
-			snapshot.SupplierOperatorAddress,
-			snapshot.ServiceID,
-			snapshot.RelayCount,
-			int64(snapshot.TotalComputeUnits),
-			lc.price(ctx, snapshot),
-		)
+	//
+	// `recoverable` is exactly "an entry landed, so the reconciler will answer
+	// for this session". With no store at all nothing will answer, and the
+	// money is counted forgone rather than left waiting forever. The
+	// coordinator counts the verdict, and only when it moves the session.
+	verdict := ClaimTxErrorEjectedUnrecoverable
+	switch {
+	case recoverable:
+		verdict = ClaimTxErrorAttempt
+	case lc.rebroadcastStore == nil:
+		verdict = ClaimTxErrorForgone
 	}
 
 	if lc.sessionCoordinator != nil {
-		if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil && !errors.Is(err, ErrClaimAlreadyOnChain) {
+		if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID, verdict); err != nil && !errors.Is(err, ErrClaimAlreadyOnChain) {
 			logger.Warn().Err(err).
 				Str(logging.FieldSessionID, snapshot.SessionID).
 				Msg("failed to mark ejected session as claim_tx_error in Redis")
@@ -1979,16 +1970,21 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					Msg("claim not counted as lost: the node reports it already holds the transaction")
 			}
 
-			// Mark all sessions as failed due to claim TX error (after exhausting retries)
+			// Mark all sessions as failed due to claim TX error (after exhausting
+			// retries). The coordinator counts each one, by this verdict, only
+			// when it moves the session.
+			verdict := ClaimTxErrorForgone
+			if resolvable {
+				verdict = ClaimTxErrorAttempt
+			}
 			for _, snapshot := range groupSnapshots {
 				if nodeHoldsTheBatch {
 					break
 				}
-				RecordClaimTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits), lc.price(ctx, snapshot))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				if lc.sessionCoordinator != nil {
-					if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil && !errors.Is(err, ErrClaimAlreadyOnChain) {
+					if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID, verdict); err != nil && !errors.Is(err, ErrClaimAlreadyOnChain) {
 						logger.Warn().
 							Err(err).
 							Str(logging.FieldSessionID, snapshot.SessionID).
@@ -3441,7 +3437,8 @@ func (lc *LifecycleCallback) OnClaimTxError(ctx context.Context, snapshot *Sessi
 		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on claim tx error")
 	}
 
-	// Metrics already recorded at failure point, just cleanup
+	// The session coordinator counted the failure when it marked the session;
+	// this only cleans up.
 	return nil
 }
 
@@ -3474,7 +3471,8 @@ func (lc *LifecycleCallback) OnProofTxError(ctx context.Context, snapshot *Sessi
 		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on proof tx error")
 	}
 
-	// Metrics already recorded at failure point, just cleanup
+	// The session coordinator counted the failure when it marked the session;
+	// this only cleans up.
 	return nil
 }
 
