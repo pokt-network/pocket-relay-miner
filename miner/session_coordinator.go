@@ -116,10 +116,12 @@ func (c *SessionCoordinator) bookReactivation(ctx context.Context, sessionID str
 				Msg("session reactivated but it could not be read to weigh it: its claimed money is not counted")
 		}
 	}
-	if book := ReinstatedBook(r); book != "" {
-		if beforeErr == nil && before != nil {
-			RecordReinstated(before.SupplierOperatorAddress, before.ServiceID, string(r.From), book,
+	if book := ReinstatedBook(r); book != "" || ReinstatesAttempt(r) {
+		if beforeErr == nil && before != nil && book != "" {
+			RecordReinstated(before.SupplierOperatorAddress, before.ServiceID, ReinstatedReason(r), book,
 				before.RelayCount, int64(before.TotalComputeUnits), c.price(ctx, before))
+		} else if beforeErr == nil && before != nil {
+			RecordReinstatedAttempt(before.SupplierOperatorAddress, before.ServiceID, ReinstatedReason(r))
 		} else {
 			c.logger.Warn().Err(beforeErr).Str(logging.FieldSessionID, sessionID).
 				Str("reactivated_from", string(r.From)).
@@ -658,11 +660,15 @@ func (c *SessionCoordinator) OnClaimWindowClosed(ctx context.Context, sessionID 
 // OnClaimTxError marks session as failed due to claim transaction error.
 // Updates state immediately in Redis for HA compatibility.
 //
+// It counts the failure, by verdict (a ClaimTxError constant), only when this
+// call moved the session into claim_tx_error: a session that holds its claim,
+// or was marked already, is not a new failed session.
+//
 // IMPORTANT: This method checks the current Redis state before overwriting.
 // In multi-miner setups, another miner may have already successfully claimed
 // the session. Overwriting SessionStateClaimed with SessionStateClaimTxError
 // would kill the session and prevent proof submission, causing lost rewards.
-func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID string) error {
+func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID string, verdict string) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -686,9 +692,14 @@ func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID strin
 			Str("claim_tx_hash", current.ClaimTxHash).
 			Msg("NOT marking claim_tx_error: session already claimed by another miner")
 		return nil
+	} else if current != nil && current.State == SessionStateClaimTxError {
+		// Already marked and counted: a session fails once, and writing again
+		// would replace the verdict its count was made by.
+		return nil
 	}
 
-	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimTxError); err != nil {
+	flipped, err := c.sessionStore.MarkClaimTxError(ctx, sessionID, verdict)
+	if err != nil {
 		if errors.Is(err, ErrClaimAlreadyOnChain) {
 			c.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 				Msg("not marking claim_tx_error: the session holds its claim")
@@ -697,6 +708,18 @@ func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID strin
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_tx_error")
 		return err
+	}
+
+	// Weighed on the stored session, as its reinstatement is: what is counted
+	// here is what a reactivation reverses.
+	if flipped {
+		if current != nil {
+			RecordClaimTxErrorVerdict(current.SupplierOperatorAddress, current.ServiceID, verdict,
+				current.RelayCount, int64(current.TotalComputeUnits), c.price(ctx, current))
+		} else {
+			c.logger.Warn().Str(logging.FieldSessionID, sessionID).
+				Msg("claim_tx_error not counted in sessions_failed_total: the session could not be read to weigh it")
+		}
 	}
 
 	// Notify in-memory state update (if callback registered)

@@ -530,8 +530,8 @@ var (
 	)
 
 	// ====== REINSTATED: A VERDICT THE CHAIN TOOK BACK ======
-	// A session counted claim_missing comes back to claimed when the chain is
-	// later seen to hold its claim. A counter cannot go down, so what was
+	// A session counted claim_missing, claim_window_closed or claim_tx_error
+	// comes back to claimed when the chain is later seen to hold its claim. A counter cannot go down, so what was
 	// counted is reversed here, and every reader subtracts it: the session
 	// from sessions_failed_total, its money from the series `from` names.
 	sessionsReinstatedTotal = observability.MinerFactory.NewCounterVec(
@@ -539,7 +539,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "sessions_reinstated_total",
-			Help:      "Failed sessions taken back because the chain was later seen to hold their claim, by the reason they had been counted under (claim_missing, claim_window_closed). Subtract from sessions_failed_total for the net count",
+			Help:      "Failed sessions taken back because the chain was later seen to hold their claim, by the reason they had been counted under (claim_missing, claim_window_closed, claim_tx_error, claim_ejected_unrecoverable). Subtract from sessions_failed_total for the net count",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -548,7 +548,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_reinstated_total",
-			Help:      "Relays taken back from relays_lost_total or relays_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed). Subtract from the series from names",
+			Help:      "Relays taken back from relays_lost_total or relays_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed, claim_tx_error, claim_ejected_unrecoverable). Subtract from the series from names",
 		},
 		[]string{"supplier", "service_id", "reason", "from"},
 	)
@@ -557,7 +557,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "compute_units_reinstated_total",
-			Help:      "Compute units taken back from compute_units_lost_total or compute_units_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed). Subtract from the series from names",
+			Help:      "Compute units taken back from compute_units_lost_total or compute_units_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed, claim_tx_error, claim_ejected_unrecoverable). Subtract from the series from names",
 		},
 		[]string{"supplier", "service_id", "reason", "from"},
 	)
@@ -566,7 +566,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "chain_upokt_reinstated_total",
-			Help:      "uPOKT taken back from chain_upokt_lost_total or chain_upokt_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed). Subtract from the series from names: chain_upokt_claimed_total = chain_upokt_proved_total + (chain_upokt_lost_total - this{from=lost}) + (chain_upokt_unresolved_opened_total - chain_upokt_unresolved_resolved_total)",
+			Help:      "uPOKT taken back from chain_upokt_lost_total or chain_upokt_forgone_total (from=lost|forgone) because the chain was later seen to hold the claim, by reason (claim_missing, claim_window_closed, claim_tx_error, claim_ejected_unrecoverable). Subtract from the series from names: chain_upokt_claimed_total = chain_upokt_proved_total + (chain_upokt_lost_total - this{from=lost}) + (chain_upokt_unresolved_opened_total - chain_upokt_unresolved_resolved_total)",
 		},
 		[]string{"supplier", "service_id", "reason", "from"},
 	)
@@ -1908,9 +1908,8 @@ func RecordClaimMissing(supplier, serviceID, verdict string, relays, computeUnit
 // ReinstatedBook is the book a reactivated session's failure was counted in,
 // "" when it counted no money: claim_missing by the verdict it carried,
 // claim_window_closed as RecordClaimWindowClosed decided it (lost with a claim
-// tx hash, forgone without). claim_tx_error is reactivated only by the
-// inclusion reconciler, which means an entry existed: RecordClaimTxError
-// counted an attempt and no money.
+// tx hash, forgone without), claim_tx_error by the verdict it carried
+// (forgone unless it was an attempt).
 func ReinstatedBook(r Reactivation) string {
 	switch r.From {
 	case SessionStateClaimMissing:
@@ -1920,8 +1919,28 @@ func ReinstatedBook(r Reactivation) string {
 			return ClaimMissingLost
 		}
 		return ClaimMissingForgone
+	case SessionStateClaimTxError:
+		if r.ClaimMissingVerdict == ClaimTxErrorForgone || r.ClaimMissingVerdict == ClaimTxErrorEjectedUnrecoverable {
+			return ClaimMissingForgone
+		}
 	}
 	return ""
+}
+
+// ReinstatedReason is the reason a reactivated session's failure was counted
+// under: the state it failed in, except an ejected claim with no way back,
+// which rests in claim_tx_error and was counted claim_ejected_unrecoverable.
+func ReinstatedReason(r Reactivation) string {
+	if r.From == SessionStateClaimTxError && r.ClaimMissingVerdict == ClaimTxErrorEjectedUnrecoverable {
+		return "claim_ejected_unrecoverable"
+	}
+	return string(r.From)
+}
+
+// ReinstatesAttempt reports whether r reverses a failure counted with no
+// money: a claim_tx_error the inclusion reconciler was going to answer.
+func ReinstatesAttempt(r Reactivation) bool {
+	return r.From == SessionStateClaimTxError && r.ClaimMissingVerdict == ClaimTxErrorAttempt
 }
 
 // CreditsClaimed reports whether the flip into claimed that r describes is the
@@ -1952,6 +1971,12 @@ func RecordReinstated(supplier, serviceID, reason, from string, relays, computeU
 	relaysReinstatedTotal.WithLabelValues(supplier, serviceID, reason, from).Add(float64(relays))
 	computeUnitsReinstatedTotal.WithLabelValues(supplier, serviceID, reason, from).Add(cu)
 	addUpokt(upoktReinstatedTotal.WithLabelValues(supplier, serviceID, reason, from), supplier, serviceID, "reinstated", cu, upokt)
+}
+
+// RecordReinstatedAttempt reverses a failed session that was counted with no
+// money: the session only.
+func RecordReinstatedAttempt(supplier, serviceID, reason string) {
+	sessionsReinstatedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
 }
 
 // RecordClaimEjectedUnrecoverable records a claim the chain named inside a batch
@@ -1988,6 +2013,33 @@ func RecordClaimTxError(supplier, serviceID string, resolvable bool, relays, com
 		return
 	}
 	recordSessionForgone(supplier, serviceID, "claim_tx_error", relays, computeUnits, upokt)
+}
+
+// How a claim_tx_error session's failure was counted, kept on the session
+// (SessionSnapshot.ClaimMissingVerdict) so a reinstatement reverses that.
+const (
+	// ClaimTxErrorAttempt: a rebroadcast entry landed and the reconciler will
+	// answer, so the session was counted with no money.
+	ClaimTxErrorAttempt = "attempt"
+	// ClaimTxErrorForgone: nothing will answer, so its money was counted
+	// forgone under claim_tx_error.
+	ClaimTxErrorForgone = ClaimMissingForgone
+	// ClaimTxErrorEjectedUnrecoverable: ejected from its batch with no entry to
+	// bring it back, counted under claim_ejected_unrecoverable, money forgone.
+	ClaimTxErrorEjectedUnrecoverable = "ejected_unrecoverable"
+)
+
+// RecordClaimTxErrorVerdict counts a session that moved into claim_tx_error,
+// by the verdict written with it.
+func RecordClaimTxErrorVerdict(supplier, serviceID, verdict string, relays, computeUnits int64, upokt Upokt) {
+	switch verdict {
+	case ClaimTxErrorAttempt:
+		RecordClaimTxError(supplier, serviceID, true, relays, computeUnits, upokt)
+	case ClaimTxErrorForgone:
+		RecordClaimTxError(supplier, serviceID, false, relays, computeUnits, upokt)
+	case ClaimTxErrorEjectedUnrecoverable:
+		RecordClaimEjectedUnrecoverable(supplier, serviceID, relays, computeUnits, upokt)
+	}
 }
 
 // RecordProofWindowClosed records a proof window that closed on a session.

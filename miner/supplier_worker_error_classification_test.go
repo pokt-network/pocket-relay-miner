@@ -220,6 +220,9 @@ func (s *errorOnIncrementStore) UpdateState(ctx context.Context, sessionID strin
 func (s *errorOnIncrementStore) MarkClaimMissing(ctx context.Context, sessionID string, verdict string) error {
 	return s.inner.MarkClaimMissing(ctx, sessionID, verdict)
 }
+func (s *errorOnIncrementStore) MarkClaimTxError(ctx context.Context, sessionID string, verdict string) (bool, error) {
+	return s.inner.MarkClaimTxError(ctx, sessionID, verdict)
+}
 
 func (s *errorOnIncrementStore) ReactivateProved(ctx context.Context, sessionID string, proofTxHash string) (Reactivation, error) {
 	return s.inner.ReactivateProved(ctx, sessionID, proofTxHash)

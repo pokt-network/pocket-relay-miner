@@ -140,6 +140,13 @@ curl -s "localhost:26657/block_results?height=$H" | jq '
   `chain_upokt_reinstated_total{reason,from}` (`from` the book it had been counted
   in): the net is the failed count minus the reinstated one. Counters never go
   down, so every reader subtracts.
+- **`sessions_failed_total{reason="claim_tx_error"}`** and
+  **`{reason="claim_ejected_unrecoverable"}`**: a claim that did not go out. A
+  session is counted once, when it is marked, and not at all when another miner
+  already holds its claim. If the chain is later seen to hold the claim, it is
+  taken back the same way, under the reason it was counted under. A
+  `claim_tx_error` the reconciler was going to answer counted no money, so only
+  the session is taken back.
 - **`sessions_failed_total{reason="proof_window_closed"}`**: includes sessions
   whose proof was already on chain before the process restarted.
 - **`proofs_submitted_total`** does not count a proof that landed on a rebroadcast,

@@ -376,36 +376,45 @@ func (s *pebbleSessionStore) Delete(_ context.Context, sessionID string) error {
 }
 
 func (s *pebbleSessionStore) UpdateState(_ context.Context, sessionID string, newState SessionState) error {
-	return s.updateState(sessionID, newState, "")
+	_, err := s.updateState(sessionID, newState, "")
+	return err
 }
 
 func (s *pebbleSessionStore) MarkClaimMissing(_ context.Context, sessionID string, verdict string) error {
-	return s.updateState(sessionID, SessionStateClaimMissing, verdict)
+	_, err := s.updateState(sessionID, SessionStateClaimMissing, verdict)
+	return err
 }
 
-func (s *pebbleSessionStore) updateState(sessionID string, newState SessionState, verdict string) error {
+func (s *pebbleSessionStore) MarkClaimTxError(_ context.Context, sessionID string, verdict string) (bool, error) {
+	return s.updateState(sessionID, SessionStateClaimTxError, verdict)
+}
+
+// updateState reports whether the session moved into newState.
+func (s *pebbleSessionStore) updateState(sessionID string, newState SessionState, verdict string) (bool, error) {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 	snap, err := s.getLocked(sessionID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if snap == nil {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return false, fmt.Errorf("session not found: %s", sessionID)
 	}
 	if err := checkStateWrite(snap, newState); err != nil {
-		return err
+		return false, err
 	}
 	if snap.State == newState {
-		return nil
+		return false, nil
 	}
 	snap.State = newState
 	if verdict != "" {
 		snap.ClaimMissingVerdict = verdict
 	}
 	snap.LastUpdatedAt = time.Now()
-	_, err = s.writeLocked(snap, snap) // the state only: no tx hash changes
-	return err
+	if _, err := s.writeLocked(snap, snap); err != nil { // the state only: no tx hash changes
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *pebbleSessionStore) ReactivateClaimed(_ context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (Reactivation, error) {
