@@ -40,6 +40,11 @@ around them:
 | relay queue, sessions, dedup marks, relay meter counters, caches, SMST trees, claim/proof tracking and rebroadcast messages | Redis | the embedded store (`storage.path`) |
 | leader election, supplier leases | Redis, shared by the replicas | in the process: it leads and holds every supplier |
 
+Its load run, with CPU, memory, disk and request latency per block, is the
+[standalone capacity report](benchmarks/v0.1.3/Relay-Miner-Standalone-Capacity.pdf);
+[benchmarks/README.md](benchmarks/README.md) says how to read it against your
+load.
+
 ## Config
 
 Start from [config.standalone.example.yaml](../config.standalone.example.yaml).

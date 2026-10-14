@@ -410,5 +410,9 @@ with `https://sauron-rpc.infra.pocket.network/status` in step 2. **Not
 verified** on mainnet.
 
 The limit in `docker-compose.standalone.yaml` (6 GiB, 2 CPUs) is the sum of the
-high-availability example's relayer and miner, not a measurement of standalone
-mode. Watch the container's memory as traffic grows.
+high-availability example's relayer and miner. The
+[standalone capacity report](../benchmarks/v0.1.3/Relay-Miner-Standalone-Capacity.pdf)
+measured 1 process at ~2,400 relays/s: 4.35 cores on average and 5.72 at a
+claim (per-block averages), and at most 4.7 GiB outside a 1 MiB burst, whose
+memory peak was not sampled. Compare `cpus` (and `GOMAXPROCS`) with your relay
+rate, and watch the container's memory as traffic grows.

@@ -42,8 +42,11 @@ services:
       # "0.0.0.0:8180:8080" or "<public-ip>:8180:8080", behind your TLS proxy.
       - "127.0.0.1:${RELAYER_PORT:-8180}:8080"
     # Sizing: the sum of the high-availability example's miner (4g) and
-    # relayer (2g). Not measured for standalone mode: watch memory as traffic
-    # grows (docs/deploy/TROUBLESHOOTING.md, "Memory and CPU").
+    # relayer (2g). The standalone load run (docs/benchmarks/v0.1.3/) used
+    # 4.35 cores on average and 5.72 at a claim (per-block averages), and at
+    # most 4.7 GiB outside a 1 MiB burst (its peak not sampled), at ~2,400
+    # relays/s. Watch memory as traffic grows (docs/deploy/TROUBLESHOOTING.md,
+    # "Memory and CPU").
     mem_limit: 6g
     cpus: 2
     environment:

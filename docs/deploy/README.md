@@ -58,7 +58,7 @@ Start here, pick a mode and a path, and follow its runbook from the first step.
 | What you operate | 1 process and 1 directory | the processes and a Redis with `maxmemory` and `noeviction` |
 | Config | 1 file ([config.standalone.example.yaml](../../config.standalone.example.yaml)) | 1 per process ([relayer](../../config.relayer.example.yaml), [miner](../../config.miner.example.yaml)) |
 | Since | v0.1.3 | v0.1.0 |
-| Load-tested | no: the capacity figures below are high-availability mode's | 1 relayer + 1 miner ([capacity report](../benchmarks/v0.1.0/Relay-Miner-Capacity.pdf)) |
+| Load-tested | 1 process ([standalone capacity report](../benchmarks/v0.1.3/Relay-Miner-Standalone-Capacity.pdf)) | 1 relayer + 1 miner ([capacity report](../benchmarks/v0.1.0/Relay-Miner-Capacity.pdf)) |
 
 Choose standalone mode for one host that serves and claims for its own
 suppliers and should not run Redis. Choose high-availability mode for more than

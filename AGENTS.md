@@ -212,8 +212,10 @@ on local disk with room (new work stops below 1 GiB free); its config has no
   Then tell the human to watch memory as traffic grows: it follows request
   sizes and live sessions, and no example can size it for every mix.
   Standalone mode's examples size the one process as the sum of the two
-  (compose 6 GiB and 2 CPUs, host unit `MemoryMax=12G`); that sum is not
-  measured for standalone mode, so the same watching applies, plus the free
+  (compose 6 GiB and 2 CPUs, host unit `MemoryMax=12G`). Its load run is the
+  [standalone capacity report](docs/benchmarks/v0.1.3/Relay-Miner-Standalone-Capacity.pdf):
+  at ~2,400 relays/s 1 process used 4.35 cores on average and 5.72 at a claim (per-block
+  averages), and at most 4.7 GiB of working set outside a 1 MiB burst, whose memory peak was not sampled. Scale the CPU with the relay rate; the same watching applies, plus the free
   disk of its store.
 - **Follow the runbook with the example's own files.** Edit the files in
   `examples/docker-compose/` (or install `examples/host/`) as the steps say;
