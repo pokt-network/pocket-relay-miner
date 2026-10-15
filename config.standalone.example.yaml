@@ -71,6 +71,9 @@ relayer:
     batch_publish_interval_ms: 1000
 
 miner:
+  # Expected seconds per block. Must match the chain: beta commits a block
+  # about every 30 seconds.
+  # Mainnet: 60 (about 61 seconds per block)
   block_time_seconds: 30
   # How long a relay handed back waits before it is delivered again.
   redis:
