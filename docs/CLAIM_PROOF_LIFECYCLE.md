@@ -17,7 +17,8 @@ session ends (E) ──► claim window [open … close] ──► proof window 
   relay/compute counts).
 - **Proof window**: if a proof is required (`proof_request_probability` /
   `proof_requirement_threshold`), the supplier must submit a `MsgSubmitProof`
-  (one closest-merkle-proof against the claimed root).
+  (one merkle proof against the claimed root: a weighted proof from v0.1.36, a
+  closest proof before it).
 - **Settlement** (just after proof-window close): the claim is paid, or
   forfeited (`CLAIM_MISSING` / `PROOF_MISSING`) / slashed if its proof was
   missing or invalid.
@@ -28,8 +29,11 @@ session ends (E) ──► claim window [open … close] ──► proof window 
    session's SMST in Redis.
 2. **Claim** — at claim-window open the SMST is flushed (root computed) and a
    batched `MsgCreateClaim` is submitted for the session(s) ending at `E`.
-3. **Prove** — at proof-window open the closest proof is built from the SMST and
-   a `MsgSubmitProof` is submitted.
+3. **Prove** — at proof-window open the proof is built from the SMST and a
+   `MsgSubmitProof` is submitted. The miner asks the chain whether the v0.1.36
+   upgrade is applied before each proof batch and each retry: weighted proof
+   (the leaf the seed selects, weighted by relay count) once it is, closest proof
+   before. A batch still being retried when the upgrade lands is built again.
 4. **Settle** — on success the SMST and session state are cleaned up.
 
 Submission is **batched by session-end height** (one tx per supplier per window,
