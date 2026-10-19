@@ -426,7 +426,7 @@ def keyring_init_containers():
       # DERIVED from the secret, so there is one source of truth for which keys
       # exist and no second place to update.
       - name: build-keyring
-        image: ghcr.io/pokt-network/pocketd:0.1.35
+        image: ghcr.io/pokt-network/pocketd:0.1.36-rc1
         # As the SAME user the app container runs as, so the keyring files are
         # born owned by it. The first attempt chowned them afterwards instead and
         # failed with "Operation not permitted": this image does not run as root,

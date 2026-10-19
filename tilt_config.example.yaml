@@ -384,7 +384,7 @@ validator:
     grpc: 9090
     rest: 1317
     rpc: 26657
-  tag: 0.1.35
+  tag: 0.1.36-rc1
 
 localnet:
   # MAINNET clock for package 186's load runs. The tracked default is 30
