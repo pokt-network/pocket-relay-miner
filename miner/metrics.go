@@ -2164,7 +2164,7 @@ const (
 	// Session transitions to SessionStateClaimMissing.
 	ProofSkippedReasonClaimMissingOnChain = "claim_missing_on_chain"
 
-	// ProofSkippedReasonBuildFailed — ProveClosest or buildSessionHeader
+	// ProofSkippedReasonBuildFailed — ProveWeighted or buildSessionHeader
 	// returned an error for a single session inside the batched build
 	// fan-out. The rest of the batch continues so one bad session does
 	// not poison the submission.

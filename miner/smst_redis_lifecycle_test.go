@@ -9,7 +9,7 @@ package miner
 //     ages out via its sliding TTL. A crash between FlushTree and
 //     proof submission leaves a dangling claimed_root that, on leader
 //     resume, imports a tree whose inner nodes are already gone —
-//     ProveClosest then fails with ErrSMSTNodeMissing and the session
+//     ProveWeighted then fails with ErrSMSTNodeMissing and the session
 //     goes to proof-missing (stake slashed).
 //
 //  2. WarmupFromRedis creates a FRESH empty tree even when a live_root

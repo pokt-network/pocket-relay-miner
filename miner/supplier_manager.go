@@ -1597,7 +1597,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 	// SMST trees are lazy-loaded from Redis on-demand:
 	//   - UpdateTree (relay path) → GetOrCreateTree creates/loads tree from Redis
-	//   - ProveClosest / GetTreeRoot → loadTreeFromRedis for HA failover recovery
+	//   - ProveWeighted / GetTreeRoot → loadTreeFromRedis for HA failover recovery
 	//     (when this miner becomes leader AFTER the original leader already flushed
 	//      the SMST and moved to proof submission)
 	// The SMT library itself lazy-loads nodes from Redis as needed.

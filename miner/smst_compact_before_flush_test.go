@@ -145,7 +145,7 @@ func TestCommit_CompactsBigLeavesBeforeTheFlushAndLosesNothingWhenItFails(t *tes
 // root the tree holds, and the proof is built later from leaves already
 // compacted. Until a flush succeeds, those nodes exist only in the store's
 // buffer, and the proof has to be served from there.
-func TestProveClosest_ServesACompactedLeafFromTheBufferAfterAFailedFlush(t *testing.T) {
+func TestProveWeighted_ServesACompactedLeafFromTheBufferAfterAFailedFlush(t *testing.T) {
 	h := newFlushFailureHarness(t, true)
 	h.seed(4)
 	key := sha256.Sum256([]byte("proof-from-buffer"))

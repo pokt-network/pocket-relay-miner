@@ -118,7 +118,7 @@ func TestUnloadTree_AClaimAndAProofOfAnUnloadedTreeReadOnlyThePathsTheyWalk(t *t
 	require.NoError(t, err)
 	require.Equal(t, want, root, "the claim of the tree resumed from Redis is the claim of the tree unloaded")
 	path := sha256.Sum256([]byte("unload-proof-path"))
-	_, err = m.ProveClosest(ctx, session, path[:])
+	_, err = m.ProveWeighted(ctx, session, path[:])
 	require.NoError(t, err)
 	walkReads := counter.reads.Load() - readsBefore
 	walked := collectedHeap()
@@ -182,7 +182,7 @@ func TestUnloadTree_WritesTheRelaysAddedSinceTheLastCheckpoint(t *testing.T) {
 	// read from Redis only by a walk, so a proof is what finds them missing.
 	for i := range 16 {
 		path := sha256.Sum256([]byte(fmt.Sprintf("unload-checkpoint-path-%d", i)))
-		proof, err := m.ProveClosest(ctx, session, path[:])
+		proof, err := m.ProveWeighted(ctx, session, path[:])
 		require.NoError(t, err, "LINK unload-checkpoint: the nodes of the relays added after the last checkpoint are in Redis")
 		ok, _ := chainVerifies(t, proof, root)
 		require.True(t, ok, "LINK unload-checkpoint: a proof of the unloaded tree verifies against its claim")
@@ -372,7 +372,7 @@ func TestFlushTree_LeavesTheClaimedTreeUnloaded(t *testing.T) {
 	require.Less(t, claimed-min(claimed, before), (loaded-before)/4,
 		"LINK claim-unloads: the claimed tree holds a small part of what it added to the heap")
 	path := sha256.Sum256([]byte("claim-unload-proof-path"))
-	proof, err := m.ProveClosest(ctx, session, path[:])
+	proof, err := m.ProveWeighted(ctx, session, path[:])
 	require.NoError(t, err)
 	ok, _ := chainVerifies(t, proof, root)
 	require.True(t, ok, "a proof of the unloaded claimed tree verifies against its claim")

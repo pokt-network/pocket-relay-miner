@@ -111,8 +111,8 @@ func (s *RedisSMSTTestSuite) TestSMST_MultiSupplier_DeleteTree_DoesNotAffectOthe
 
 	// Proof generation must succeed against the lazy-loaded tree (end-to-end check).
 	path := s.generateKnownBitPath("alternating")
-	proof, err := mgr1.ProveClosest(s.ctx, sessionID, path)
-	s.Require().NoError(err, "supplier1 ProveClosest after supplier0 DeleteTree")
+	proof, err := mgr1.ProveWeighted(s.ctx, sessionID, path)
+	s.Require().NoError(err, "supplier1 ProveWeighted after supplier0 DeleteTree")
 	s.Require().NotEmpty(proof, "proof bytes must be non-empty")
 }
 
@@ -167,8 +167,8 @@ func (s *RedisSMSTTestSuite) TestSMST_MultiSupplier_HAFailover_LazyLoadAllIndepe
 		s.Require().Equalf(expectedRoots[i], gotRoot,
 			"supplier #%d root mismatch — lazy-load returned another supplier's root", i)
 
-		proof, err := followerMgrs[i].ProveClosest(s.ctx, sessionID, path)
-		s.Require().NoErrorf(err, "supplier #%d ProveClosest on follower", i)
+		proof, err := followerMgrs[i].ProveWeighted(s.ctx, sessionID, path)
+		s.Require().NoErrorf(err, "supplier #%d ProveWeighted on follower", i)
 		s.Require().NotEmptyf(proof, "supplier #%d proof bytes empty", i)
 
 		// Cleanup (mirrors OnProofSubmitted) — must not affect suppliers i+1..N.

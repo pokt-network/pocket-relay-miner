@@ -122,8 +122,8 @@ type SMSTManager interface {
 	// GetTreeRoot returns the root hash for an already-flushed session.
 	GetTreeRoot(ctx context.Context, sessionID string) (rootHash []byte, err error)
 
-	// ProveClosest generates a proof for the closest leaf to the given path.
-	ProveClosest(ctx context.Context, sessionID string, path []byte) (proofBytes []byte, err error)
+	// ProveWeighted generates a proof for the leaf the seed selects, weighted by relay count.
+	ProveWeighted(ctx context.Context, sessionID string, seed []byte) (proofBytes []byte, err error)
 
 	// DeleteTree removes the SMST for a session (cleanup after settlement).
 	DeleteTree(ctx context.Context, sessionID string) error
@@ -2621,18 +2621,18 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				// Record the scheduled proof height for operators
 				SetProofScheduledHeight(snap.SupplierOperatorAddress, snap.ServiceID, float64(earliestProofHeight))
 
-				// Generate the proof path from the seed block hash
-				path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
+				// Generate the proof seed from the seed block hash
+				seed := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
 
 				lc.logger.Info().
 					Str(logging.FieldSessionID, snap.SessionID).
 					Str("block_hash_from_blockid", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
-					Str("proof_path_computed", fmt.Sprintf("%x", path)).
+					Str("proof_seed_computed", fmt.Sprintf("%x", seed)).
 					Int64("block_height", proofRequirementSeedHeight).
 					Msg("DEBUG: proof path computation (using BlockID.Hash)")
 
 				// Generate the proof (CPU-bound cryptographic operation, can parallelize)
-				proofBytes, proofErr := lc.smstManager.ProveClosest(ctx, snap.SessionID, path)
+				proofBytes, proofErr := lc.smstManager.ProveWeighted(ctx, snap.SessionID, seed)
 				if proofErr != nil {
 					result.err = fmt.Errorf("failed to generate proof for session %s: %w", snap.SessionID, proofErr)
 					proofResults <- result

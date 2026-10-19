@@ -228,24 +228,24 @@ func (h *flushFailureHarness) commit() {
 }
 
 // proveAndVerify checks the relay's proof against the sealed root, through the
-// manager's own ProveClosest.
+// manager's own ProveWeighted.
 func (h *flushFailureHarness) proveAndVerify(r flushFailureRelay, root []byte) error {
 	h.t.Helper()
-	proofBz, err := h.mgr.ProveClosest(h.ctx, h.sessionID, r.path())
-	if err != nil {
-		return fmt.Errorf("ProveClosest: %w", err)
-	}
-
-	var compactProof smt.SparseCompactMerkleClosestProof
-	if err := compactProof.Unmarshal(proofBz); err != nil {
-		return fmt.Errorf("unmarshal proof: %w", err)
-	}
 	spec := h.tree.trie.Spec()
-	proof, err := smt.DecompactClosestProof(&compactProof, spec)
+	prove := func(seed []byte) ([]byte, error) { return h.mgr.ProveWeighted(h.ctx, h.sessionID, seed) }
+	seed, err := seedForLeaf(root, r.path(), spec, prove)
+	if err != nil {
+		return fmt.Errorf("ProveWeighted: %w", err)
+	}
+	proofBz, err := prove(seed)
+	if err != nil {
+		return fmt.Errorf("ProveWeighted: %w", err)
+	}
+	proof, err := decompactWeightedProof(proofBz, spec)
 	if err != nil {
 		return fmt.Errorf("decompact proof: %w", err)
 	}
-	valid, err := smt.VerifyClosestProof(proof, root, spec)
+	valid, err := smt.VerifyWeightedProof(proof, root, seed, spec)
 	if err != nil {
 		return fmt.Errorf("verify proof: %w", err)
 	}

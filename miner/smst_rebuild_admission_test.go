@@ -609,7 +609,7 @@ func TestRebuildAdmission_ProofsLoadByValueWithTheCompactionLastAndAllVerify(t *
 	}
 	results := make(chan proved, 3)
 	prove := func(sessionID string, root []byte) {
-		proofBz, err := mgr.ProveClosest(ctx, sessionID, path)
+		proofBz, err := mgr.ProveWeighted(ctx, sessionID, path)
 		results <- proved{root: root, proofBz: proofBz, err: err}
 	}
 	go prove("sess-first", first)
@@ -684,7 +684,7 @@ func TestRebuildAdmission_WithNoRoomAtAllEveryProofStillVerifies(t *testing.T) {
 	results := make(chan proved, trees)
 	for i := range trees {
 		go func() {
-			proofBz, err := mgr.ProveClosest(ctx, fmt.Sprintf("sess-zero-%d", i), path)
+			proofBz, err := mgr.ProveWeighted(ctx, fmt.Sprintf("sess-zero-%d", i), path)
 			results <- proved{index: i, proofBz: proofBz, err: err}
 		}()
 	}
@@ -773,17 +773,17 @@ func TestRebuildAdmission_EveryWayALoadEndsLeavesNothingInFlight(t *testing.T) {
 		require.False(t, admission.loading, "LINK paths-release: a load that %s is not left loading", way)
 	}
 
-	proofBz, err := mgr.ProveClosest(ctx, "sess-ok", path)
+	proofBz, err := mgr.ProveWeighted(ctx, "sess-ok", path)
 	require.NoError(t, err, "control: a sound blob proves")
 	ok, _ := chainVerifies(t, proofBz, root)
 	require.True(t, ok)
 	requireNothingInFlight("proved")
 
-	_, err = mgr.ProveClosest(ctx, "sess-corrupt", path)
+	_, err = mgr.ProveWeighted(ctx, "sess-corrupt", path)
 	require.Error(t, err, "control: a corrupt blob does not prove")
 	requireNothingInFlight("failed")
 
-	require.Panics(t, func() { _, _ = panicMgr.ProveClosest(ctx, "sess-panic", path) }, "control: the injected panic fires")
+	require.Panics(t, func() { _, _ = panicMgr.ProveWeighted(ctx, "sess-panic", path) }, "control: the injected panic fires")
 	requireNothingInFlight("panicked")
 
 	holdCtx, holdCancel := context.WithTimeout(ctx, 10*time.Second)
@@ -793,7 +793,7 @@ func TestRebuildAdmission_EveryWayALoadEndsLeavesNothingInFlight(t *testing.T) {
 	cancelled, cancel := context.WithCancel(ctx)
 	waited := make(chan error, 1)
 	go func() {
-		_, err := mgr.ProveClosest(cancelled, "sess-ok", path)
+		_, err := mgr.ProveWeighted(cancelled, "sess-ok", path)
 		waited <- err
 	}()
 	waitQueued(t, admission, 1)

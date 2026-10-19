@@ -193,7 +193,7 @@ func TestCheckpointAllOnExit_DeletesNoNodeTheNextOwnerStillWalks(t *testing.T) {
 	_, err = next.FlushTree(w.ctx, sessionID)
 	require.NoError(t, err)
 	for i, h := range hashes {
-		_, err := next.ProveClosest(w.ctx, sessionID, h)
+		_, err := next.ProveWeighted(w.ctx, sessionID, h)
 		require.NoErrorf(t, err, "relay %d: the next owner's tree lost a node the exit deleted", i)
 	}
 }

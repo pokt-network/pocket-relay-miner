@@ -27,7 +27,7 @@ var (
 	// ErrSMSTNodeMissing indicates a tree node referenced by an inner node
 	// is absent from the backing store. Returned by RedisMapStore.Get instead
 	// of (nil, nil) when corruption is detected, so the smt library
-	// propagates the error up through Update/Commit/ProveClosest rather
+	// propagates the error up through Update/Commit/ProveWeighted rather
 	// than panicking inside parseSumTrieNode on a zero-length slice.
 	ErrSMSTNodeMissing = errors.New("SMST node missing from store")
 

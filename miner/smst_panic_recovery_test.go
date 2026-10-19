@@ -20,7 +20,7 @@ package miner
 //   1. A missing node in the Redis hash must surface as a returned error
 //      from UpdateTree, never a panic.
 //   2. The panic from any SMT library call (Update, Commit, Root,
-//      ProveClosest, Import, MustCount, MustSum) must be caught at the
+//      ProveWeighted, Import, MustCount, MustSum) must be caught at the
 //      miner boundary.
 //   3. After corruption is detected, the next UpdateTree call for the
 //      same session must still succeed (either the tree self-heals or

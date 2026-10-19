@@ -653,7 +653,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_UpdateAfterFlush() {
 	s.Require().Equal(uint64(100), sum, "sum should still be 100")
 }
 
-// TestRedisSMSTManager_Sealing_ProofGenerationSafety tests that ProveClosest
+// TestRedisSMSTManager_Sealing_ProofGenerationSafety tests that ProveWeighted
 // validates root integrity and detects if the tree was somehow modified after sealing.
 func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_ProofGenerationSafety() {
 	manager := s.createTestRedisSMSTManager("pokt1test_sealing_proof_safety")
@@ -670,7 +670,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_ProofGenerationSafety(
 
 	// Generate proof (should succeed - tree is sealed and root is stable)
 	path := protocol.GetPathForProof(key, sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 	s.Require().NotNil(proofBytes)
 
@@ -687,12 +687,12 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_ProofGenerationSafety(
 	s.Require().True(valid, "proof should be valid")
 
 	// Attempt to generate another proof (should still work with cached root)
-	proofBytes2, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes2, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 	s.Require().Equal(proofBytes, proofBytes2, "repeated proof generation should be idempotent")
 }
 
-// TestRedisSMSTManager_Sealing_ProofBeforeFlush tests that ProveClosest
+// TestRedisSMSTManager_Sealing_ProofBeforeFlush tests that ProveWeighted
 // correctly rejects proof generation before FlushTree is called.
 func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_ProofBeforeFlush() {
 	manager := s.createTestRedisSMSTManager("pokt1test_sealing_proof_before_flush")
@@ -705,8 +705,8 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_ProofBeforeFlush() {
 
 	// Attempt proof generation before flush (should fail)
 	path := protocol.GetPathForProof(key, sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
-	s.Require().Error(err, "ProveClosest before FlushTree should fail")
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
+	s.Require().Error(err, "ProveWeighted before FlushTree should fail")
 	s.Require().Nil(proofBytes)
 	s.Require().Contains(err.Error(), "has not been claimed yet")
 
@@ -715,7 +715,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_ProofBeforeFlush() {
 	s.Require().NoError(err)
 
 	// Proof generation should now succeed
-	proofBytes, err = manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err = manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 	s.Require().NotNil(proofBytes)
 }
@@ -834,14 +834,14 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_FlushStability() {
 	}
 }
 
-// TestRedisSMSTManager_ProveClosest_LazyLoadAfterFailover simulates the HA
+// TestRedisSMSTManager_ProveWeighted_LazyLoadAfterFailover simulates the HA
 // failover scenario: original leader flushes the tree and crashes, new leader
-// takes over and must generate a proof. With lazy-loading in ProveClosest,
+// takes over and must generate a proof. With lazy-loading in ProveWeighted,
 // the new leader reconstructs the tree from Redis on-demand.
 //
 // This reproduces the bug found during chaos testing where proofs failed with
 // "session X not found" because the new leader did not call WarmupFromRedis.
-func (s *RedisSMSTTestSuite) TestRedisSMSTManager_ProveClosest_LazyLoadAfterFailover() {
+func (s *RedisSMSTTestSuite) TestRedisSMSTManager_ProveWeighted_LazyLoadAfterFailover() {
 	supplierAddr := "pokt1test_ha_failover"
 	sessionID := "session_ha_failover"
 
@@ -866,8 +866,8 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_ProveClosest_LazyLoadAfterFail
 	// Before fix: fails with "session not found".
 	// After fix: lazy-loads from Redis and succeeds.
 	proofPath := s.generateKnownBitPath("all_zeros") // 32-byte path
-	proof, err := leader2.ProveClosest(s.ctx, sessionID, proofPath)
-	s.Require().NoError(err, "ProveClosest should lazy-load tree from Redis")
+	proof, err := leader2.ProveWeighted(s.ctx, sessionID, proofPath)
+	s.Require().NoError(err, "ProveWeighted should lazy-load tree from Redis")
 	s.Require().NotEmpty(proof, "proof should be generated")
 
 	// After lazy-load, tree is now in leader2's memory
@@ -879,14 +879,14 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_ProveClosest_LazyLoadAfterFail
 	s.assertRootHashEqual(root1, root2, "lazy-loaded tree should have same root as original")
 }
 
-// TestRedisSMSTManager_ProveClosest_MissingInRedis verifies that lazy-load
+// TestRedisSMSTManager_ProveWeighted_MissingInRedis verifies that lazy-load
 // returns a clear error when the session was never flushed (no claimed root
 // in Redis) — don't silently succeed with a bogus tree.
-func (s *RedisSMSTTestSuite) TestRedisSMSTManager_ProveClosest_MissingInRedis() {
+func (s *RedisSMSTTestSuite) TestRedisSMSTManager_ProveWeighted_MissingInRedis() {
 	manager := s.createTestRedisSMSTManager("pokt1test_missing")
 
 	// Try to prove a session that doesn't exist anywhere
-	_, err := manager.ProveClosest(s.ctx, "nonexistent_session", []byte("any_key"))
+	_, err := manager.ProveWeighted(s.ctx, "nonexistent_session", []byte("any_key"))
 	s.Require().Error(err, "should fail when session not in memory or Redis")
 	s.Require().Contains(err.Error(), "not found", "error should clearly indicate missing session")
 }
@@ -940,7 +940,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_LazyLoad_ConcurrentSafe() {
 	// Fresh leader2, no warmup
 	leader2 := s.createTestRedisSMSTManager(supplierAddr)
 
-	// Spawn N concurrent ProveClosest calls for the same session
+	// Spawn N concurrent ProveWeighted calls for the same session
 	const numGoroutines = 20
 	type result struct {
 		proof []byte
@@ -951,7 +951,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_LazyLoad_ConcurrentSafe() {
 	proofPath := s.generateKnownBitPath("alternating") // 32-byte path
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
-			proof, err := leader2.ProveClosest(s.ctx, sessionID, proofPath)
+			proof, err := leader2.ProveWeighted(s.ctx, sessionID, proofPath)
 			results <- result{proof: proof, err: err}
 		}()
 	}
@@ -959,7 +959,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_LazyLoad_ConcurrentSafe() {
 	// Collect all results
 	for i := 0; i < numGoroutines; i++ {
 		r := <-results
-		s.Require().NoError(r.err, "concurrent ProveClosest should all succeed")
+		s.Require().NoError(r.err, "concurrent ProveWeighted should all succeed")
 		s.Require().NotEmpty(r.proof)
 	}
 

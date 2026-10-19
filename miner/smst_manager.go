@@ -1275,7 +1275,7 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 	// FlushOrphansWithLiveRoot during active UpdateTree calls, but once
 	// the session stopped receiving relays the nodes hash aged out while
 	// claimed_root stayed persistent. On leader resume, loadTreeFromRedis
-	// imported at claimed_root, ProveClosest traversed into the missing
+	// imported at claimed_root, ProveWeighted traversed into the missing
 	// nodes via the defensive store.Get (ErrSMSTNodeMissing), the proof
 	// failed, and the session went to proof-missing — slashing stake.
 	// The invariant claimed_root's TTL is always ≥ nodes-hash TTL is
@@ -1369,8 +1369,9 @@ func (m *RedisSMSTManager) GetTreeRoot(ctx context.Context, sessionID string) (r
 	return root, nil
 }
 
-// ProveClosest generates a proof for the closest leaf to the given path.
-func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, path []byte) (proofBytes []byte, err error) {
+// ProveWeighted generates a proof for the leaf the seed selects, weighted by
+// relay count (smt ProveWeighted), as the chain verifies it.
+func (m *RedisSMSTManager) ProveWeighted(ctx context.Context, sessionID string, seed []byte) (proofBytes []byte, err error) {
 	defer func() {
 		if isSMSTCorruption(err) {
 			m.evictCorruptSession(ctx, sessionID, "prove_closest_corruption")
@@ -1412,7 +1413,7 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 		return nil, err
 	}
 	if compacted {
-		return m.proveClosestFromLeaves(ctx, sessionID, tree.claimedRoot, path)
+		return m.proveWeightedFromLeaves(ctx, sessionID, tree.claimedRoot, seed)
 	}
 
 	// CRITICAL: Verify current tree root matches claimed root. Root()
@@ -1434,12 +1435,12 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 			sessionID, currentRoot, tree.claimedRoot)
 	}
 
-	// Generate the proof. ProveClosest walks from root to leaf through
+	// Generate the proof. ProveWeighted walks from root to leaf through
 	// store.Get on every lazy child — exactly the panic-surface we are
 	// hardening. Wrap it at the boundary.
 	var proof *smt.SparseMerkleClosestProof
 	if err := m.runSMSTSafely(sessionID, "prove_closest", func() error {
-		p, e := tree.trie.ProveClosest(path)
+		p, e := tree.trie.ProveWeighted(seed)
 		if e != nil {
 			return e
 		}
@@ -1451,7 +1452,7 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 		// compacted by now is proved from its leaves instead.
 		if isSMSTCorruption(err) {
 			if nowCompacted, checkErr := m.coldTreeCompacted(ctx, sessionID); checkErr == nil && nowCompacted {
-				return m.proveClosestFromLeaves(ctx, sessionID, tree.claimedRoot, path)
+				return m.proveWeightedFromLeaves(ctx, sessionID, tree.claimedRoot, seed)
 			}
 		}
 		return nil, fmt.Errorf("failed to prove closest: %w", err)
@@ -1463,13 +1464,13 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 	}
 
 	// Cache the proof
-	tree.proofPath = path
+	tree.proofPath = seed
 	tree.compactProofBz = proofBz
 
 	// CRITICAL: Log proof details for debugging invalid proofs
 	m.logger.Info().
 		Str(logging.FieldSessionID, sessionID).
-		Str("proof_path_hex", fmt.Sprintf("%x", path)).
+		Str("proof_seed_hex", fmt.Sprintf("%x", seed)).
 		Str("claimed_root_hex", fmt.Sprintf("%x", tree.claimedRoot)).
 		Int("proof_len", len(proofBz)).
 		Msg("generated proof - verify this matches on-chain claim root")
@@ -1526,9 +1527,9 @@ func (m *RedisSMSTManager) loadTreeFromRedis(ctx context.Context, sessionID stri
 	// Create the Redis-backed store (lazy-loads nodes on demand)
 	store := m.store.nodes(ctx, sessionID)
 	// Import with the known claimed root so the tree knows where to start —
-	// nodes are lazy-loaded from Redis as needed during ProveClosest.
+	// nodes are lazy-loaded from Redis as needed during ProveWeighted.
 	// Using NewSparseMerkleSumTrie instead would produce an empty tree with
-	// all-zero root, causing ProveClosest to fail with a "root mismatch" error.
+	// all-zero root, causing ProveWeighted to fail with a "root mismatch" error.
 	var trie smt.SparseMerkleSumTrie
 	if importErr := m.runSMSTSafely(sessionID, "import_load", func() error {
 		trie = smt.ImportSparseMerkleSumTrie(
@@ -1752,7 +1753,7 @@ func (m *RedisSMSTManager) GetTreeCount() int {
 // is preferred because it avoids a full Redis SCAN (which can take 10-20 min
 // at scale). It remains available for scenarios where an eager warmup is
 // needed (e.g., operational tooling). If you're debugging missing-session
-// issues after a leader change, check the lazy-load paths in ProveClosest /
+// issues after a leader change, check the lazy-load paths in ProveWeighted /
 // GetTreeRoot / loadTreeFromRedis first.
 func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 	m.logger.Info().Msg("warming up SMST trees from Redis")

@@ -29,7 +29,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_BasicOperations() {
 
 	// Generate proof for key1
 	path := protocol.GetPathForProof([]byte("key1"), sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(proofBytes, "proof should not be empty")
 
@@ -71,7 +71,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_InvalidDetection() {
 
 	// Generate valid proof
 	path := protocol.GetPathForProof(relays[0].key, sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
 	// Unmarshal and decompact proof
@@ -104,7 +104,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_InvalidDetection() {
 }
 
 // TestRedisSMSTProof_ClosestLeaf tests proof generation for closest leaf.
-// Ported from poktroll's TestSMST_ProveClosest.
+// Ported from poktroll's TestSMST_ProveWeighted.
 func (s *RedisSMSTTestSuite) TestRedisSMSTProof_ClosestLeaf() {
 	manager := s.createTestRedisSMSTManager("pokt1test_proof_closest")
 	sessionID := "session_proof_closest"
@@ -127,7 +127,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_ClosestLeaf() {
 	nonExistentKey := s.generateKnownBitPath("alternating")
 	path := protocol.GetPathForProof(nonExistentKey, sessionID)
 
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(proofBytes)
 
@@ -152,7 +152,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_ClosestLeaf() {
 }
 
 // TestRedisSMSTProof_EmptyTree tests proof generation on empty tree.
-// Ported from poktroll's TestSMST_ProveClosest_Empty.
+// Ported from poktroll's TestSMST_ProveWeighted_Empty.
 func (s *RedisSMSTTestSuite) TestRedisSMSTProof_EmptyTree() {
 	manager := s.createTestRedisSMSTManager("pokt1test_proof_empty")
 	sessionID := "session_proof_empty"
@@ -167,7 +167,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_EmptyTree() {
 
 	// Try to generate proof (should work, but return empty proof or error)
 	path := protocol.GetPathForProof([]byte("nonexistent"), sessionID)
-	_, err = manager.ProveClosest(s.ctx, sessionID, path)
+	_, err = manager.ProveWeighted(s.ctx, sessionID, path)
 
 	// Note: The behavior depends on implementation
 	// It might error or return an empty proof
@@ -184,7 +184,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_EmptyTree() {
 }
 
 // TestRedisSMSTProof_SingleNode tests proof with single node.
-// Ported from poktroll's TestSMST_ProveClosest_OneNode.
+// Ported from poktroll's TestSMST_ProveWeighted_OneNode.
 func (s *RedisSMSTTestSuite) TestRedisSMSTProof_SingleNode() {
 	manager := s.createTestRedisSMSTManager("pokt1test_proof_single")
 	sessionID := "session_proof_single"
@@ -199,7 +199,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_SingleNode() {
 
 	// Generate proof for the only key
 	path := protocol.GetPathForProof([]byte("only_key"), sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(proofBytes)
 
@@ -222,7 +222,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_SingleNode() {
 }
 
 // TestRedisSMSTProof_Compression tests compact proof marshaling.
-// Ported from poktroll's TestSMST_ProveClosest_Proof (compression test).
+// Ported from poktroll's TestSMST_ProveWeighted_Proof (compression test).
 func (s *RedisSMSTTestSuite) TestRedisSMSTProof_Compression() {
 	manager := s.createTestRedisSMSTManager("pokt1test_proof_compression")
 	sessionID := "session_proof_compression"
@@ -240,10 +240,10 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_Compression() {
 
 	// Generate proof
 	path := protocol.GetPathForProof(relays[0].key, sessionID)
-	compactProofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	compactProofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
-	// Verify it's compact (ProveClosest returns CompactClosestProof)
+	// Verify it's compact (ProveWeighted returns CompactClosestProof)
 	// The marshaled bytes should be relatively small
 	s.Require().NotEmpty(compactProofBytes)
 
@@ -282,7 +282,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_DepthValidation() {
 
 	// Generate proof (should handle maximum depth)
 	path := protocol.GetPathForProof(key1, sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
 	// Verify proof
@@ -318,7 +318,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_AfterFlush() {
 
 	// Try to generate proof before flush (should fail)
 	path := protocol.GetPathForProof([]byte("key1"), sessionID)
-	_, err = manager.ProveClosest(s.ctx, sessionID, path)
+	_, err = manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().Error(err, "should not generate proof before FlushTree()")
 	s.Require().Contains(err.Error(), "not been claimed yet", "error should mention claim requirement")
 
@@ -327,7 +327,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_AfterFlush() {
 	s.Require().NoError(err)
 
 	// Generate proof (should succeed)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(proofBytes, "proof generation should succeed after flush")
 }
@@ -347,10 +347,10 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_CachedProof() {
 	// Generate proof for same path twice
 	path := protocol.GetPathForProof([]byte("key1"), sessionID)
 
-	proof1, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proof1, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
-	proof2, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proof2, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
 	// Proofs should be identical (cached)
@@ -363,7 +363,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_WrongSession() {
 
 	// Try to generate proof for non-existent session
 	path := protocol.GetPathForProof([]byte("key1"), "nonexistent_session")
-	_, err := manager.ProveClosest(s.ctx, "nonexistent_session", path)
+	_, err := manager.ProveWeighted(s.ctx, "nonexistent_session", path)
 	s.Require().Error(err, "should error for non-existent session")
 	s.Require().Contains(err.Error(), "not found", "error should mention session not found")
 }
@@ -387,7 +387,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_MultipleRelays() {
 	// Generate proofs for multiple relays
 	for i := 0; i < 5; i++ { // Test first 5 relays
 		path := protocol.GetPathForProof(relays[i].key, sessionID)
-		proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+		proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 		s.Require().NoError(err, fmt.Sprintf("proof generation should succeed for relay %d", i))
 		s.Require().NotEmpty(proofBytes)
 
@@ -431,7 +431,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_OnChainValidation() {
 
 	// Generate proof (this would be submitted in proof)
 	path := protocol.GetPathForProof(relays[0].key, sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
 	// Simulate on-chain validation
@@ -469,7 +469,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_BitFlipping() {
 
 	// Generate proof with original path
 	path := protocol.GetPathForProof([]byte("key1"), sessionID)
-	_, err = manager.ProveClosest(s.ctx, sessionID, path)
+	_, err = manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
 	// Flip a bit in the path
@@ -478,12 +478,12 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_BitFlipping() {
 	flippedPath[0] ^= 0x01 // Flip least significant bit
 
 	// Generate proof with flipped path (should still work - finds closest)
-	proofBytes2, err := manager.ProveClosest(s.ctx, sessionID, flippedPath)
+	proofBytes2, err := manager.ProveWeighted(s.ctx, sessionID, flippedPath)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(proofBytes2)
 
 	// Proofs might be the same (if tree is small) or different (if flipped path takes different route)
-	// Either is valid behavior for ProveClosest
+	// Either is valid behavior for ProveWeighted
 }
 
 // TestRedisSMSTProof_RootMismatch tests that proof fails with wrong root.
@@ -500,7 +500,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_RootMismatch() {
 
 	// Generate proof
 	path := protocol.GetPathForProof([]byte("key1"), sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
 	compactProof := &smt.SparseCompactMerkleClosestProof{}
@@ -545,7 +545,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTProof_WeightMismatch() {
 
 	// Generate proof
 	path := protocol.GetPathForProof([]byte("key1"), sessionID)
-	proofBytes, err := manager.ProveClosest(s.ctx, sessionID, path)
+	proofBytes, err := manager.ProveWeighted(s.ctx, sessionID, path)
 	s.Require().NoError(err)
 
 	compactProof := &smt.SparseCompactMerkleClosestProof{}

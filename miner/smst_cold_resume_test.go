@@ -129,7 +129,7 @@ func TestOnClaimedSessionsResumed_CompactsTheTreeAndItsProofStillVerifies(t *tes
 	require.True(t, compacted, "LINK cold-resume-compacts: the tree of a session claimed before the restart is stored as its leaves")
 
 	path := sha256.Sum256([]byte("cold-resume-callback-path"))
-	proof, err := smst.ProveClosest(ctx, session, path[:])
+	proof, err := smst.ProveWeighted(ctx, session, path[:])
 	require.NoError(t, err)
 	ok, _ := chainVerifies(t, proof, claimed)
 	require.True(t, ok, "LINK cold-resume-compacts: the proof of the compacted tree verifies against its claimed root")
