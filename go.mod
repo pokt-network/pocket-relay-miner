@@ -3,6 +3,7 @@ module github.com/pokt-network/pocket-relay-miner
 go 1.27.2
 
 require (
+	cosmossdk.io/api v0.9.2
 	cosmossdk.io/errors v1.0.2
 	cosmossdk.io/math v1.5.3
 	github.com/alicebob/miniredis/v2 v2.35.0
@@ -42,7 +43,6 @@ require (
 )
 
 require (
-	cosmossdk.io/api v0.9.2 // indirect
 	cosmossdk.io/collections v1.3.1 // indirect
 	cosmossdk.io/core v0.11.3 // indirect
 	cosmossdk.io/depinject v1.2.1 // indirect

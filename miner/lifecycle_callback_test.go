@@ -62,6 +62,10 @@ func (m *mockSMSTManager) ProveWeighted(_ context.Context, _ string, _ []byte) (
 	return []byte("mock-proof"), nil
 }
 
+func (m *mockSMSTManager) ProveClosest(_ context.Context, _ string, _ []byte) ([]byte, error) {
+	return []byte("mock-proof"), nil
+}
+
 func (m *mockSMSTManager) DeleteTree(_ context.Context, sessionID string) error {
 	m.deletedTrees = append(m.deletedTrees, sessionID)
 	return m.deleteErr

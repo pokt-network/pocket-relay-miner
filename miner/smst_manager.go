@@ -1370,8 +1370,26 @@ func (m *RedisSMSTManager) GetTreeRoot(ctx context.Context, sessionID string) (r
 }
 
 // ProveWeighted generates a proof for the leaf the seed selects, weighted by
-// relay count (smt ProveWeighted), as the chain verifies it.
-func (m *RedisSMSTManager) ProveWeighted(ctx context.Context, sessionID string, seed []byte) (proofBytes []byte, err error) {
+// relay count (smt ProveWeighted), as a v0.1.36 chain verifies it.
+func (m *RedisSMSTManager) ProveWeighted(ctx context.Context, sessionID string, seed []byte) ([]byte, error) {
+	return m.prove(ctx, sessionID, seed, true)
+}
+
+// ProveClosest generates a proof for the leaf closest to the seed path (smt
+// ProveClosest), as a chain before v0.1.36 verifies it.
+func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, seed []byte) ([]byte, error) {
+	return m.prove(ctx, sessionID, seed, false)
+}
+
+// proveOn proves seed on trie with ProveWeighted or ProveClosest.
+func proveOn(trie smt.SparseMerkleSumTrie, seed []byte, weighted bool) (*smt.SparseMerkleClosestProof, error) {
+	if weighted {
+		return trie.ProveWeighted(seed)
+	}
+	return trie.ProveClosest(seed)
+}
+
+func (m *RedisSMSTManager) prove(ctx context.Context, sessionID string, seed []byte, weighted bool) (proofBytes []byte, err error) {
 	defer func() {
 		if isSMSTCorruption(err) {
 			m.evictCorruptSession(ctx, sessionID, "prove_closest_corruption")
@@ -1413,7 +1431,7 @@ func (m *RedisSMSTManager) ProveWeighted(ctx context.Context, sessionID string, 
 		return nil, err
 	}
 	if compacted {
-		return m.proveWeightedFromLeaves(ctx, sessionID, tree.claimedRoot, seed)
+		return m.proveFromLeaves(ctx, sessionID, tree.claimedRoot, seed, weighted)
 	}
 
 	// CRITICAL: Verify current tree root matches claimed root. Root()
@@ -1435,12 +1453,12 @@ func (m *RedisSMSTManager) ProveWeighted(ctx context.Context, sessionID string, 
 			sessionID, currentRoot, tree.claimedRoot)
 	}
 
-	// Generate the proof. ProveWeighted walks from root to leaf through
+	// Generate the proof. Proving walks from root to leaf through
 	// store.Get on every lazy child — exactly the panic-surface we are
 	// hardening. Wrap it at the boundary.
 	var proof *smt.SparseMerkleClosestProof
 	if err := m.runSMSTSafely(sessionID, "prove_closest", func() error {
-		p, e := tree.trie.ProveWeighted(seed)
+		p, e := proveOn(tree.trie, seed, weighted)
 		if e != nil {
 			return e
 		}
@@ -1452,7 +1470,7 @@ func (m *RedisSMSTManager) ProveWeighted(ctx context.Context, sessionID string, 
 		// compacted by now is proved from its leaves instead.
 		if isSMSTCorruption(err) {
 			if nowCompacted, checkErr := m.coldTreeCompacted(ctx, sessionID); checkErr == nil && nowCompacted {
-				return m.proveWeightedFromLeaves(ctx, sessionID, tree.claimedRoot, seed)
+				return m.proveFromLeaves(ctx, sessionID, tree.claimedRoot, seed, weighted)
 			}
 		}
 		return nil, fmt.Errorf("failed to prove closest: %w", err)
@@ -1471,6 +1489,7 @@ func (m *RedisSMSTManager) ProveWeighted(ctx context.Context, sessionID string, 
 	m.logger.Info().
 		Str(logging.FieldSessionID, sessionID).
 		Str("proof_seed_hex", fmt.Sprintf("%x", seed)).
+		Bool("weighted", weighted).
 		Str("claimed_root_hex", fmt.Sprintf("%x", tree.claimedRoot)).
 		Int("proof_len", len(proofBz)).
 		Msg("generated proof - verify this matches on-chain claim root")

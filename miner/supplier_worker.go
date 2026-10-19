@@ -465,6 +465,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			SessionClient:             w.queryClients.Session(),
 			ProofChecker:              w.proofChecker,
 			ProofQueryClient:          w.queryClients.Proof(),
+			UpgradeClient:             w.queryClients.Upgrade(),
 			InclusionReconcilerConfig: w.config.Config.Transaction.InclusionReconcilerConfig(),
 			ServiceClient:             w.queryClients.Service(),
 			SessionLifecycleConfig: SessionLifecycleConfig{

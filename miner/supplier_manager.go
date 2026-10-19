@@ -329,6 +329,10 @@ type SupplierManagerConfig struct {
 	// site instead of a reconciler that silently does not start.
 	ProofQueryClient query.ProofQueryClient
 
+	// UpgradeClient reads whether the chain verifies weighted or closest
+	// proofs. If nil, proofs are weighted.
+	UpgradeClient query.UpgradeQueryClient
+
 	// InclusionReconcilerConfig controls the block-driven claim+proof inclusion
 	// reconciler + rebroadcaster. See miner.InclusionReconcilerConfig for fields.
 	InclusionReconcilerConfig InclusionReconcilerConfig
@@ -422,6 +426,9 @@ type SupplierManager struct {
 	// (Consumer.Close → wg.Wait) cannot block the relay/claimer hot paths
 	// — there is no global lock to acquire.
 	suppliers *xsync.Map[string, *SupplierState]
+
+	// proofShape is shared by every supplier's lifecycle callback.
+	proofShape *ProofShape
 
 	// Message processing callback
 	onRelay func(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error
@@ -546,6 +553,7 @@ func NewSupplierManager(
 		registry:     registry,
 		suppliers:    xsync.NewMap[string, *SupplierState](),
 		querySubpool: querySubpool,
+		proofShape:   NewProofShape(logger, config.UpgradeClient),
 	}
 
 	// Sizes are not measured under load: a 100k-leaf rebuild took 0.34 s on a
@@ -1655,6 +1663,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		if m.config.ProofQueryClient != nil {
 			lifecycleCallback.SetProofQueryClient(m.config.ProofQueryClient)
 		}
+		lifecycleCallback.SetProofShape(m.proofShape)
 
 		// Wire the SMST as the claimed-root rehydration source for the
 		// proof-requirement check. Under HA failover the snapshot's
