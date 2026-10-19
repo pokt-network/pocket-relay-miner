@@ -49,7 +49,7 @@ var (
 
 	// ErrSimPlaceholderForbidden is returned when app_pubkey_hex or any
 	// gateway_pubkeys_hex entry is the deterministic ring placeholder key
-	// (rings.PlaceholderRingPubKey). Its private half is publicly derivable
+	// (rings.IsPlaceholderPubKey). Its private half is publicly derivable
 	// from a well-known seed, so pinning it as a trusted ring member would
 	// let anyone forge simulated relays for that identity. This is a
 	// security control, not a usability check: it must never be relaxed.

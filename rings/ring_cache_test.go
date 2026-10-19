@@ -78,12 +78,12 @@ func TestRingPointsCache_HitWithinTTL(t *testing.T) {
 	rc, appAddress := newTestRingClientForCache(t)
 	acc := rc.accountQuerier.(*countingAccountQuerier)
 
-	_, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, 100)
+	_, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, 100)
 	require.NoError(t, err)
 	firstHits := acc.callCount()
 	require.Greater(t, firstHits, 0, "first lookup must query the account client (cache miss)")
 
-	_, err = rc.getRingPointsForAddressAtHeight(ctx, appAddress, 100)
+	_, _, err = rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, 100)
 	require.NoError(t, err)
 	require.Equal(t, firstHits, acc.callCount(),
 		"second lookup within TTL must hit cache and not re-query the account client")
@@ -101,11 +101,11 @@ func TestRingPointsCache_RecomputesAfterTTL(t *testing.T) {
 	ringPointsCacheTTL = 0
 	defer func() { ringPointsCacheTTL = orig }()
 
-	_, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, 100)
+	_, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, 100)
 	require.NoError(t, err)
 	firstHits := acc.callCount()
 
-	_, err = rc.getRingPointsForAddressAtHeight(ctx, appAddress, 100)
+	_, _, err = rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, 100)
 	require.NoError(t, err)
 	require.Equal(t, firstHits*2, acc.callCount(),
 		"with TTL=0 every lookup is expired and must recompute (re-query the account client)")
@@ -120,13 +120,13 @@ func TestRingPointsCache_EvictsOldHeights(t *testing.T) {
 
 	// Seed an old entry.
 	oldHeight := int64(100)
-	_, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, oldHeight)
+	_, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, oldHeight)
 	require.NoError(t, err)
 	require.Equal(t, 1, rangeCount(rc), "one entry after first store")
 
 	// Store an entry far above the window — old entry must be evicted.
 	newHeight := oldHeight + ringPointsCacheKeepHeights + 50
-	_, err = rc.getRingPointsForAddressAtHeight(ctx, appAddress, newHeight)
+	_, _, err = rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, newHeight)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, rangeCount(rc), "old out-of-window entry must be pruned on store")
@@ -165,7 +165,7 @@ func TestRingPointsCache_ConcurrentReadWrite(t *testing.T) {
 			defer wg.Done()
 			for h := baseHeight; h < baseHeight+windowSpan; h++ {
 				for op := 0; op < opsPerRound; op++ {
-					if _, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, h); err != nil {
+					if _, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, h); err != nil {
 						t.Errorf("unexpected error at height %d: %v", h, err)
 						return
 					}
@@ -185,7 +185,7 @@ func TestRingPointsCache_ConcurrentReadWrite(t *testing.T) {
 	require.LessOrEqual(t, rangeCount(rc), int(windowSpan)+workers,
 		"cache must not exceed the distinct heights touched (no per-op leak)")
 	for h := baseHeight + windowSpan; h <= baseHeight+windowSpan+int64(ringPointsCacheKeepHeights)+50; h++ {
-		_, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, h)
+		_, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, h)
 		require.NoError(t, err)
 	}
 	require.LessOrEqual(t, rangeCount(rc), int(ringPointsCacheKeepHeights)+8,
@@ -202,7 +202,7 @@ func TestRingPointsCache_KeepsInWindowHeights(t *testing.T) {
 	// Three heights all within ringPointsCacheKeepHeights of each other.
 	heights := []int64{base, base + 100, base + 200}
 	for _, h := range heights {
-		_, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, h)
+		_, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, h)
 		require.NoError(t, err)
 	}
 

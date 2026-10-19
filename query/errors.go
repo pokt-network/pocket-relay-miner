@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -46,6 +47,11 @@ func IsEntityNotFound(err error) bool {
 	st, ok := status.FromError(err)
 	return ok && st.Code() == codes.NotFound
 }
+
+// ErrAccountPubKeyNotFound is returned by GetPubKeyFromAddress when the chain
+// answered and the account has no public key (or no account came back). It is
+// an answer, like a gRPC NotFound, not a failure to get one.
+var ErrAccountPubKeyNotFound = errors.New("account public key not found")
 
 // heightNotYetAvailableTexts are the node's words for "I do not have that height
 // yet". Both are bare error strings with no code of their own: CometBFT answers

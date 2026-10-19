@@ -187,13 +187,6 @@ func (rv *relayValidator) ValidateRelayRequest(
 	}
 	step2Duration := time.Since(step2)
 
-	// Verify ring signature
-	step3 := time.Now()
-	if sigErr := rv.ringClient.VerifyRelayRequestSignature(ctx, relayRequest); sigErr != nil {
-		return fmt.Errorf("ring signature verification failed: %w", sigErr)
-	}
-	step3Duration := time.Since(step3)
-
 	// Verify session validity
 	appAddress := sessionHeader.GetApplicationAddress()
 	serviceID := sessionHeader.GetServiceId()
@@ -204,14 +197,6 @@ func (rv *relayValidator) ValidateRelayRequest(
 		return fmt.Errorf("failed to get session: %w", err)
 	}
 	step4Duration := time.Since(step4)
-
-	rv.logger.Debug().
-		Dur("validate_basic", step1Duration).
-		Dur("session_block_height", step2Duration).
-		Dur("ring_signature", step3Duration).
-		Dur("session_cache", step4Duration).
-		Str(logging.FieldSessionID, sessionHeader.GetSessionId()).
-		Msg("validation timing breakdown")
 
 	// Verify the client-supplied session header matches the on-chain one FIELD BY
 	// FIELD, not just by session ID.
@@ -232,6 +217,22 @@ func (rv *relayValidator) ValidateRelayRequest(
 	if err := compareSessionHeaders(session.GetHeader(), sessionHeader); err != nil {
 		return err
 	}
+
+	// Verify the ring signature only once the header is known to be the onchain
+	// session's: the ring is looked up at the header's session end height.
+	step3 := time.Now()
+	if sigErr := rv.ringClient.VerifyRelayRequestSignature(ctx, relayRequest); sigErr != nil {
+		return fmt.Errorf("ring signature verification failed: %w", sigErr)
+	}
+	step3Duration := time.Since(step3)
+
+	rv.logger.Debug().
+		Dur("validate_basic", step1Duration).
+		Dur("session_block_height", step2Duration).
+		Dur("session_cache", step4Duration).
+		Dur("ring_signature", step3Duration).
+		Str(logging.FieldSessionID, sessionHeader.GetSessionId()).
+		Msg("validation timing breakdown")
 
 	// Verify supplier is in session
 	supplierFound := false

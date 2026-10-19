@@ -256,19 +256,6 @@ func TestGetRingFromPubKeys_ConsistentEncoding(t *testing.T) {
 	require.True(t, ring1.Equals(ring2), "rings should be equal")
 }
 
-// TestGetRingFromPubKeys_PlaceholderKey tests that placeholder key works correctly.
-func TestGetRingFromPubKeys_PlaceholderKey(t *testing.T) {
-	// Test that the placeholder key defined in client.go is valid for ring construction
-	keys := []cryptotypes.PubKey{PlaceholderRingPubKey}
-
-	ring, err := GetRingFromPubKeys(keys)
-
-	// Should either succeed or fail gracefully (ring lib may require min 2 keys)
-	if err == nil {
-		require.NotNil(t, ring)
-	}
-}
-
 // TestPointsFromPublicKeys_LargeNumberOfKeys tests performance with many keys.
 func TestPointsFromPublicKeys_LargeNumberOfKeys(t *testing.T) {
 	// Test with 100 keys to ensure scalability

@@ -1733,12 +1733,12 @@ func (c *accountQueryClient) GetPubKeyFromAddress(ctx context.Context, address s
 		return nil, err
 	}
 	if acc == nil {
-		return nil, fmt.Errorf("account not found: %s", address)
+		return nil, fmt.Errorf("%w: account %s not found", ErrAccountPubKeyNotFound, address)
 	}
 
 	pubKey := acc.GetPubKey()
 	if pubKey == nil {
-		return nil, fmt.Errorf("public key not found for account: %s", address)
+		return nil, fmt.Errorf("%w: account %s has none", ErrAccountPubKeyNotFound, address)
 	}
 
 	return pubKey, nil
