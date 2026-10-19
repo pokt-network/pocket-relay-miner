@@ -21,6 +21,7 @@
 package main
 
 import (
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -30,7 +31,6 @@ import (
 	dsecp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	dleqsecp "github.com/pokt-network/go-dleq/secp256k1"
 	ring "github.com/pokt-network/ring-go"
-	"golang.org/x/crypto/sha3"
 )
 
 // Fixed keys so vectors are reproducible across runs and machines. These are
