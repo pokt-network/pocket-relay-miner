@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	"github.com/pokt-network/smt"
 	"github.com/rs/zerolog"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 )
 
 // scriptedUpgrades answers AppliedPlanHeight from a script, one answer per
@@ -191,4 +193,84 @@ func TestOnSessionsNeedProof_AShapeChangeReturnsTheGroupToClaimed(t *testing.T) 
 	assert.False(t, settled)
 	assert.Equal(t, 1, supplier.calls, "the closest batch is not sent after the upgrade")
 	requireState(t, store, snapshot, SessionStateClaimed)
+}
+
+// refusingSupplier refuses its first `refusals` proof submissions with err, then
+// accepts.
+type refusingSupplier struct {
+	flakySupplier
+	refusals int
+	err      error
+}
+
+func (r *refusingSupplier) SubmitProofsReturningHash(_ context.Context, _ int64, _ ...pocktclient.MsgSubmitProof) (string, tx.SignedTxPayload, error) {
+	r.calls++
+	if r.calls <= r.refusals {
+		return "", tx.SignedTxPayload{}, r.err
+	}
+	hash, signed := fakeSigned("proof")
+	return hash, signed, nil
+}
+
+// errClosestRefused is the error a v0.1.36 node returned for a closest proof,
+// copied from a live run on the Tilt localnet.
+var errClosestRefused = errors.New("failed to broadcast proofs: gas simulation failed (gas_limit=0 requires successful simulation): " +
+	"simulation failed: rpc error: code = Unknown desc = failed to execute message; message index: 0: " +
+	"rpc error: code = FailedPrecondition desc = proof is not a weighted merkle proof: invalid proof " +
+	"[cosmos/cosmos-sdk@v0.53.8/baseapp/baseapp.go:1052] with gas used: '169107'")
+
+// A chain that started on v0.1.36 never applies the plan, and a read can fail
+// after the upgrade: either way the miner builds closest proofs, and the chain's
+// refusal is what tells it. The group goes back to claimed, and the next cycle
+// builds weighted proofs, every cycle after it too.
+func TestOnSessionsNeedProof_AClosestRefusalTeachesTheShape(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer upgradeAnswer
+	}{
+		{name: "plan never applied", answer: upgradeAnswer{height: 0}},
+		{name: "plan never read", answer: upgradeAnswer{err: errors.New("node unavailable")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			supplier := &refusingSupplier{refusals: 1, err: errClosestRefused}
+			lc, store := nodeBehindCallback(t, 108, &nodeBehindSupplier{})
+			smst := &shapeSMST{}
+			lc.smstManager = smst
+			lc.supplierClient = supplier
+			lc.proofShape = NewProofShape(lc.logger, &scriptedUpgrades{answers: []upgradeAnswer{tc.answer}})
+			snapshot := storedSession(t, store, "proof-refused", SessionStateProving)
+
+			result, err := lc.OnSessionsNeedProof(context.Background(), []*SessionSnapshot{snapshot})
+			require.NoError(t, err, "a group returned to the next block is not a failed cycle")
+			_, settled := result.Settled["proof-refused"]
+			assert.False(t, settled)
+			assert.Equal(t, 1, supplier.calls, "the refused closest batch is not sent again")
+			assert.Equal(t, 1, smst.closest)
+			requireState(t, store, snapshot, SessionStateClaimed)
+			require.True(t, lc.proofShape.Weighted(context.Background()), "the refusal settles the shape")
+
+			snapshot = storedSession(t, store, "proof-refused-next", SessionStateProving)
+			_, err = lc.OnSessionsNeedProof(context.Background(), []*SessionSnapshot{snapshot})
+			require.NoError(t, err)
+			assert.Equal(t, 1, smst.weighted, "the next cycle builds a weighted proof")
+			assert.Equal(t, 1, smst.closest, "and no closest one")
+			assert.Equal(t, 2, supplier.calls, "the weighted batch is submitted")
+		})
+	}
+}
+
+// Control: another invalid-proof refusal says nothing about the shape.
+func TestOnSessionsNeedProof_OtherRefusalsKeepTheShape(t *testing.T) {
+	supplier := &refusingSupplier{refusals: 1, err: errors.New("rpc error: code = FailedPrecondition desc = relay difficulty below the target: invalid proof")}
+	lc, store := nodeBehindCallback(t, 108, &nodeBehindSupplier{})
+	smst := &shapeSMST{}
+	lc.smstManager = smst
+	lc.supplierClient = supplier
+	lc.proofShape = NewProofShape(lc.logger, &scriptedUpgrades{answers: []upgradeAnswer{{height: 0}}})
+	snapshot := storedSession(t, store, "proof-other-refusal", SessionStateProving)
+
+	_, err := lc.OnSessionsNeedProof(context.Background(), []*SessionSnapshot{snapshot})
+	require.NoError(t, err)
+	assert.Equal(t, 2, supplier.calls, "an ordinary refusal is retried")
+	assert.False(t, lc.proofShape.Weighted(context.Background()), "and teaches nothing")
 }

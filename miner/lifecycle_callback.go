@@ -2837,6 +2837,18 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					break
 				}
 
+				// The chain refused closest proofs: it verifies weighted ones,
+				// though no plan said so (a chain started on v0.1.36). Same exit
+				// as the shape check above, on any attempt, the last included.
+				if !weighted && lc.proofShape.LearnFromRefusal(submitErr) {
+					logger.Warn().
+						Int("batch_size", len(proofMsgs)).
+						Msg("the chain refused the batch's closest proofs; returning the group to the next block to build weighted ones")
+					lc.deferProofs(ctx, validProofSnapshots)
+					shapeChanged = true
+					break
+				}
+
 				// Check if error is due to proof window being closed (permanent failure - don't retry)
 				//
 				// The claim path carries the same two-layer check and the same
