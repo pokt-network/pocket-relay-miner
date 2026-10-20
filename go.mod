@@ -20,9 +20,9 @@ require (
 	github.com/improbable-eng/grpc-web v0.15.0
 	github.com/klauspost/compress v1.18.6
 	github.com/pokt-network/go-dleq v0.0.0-20260910080229-86b20e4865eb
-	github.com/pokt-network/poktroll v0.1.36-rc1
+	github.com/pokt-network/poktroll v0.1.36
 	github.com/pokt-network/ring-go v0.2.1
-	github.com/pokt-network/shannon-sdk v0.0.0-20261019124155-bf217636414d
+	github.com/pokt-network/shannon-sdk v0.0.0-20261020154032-c95752a8daaa
 	github.com/pokt-network/smt v0.16.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
