@@ -14,6 +14,7 @@ import (
 	ringtypes "github.com/pokt-network/go-dleq/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
+	protocolrings "github.com/pokt-network/poktroll/pkg/crypto/rings"
 	"github.com/pokt-network/ring-go"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -156,10 +157,9 @@ func (rc *ringClient) GetRingForAddressAtHeight(
 // MaxRingSignatureMembers is the most members a relay request ring signature
 // may have. It is a fixed bound, checked before any ring lookup; the expected
 // ring's member count bounds the signature again once the ring is known. It is
-// above any ring an honest signer builds in practice: the application, its
-// delegated gateways and the gateways undelegated since the session (the last
-// group has no protocol cap: not verified to stay under it).
-const MaxRingSignatureMembers = 64
+// the chain's own bound: a relay signed by a larger ring fails the chain's
+// proof validation, so serving it would be unpaid work.
+const MaxRingSignatureMembers = protocolrings.MaxRingSignatureMembers
 
 // validateRingSignatureSize checks a serialized ring signature against the
 // ring-go v0.2.0 layout: a 4-byte big-endian member count n, the challenge
