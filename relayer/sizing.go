@@ -14,9 +14,12 @@ import "runtime"
 // is how they stopped matching, the same shape as the GOMAXPROCS literal that
 // stopped matching its CPU limit.
 
-// masterWorkersPerProc is how many master-pool workers each schedulable
-// processor gets. The work is a mix of CPU-bound ring-signature verification
-// and I/O-bound Redis and backend calls, so it deliberately oversubscribes.
+// masterWorkersPerProc is how many workers each schedulable processor gets. The
+// work is a mix of CPU-bound ring-signature verification and I/O-bound Redis and
+// backend calls, so it deliberately oversubscribes. Four fifths of it is the
+// master pool (validation and metrics); the fifth that was publish is now the
+// per-service publish pools (servicePublishQueue), sized by service and not by
+// processor, so the master pool holds only what its subpools can use.
 const masterWorkersPerProc = 8
 
 // redisPoolMargin is the headroom added to the bounded Redis users. It covers
@@ -26,13 +29,16 @@ const masterWorkersPerProc = 8
 const redisPoolMargin = 20
 
 // WorkerSizing is the relayer's concurrency budget: one master pool split into
-// three subpools, and the Redis pool that the Redis-using subpools need.
+// two subpools plus the per-service publish pools, and the Redis pool that the
+// Redis-using workers need.
 type WorkerSizing struct {
 	// Master is the master worker pool's capacity.
 	Master int
 	// Validation verifies ring signatures and, in optimistic mode, meters.
 	Validation int
-	// Publish writes mined relays to Redis.
+	// Publish builds mined relays and hands them to the publisher; it can read
+	// Redis on a service cache miss (compute units). Its workers are the
+	// per-service publish pools, outside the master pool.
 	Publish int
 	// Metrics records Prometheus observations. It does NOT touch Redis, which
 	// is why it is absent from RedisPoolSize -- see that method.
@@ -51,7 +57,7 @@ func ComputeWorkerSizing(procs int) WorkerSizing {
 	if procs < 1 {
 		procs = 1
 	}
-	return SizingFromMaster(procs * masterWorkersPerProc)
+	return SizingFromMaster(procs * masterWorkersPerProc * 4 / 5)
 }
 
 // ComputeWorkerSizingForProcess is ComputeWorkerSizing for THIS process.
@@ -65,30 +71,32 @@ func ComputeWorkerSizingForProcess() WorkerSizing {
 	return ComputeWorkerSizing(runtime.GOMAXPROCS(0))
 }
 
-// SizingFromMaster splits an already-decided master capacity.
+// SizingFromMaster splits an already-decided master capacity between
+// validation and metrics, 7 to 1.
 //
 // It is separate from ComputeWorkerSizing because the proxy is handed a pool it
 // did not build and must derive the SAME split from its capacity. Two copies of
-// the 70/20/10 split is how the split and the pool size would drift.
+// the split is how the split and the pool size would drift. Publish is not part
+// of it: it is set by WithPublishServices.
 func SizingFromMaster(master int) WorkerSizing {
-	if master < 1 {
-		master = 1
+	if master < 2 {
+		master = 2
 	}
 	s := WorkerSizing{
 		Master:     master,
-		Validation: int(float64(master) * 0.7), // CPU-intensive ring signatures
-		Publish:    int(float64(master) * 0.2), // I/O-bound Redis writes
-		Metrics:    int(float64(master) * 0.1), // low-priority observability
+		Validation: master * 7 / 8, // CPU-intensive ring signatures
 	}
 	if s.Validation < 1 {
 		s.Validation = 1
 	}
-	if s.Publish < 1 {
-		s.Publish = 1
-	}
-	if s.Metrics < 1 {
-		s.Metrics = 1
-	}
+	s.Metrics = master - s.Validation // low-priority observability
+	return s
+}
+
+// WithPublishServices sets the publish workers: publishWorkersPerService for
+// each of services, the pools servicePublishQueue builds.
+func (s WorkerSizing) WithPublishServices(services int) WorkerSizing {
+	s.Publish = services * publishWorkersPerService
 	return s
 }
 

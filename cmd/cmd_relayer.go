@@ -524,7 +524,9 @@ func serveRelayer(parent context.Context, logger logging.Logger, config *relayer
 	// GOMAXPROCS(0), not NumCPU(): NumCPU reports the machine's cores and
 	// ignores the container's CPU limit. automaxprocs sets GOMAXPROCS from the
 	// cgroup quota at startup, so this is what the runtime will schedule on.
-	sizing := relayer.ComputeWorkerSizingForProcess()
+	// Publish workers are per service (relayer.servicePublishQueue), so they
+	// come from the configured services, not from the processors.
+	sizing := relayer.ComputeWorkerSizingForProcess().WithPublishServices(len(config.Services))
 
 	// Where the relayer keeps its state, and whether that store can take
 	// writes: Redis (high-availability mode), or what the process hands it.
@@ -782,7 +784,7 @@ func serveRelayer(parent context.Context, logger logging.Logger, config *relayer
 		Int("metrics_workers", sizing.Metrics).
 		Int("gomaxprocs", runtime.GOMAXPROCS(0)).
 		Int("num_cpu", runtime.NumCPU()).
-		Msg("created master worker pool (unbounded, non-blocking, 8x GOMAXPROCS)")
+		Msg("created master worker pool (unbounded, non-blocking, validation and metrics); publish runs on per-service pools")
 
 	// Create proxy server
 	proxy, err := relayer.NewProxyServer(

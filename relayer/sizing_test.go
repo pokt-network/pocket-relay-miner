@@ -74,14 +74,27 @@ func TestSizingFloorsAtOne(t *testing.T) {
 	for _, procs := range []int{0, -1, 1} {
 		s := ComputeWorkerSizing(procs)
 		require.GreaterOrEqual(t, s.Validation, 1, "procs=%d", procs)
-		require.GreaterOrEqual(t, s.Publish, 1, "procs=%d", procs)
 		require.GreaterOrEqual(t, s.Metrics, 1, "procs=%d", procs)
 	}
 }
 
+// TestTheMasterPoolHoldsOnlyWhatItsSubpoolsUse: publish runs on per-service
+// pools, so no share of the master pool is left that nothing can use; and the
+// publish workers counted for Redis are the ones that exist, 2 per service.
+func TestTheMasterPoolHoldsOnlyWhatItsSubpoolsUse(t *testing.T) {
+	for _, procs := range []int{1, 2, 8, 18} {
+		s := ComputeWorkerSizing(procs)
+		require.Equal(t, s.Master, s.Validation+s.Metrics, "procs=%d: the master pool is its subpools", procs)
+		require.Zero(t, s.Publish, "procs=%d: publish is not a share of the master pool", procs)
+	}
+	s := ComputeWorkerSizing(8).WithPublishServices(10)
+	require.Equal(t, 10*publishWorkersPerService, s.Publish)
+	require.Equal(t, s.Validation+s.Publish+redisPoolMargin, s.RedisPoolSize(), "the publish workers that exist are in the Redis pool")
+}
+
 // TestSizingFromMasterMatchesComputeWorkerSizing pins that the proxy, which
 // derives the split from the pool capacity it was handed, gets the SAME split
-// the startup used. Two copies of 70/20/10 is how they would drift.
+// the startup used. Two copies of the split is how they would drift.
 func TestSizingFromMasterMatchesComputeWorkerSizing(t *testing.T) {
 	for _, procs := range []int{1, 2, 8, 18} {
 		full := ComputeWorkerSizing(procs)
