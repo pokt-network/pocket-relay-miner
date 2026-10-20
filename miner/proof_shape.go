@@ -3,6 +3,7 @@ package miner
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -35,6 +36,12 @@ type ProofShape struct {
 	logger   logging.Logger
 	client   query.UpgradeQueryClient
 	weighted atomic.Bool
+
+	// notAppliedAt is the last height whose read said the plan is not applied.
+	// A plan applies at a block boundary, so every call at that height has the
+	// same answer and the plan is read at most once per block.
+	mu           sync.Mutex
+	notAppliedAt int64
 }
 
 // NewProofShape returns a ProofShape that reads the plan through client.
@@ -45,15 +52,24 @@ func NewProofShape(logger logging.Logger, client query.UpgradeQueryClient) *Proo
 	}
 }
 
-// Weighted reports whether the next proof must be a weighted one. A nil
-// ProofShape, or one without a client, answers true.
-func (s *ProofShape) Weighted(ctx context.Context) bool {
+// Weighted reports whether the next proof must be a weighted one, at the
+// miner's current block height. A nil ProofShape, or one without a client,
+// answers true. A height of 0 or less is not remembered.
+func (s *ProofShape) Weighted(ctx context.Context, blockHeight int64) bool {
 	if s == nil || s.client == nil {
 		return true
 	}
 	if s.weighted.Load() {
 		return true
 	}
+	s.mu.Lock()
+	known := blockHeight > 0 && s.notAppliedAt == blockHeight
+	s.mu.Unlock()
+	if known {
+		return false
+	}
+	// Not under the lock: with the node down, suppliers must not wait on each
+	// other's query timeouts.
 	height, err := s.client.AppliedPlanHeight(ctx, weightedProofUpgrade)
 	if err != nil {
 		s.logger.Warn().Err(err).
@@ -62,6 +78,9 @@ func (s *ProofShape) Weighted(ctx context.Context) bool {
 		return false
 	}
 	if height <= 0 {
+		s.mu.Lock()
+		s.notAppliedAt = max(s.notAppliedAt, blockHeight)
+		s.mu.Unlock()
 		return false
 	}
 	if s.weighted.CompareAndSwap(false, true) {

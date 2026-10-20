@@ -2596,7 +2596,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 		// One shape for the whole batch: the retry loop below compares it with
 		// the chain's before every attempt.
-		weighted := lc.proofShape.Weighted(ctx)
+		weighted := lc.proofShape.Weighted(ctx, lc.blockClient.LastBlock(ctx).Height())
 
 		for i, snapshot := range sessionsNeedingProof {
 			// Capture loop variables for goroutine
@@ -2805,7 +2805,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// sessions go back to claimed and are built again next block.
 		shapeChanged := false
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
-			if lc.proofShape.Weighted(ctx) != weighted {
+			if lc.proofShape.Weighted(ctx, lc.blockClient.LastBlock(ctx).Height()) != weighted {
 				logger.Warn().
 					Bool("built_weighted", weighted).
 					Int("batch_size", len(proofMsgs)).

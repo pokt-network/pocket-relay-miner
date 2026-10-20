@@ -51,23 +51,56 @@ func TestProofShape_FollowsTheAppliedPlan(t *testing.T) {
 	errNode := errors.New("node unavailable")
 
 	notApplied := NewProofShape(logger, &scriptedUpgrades{answers: []upgradeAnswer{{height: 0}}})
-	assert.False(t, notApplied.Weighted(ctx), "a plan not applied builds closest proofs")
+	assert.False(t, notApplied.Weighted(ctx, 100), "a plan not applied builds closest proofs")
 
 	neverRead := NewProofShape(logger, &scriptedUpgrades{answers: []upgradeAnswer{{err: errNode}}})
-	assert.False(t, neverRead.Weighted(ctx), "a plan never read builds closest proofs")
+	assert.False(t, neverRead.Weighted(ctx, 100), "a plan never read builds closest proofs")
 
 	upgrades := &scriptedUpgrades{answers: []upgradeAnswer{{err: errNode}, {height: 0}, {height: 500}, {err: errNode}, {height: 0}}}
 	shape := NewProofShape(logger, upgrades)
-	assert.False(t, shape.Weighted(ctx), "read failed, nothing known")
-	assert.False(t, shape.Weighted(ctx), "not applied")
-	assert.True(t, shape.Weighted(ctx), "applied")
-	assert.True(t, shape.Weighted(ctx), "applied stays applied")
-	assert.True(t, shape.Weighted(ctx), "applied stays applied")
+	assert.False(t, shape.Weighted(ctx, 100), "read failed, nothing known")
+	assert.False(t, shape.Weighted(ctx, 101), "not applied")
+	assert.True(t, shape.Weighted(ctx, 102), "applied")
+	assert.True(t, shape.Weighted(ctx, 103), "applied stays applied")
+	assert.True(t, shape.Weighted(ctx, 104), "applied stays applied")
 	assert.Equal(t, 3, upgrades.calls, "once applied the plan is not read again")
 
 	var unwired *ProofShape
-	assert.True(t, unwired.Weighted(ctx), "a nil shape builds weighted proofs")
-	assert.True(t, NewProofShape(logger, nil).Weighted(ctx), "a shape without a client builds weighted proofs")
+	assert.True(t, unwired.Weighted(ctx, 100), "a nil shape builds weighted proofs")
+	assert.True(t, NewProofShape(logger, nil).Weighted(ctx, 100), "a shape without a client builds weighted proofs")
+}
+
+// The plan is read at most once per block: every supplier's batch and every
+// retry at one height share the answer, and the next height reads it again.
+// A failed read, and a height the miner does not know yet, are not remembered.
+func TestProofShape_ReadsThePlanOncePerBlock(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+
+	upgrades := &scriptedUpgrades{answers: []upgradeAnswer{{height: 0}, {height: 0}, {height: 700}}}
+	shape := NewProofShape(logger, upgrades)
+	for i := 0; i < 32; i++ {
+		require.False(t, shape.Weighted(ctx, 699), "call %d at 699", i)
+	}
+	assert.Equal(t, 1, upgrades.calls, "32 calls at one height read the plan once")
+	assert.False(t, shape.Weighted(ctx, 700))
+	assert.Equal(t, 2, upgrades.calls, "a new height reads it again")
+	assert.True(t, shape.Weighted(ctx, 701), "the plan applied is seen at the next block")
+	assert.Equal(t, 3, upgrades.calls)
+
+	failing := &scriptedUpgrades{answers: []upgradeAnswer{{err: errors.New("node unavailable")}}}
+	shape = NewProofShape(logger, failing)
+	for i := 0; i < 3; i++ {
+		require.False(t, shape.Weighted(ctx, 699))
+	}
+	assert.Equal(t, 3, failing.calls, "a failed read is not remembered")
+
+	unknown := &scriptedUpgrades{answers: []upgradeAnswer{{height: 0}}}
+	shape = NewProofShape(logger, unknown)
+	for i := 0; i < 3; i++ {
+		require.False(t, shape.Weighted(ctx, 0))
+	}
+	assert.Equal(t, 3, unknown.calls, "height 0 is not remembered")
 }
 
 // closestChainVerifies checks a proof as a chain before v0.1.36 does: the proof
@@ -179,12 +212,15 @@ func TestOnSessionsNeedProof_BuildsTheShapeTheChainVerifies(t *testing.T) {
 // batch is not sent again, and its session goes back to claimed so the next
 // block builds a weighted proof.
 func TestOnSessionsNeedProof_AShapeChangeReturnsTheGroupToClaimed(t *testing.T) {
-	supplier := &flakySupplier{failures: 1}
 	lc, store := nodeBehindCallback(t, 108, &nodeBehindSupplier{})
+	// The failed attempt takes a block, so attempt 2 is at a new height and
+	// reads the plan again.
+	supplier := &blockTakingSupplier{flakySupplier: flakySupplier{failures: 1}, blocks: lc.blockClient.(*heightedBlocks)}
 	lc.smstManager = &shapeSMST{}
 	lc.supplierClient = supplier
-	// Build, attempt 1, attempt 2.
-	lc.proofShape = NewProofShape(lc.logger, &scriptedUpgrades{answers: []upgradeAnswer{{height: 0}, {height: 0}, {height: 107}}})
+	// Build and attempt 1 at height 108 read the plan once; attempt 2, at 109,
+	// reads it again.
+	lc.proofShape = NewProofShape(lc.logger, &scriptedUpgrades{answers: []upgradeAnswer{{height: 0}, {height: 107}}})
 	snapshot := storedSession(t, store, "proof-shape-change", SessionStateProving)
 
 	result, err := lc.OnSessionsNeedProof(context.Background(), []*SessionSnapshot{snapshot})
@@ -247,7 +283,7 @@ func TestOnSessionsNeedProof_AClosestRefusalTeachesTheShape(t *testing.T) {
 			assert.Equal(t, 1, supplier.calls, "the refused closest batch is not sent again")
 			assert.Equal(t, 1, smst.closest)
 			requireState(t, store, snapshot, SessionStateClaimed)
-			require.True(t, lc.proofShape.Weighted(context.Background()), "the refusal settles the shape")
+			require.True(t, lc.proofShape.Weighted(context.Background(), 0), "the refusal settles the shape")
 
 			snapshot = storedSession(t, store, "proof-refused-next", SessionStateProving)
 			_, err = lc.OnSessionsNeedProof(context.Background(), []*SessionSnapshot{snapshot})
@@ -272,5 +308,20 @@ func TestOnSessionsNeedProof_OtherRefusalsKeepTheShape(t *testing.T) {
 	_, err := lc.OnSessionsNeedProof(context.Background(), []*SessionSnapshot{snapshot})
 	require.NoError(t, err)
 	assert.Equal(t, 2, supplier.calls, "an ordinary refusal is retried")
-	assert.False(t, lc.proofShape.Weighted(context.Background()), "and teaches nothing")
+	assert.False(t, lc.proofShape.Weighted(context.Background(), 0), "and teaches nothing")
+}
+
+// blockTakingSupplier is flakySupplier whose every proof submission takes a
+// block.
+type blockTakingSupplier struct {
+	flakySupplier
+	blocks *heightedBlocks
+}
+
+func (b *blockTakingSupplier) SubmitProofsReturningHash(ctx context.Context, height int64, msgs ...pocktclient.MsgSubmitProof) (string, tx.SignedTxPayload, error) {
+	hash, signed, err := b.flakySupplier.SubmitProofsReturningHash(ctx, height, msgs...)
+	b.blocks.mu.Lock()
+	b.blocks.currentHeight++
+	b.blocks.mu.Unlock()
+	return hash, signed, err
 }
