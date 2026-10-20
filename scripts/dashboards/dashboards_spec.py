@@ -347,7 +347,7 @@ def specs(g):
                     (R("ha_smst_panics_recovered_total", "operation"), "panic {{operation}}"), (R("ha_miner_smst_exit_checkpoint_failed_total"), "exit checkpoint failed")], "short", "All of these stay at 0.", w=24, h=6),
                 ),
             row("Relayer buffers",
-                ts("Validation queue used", [("%s / %s" % (G("ha_relayer_validation_queue_bytes", "sum", "service_id"), G("ha_relayer_validation_queue_max_bytes", "sum", "service_id")), "{{service_id}}")], "percentunit",
+                ts("Validation and publish queue used", [("%s / %s" % (G("ha_relayer_validation_queue_bytes", "sum", "service_id"), G("ha_relayer_validation_queue_max_bytes", "sum", "service_id")), "{{service_id}} validation"), ("%s / %s" % (G("ha_relayer_publish_queue_bytes", "sum", "service_id"), G("ha_relayer_publish_queue_max_bytes", "sum", "service_id")), "{{service_id}} publish")], "percentunit",
                    "At 1 the relayer answers 429 for that service.", w=12),
                 ts("Publish and batch queues", [(G("ha_relayer_publish_queue_bytes", "sum"), "publish queue"), (G("ha_relayer_batch_queue_bytes", "sum"), "batch queue")], "bytes",
                    "Over redis.batch_max_queued_mib new relays are refused.", w=12),

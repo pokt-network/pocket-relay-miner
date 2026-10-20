@@ -182,7 +182,7 @@ func TestStandaloneGatherer_GathersEachFamilyOnce(t *testing.T) {
 	require.Equal(t, 1, seen["go_goroutines"], "the Go collector is served once")
 	require.Equal(t, 1, seen["process_cpu_seconds_total"], "the process collector is served once")
 	require.Equal(t, 1, seen["ha_relayer_signing_keys_loaded"], "the relayer's own families are still served")
-	require.Equal(t, 1, seen["ha_relayer_publish_queue_bytes"])
+	require.Equal(t, 1, seen["ha_relayer_batch_queue_bytes"], "a relayer gauge with no labels is served once")
 }
 
 // A signal while the relayer is still starting cancels its startup and stops

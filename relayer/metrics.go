@@ -292,13 +292,26 @@ var (
 		[]string{"service_id"},
 	)
 
-	publishQueueBytes = observability.RelayerFactory.NewGauge(
+	publishQueueBytes = observability.RelayerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "publish_queue_bytes",
-			Help:      "Request and response bodies currently retained by queued publish tasks",
+			Help:      "Request bodies and response hashes retained by this service's publish tasks, served and not yet handed to the publisher",
 		},
+		[]string{"service_id"},
+	)
+
+	// publishQueueMaxBytes is publish_queue_bytes' ceiling: past it the service
+	// is refused with service_publish_queue_full.
+	publishQueueMaxBytes = observability.RelayerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "publish_queue_max_bytes",
+			Help:      "Most this service's publish tasks may retain before it is refused (its validation queue bound)",
+		},
+		[]string{"service_id"},
 	)
 
 	// batch_queue_bytes is the batcher's own retained-bytes count -- the exact

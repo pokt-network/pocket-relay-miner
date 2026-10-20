@@ -192,9 +192,12 @@ func TestPublishQueue_ATaskRetainsTheRequestAndTheResponseHashOnly(t *testing.T)
 	retained := proc.retained[simTestService]
 	proc.mu.Unlock()
 	require.Equal(t, int64(len(body)+sha256.Size), retained, "request plus the hash, not the %d-byte response", len(big))
+	require.Equal(t, float64(retained), testutil.ToFloat64(publishQueueBytes.WithLabelValues(simTestService)), "the service's gauge reads what its queue retains")
+	require.Equal(t, float64(queue.maxBytes), testutil.ToFloat64(publishQueueMaxBytes.WithLabelValues(simTestService)), "and its ceiling is published next to it")
 
 	close(proc.release)
 	queue.pool.StopAndWait()
+	require.Zero(t, testutil.ToFloat64(publishQueueBytes.WithLabelValues(simTestService)), "a finished task takes its bytes off the gauge")
 }
 
 // The relay mined from the response's hash is the relay mined from the response:

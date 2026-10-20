@@ -1818,12 +1818,7 @@ func (p *ProxyServer) submitPublishTask(
 	// what the queue is retaining rather than what it has processed. Task COUNT
 	// cannot stand in for this: a task's cost is its request.
 	retained := int64(len(reqBody) + len(respPayloadHash))
-	queue.queued.Add(retained)
-	publishQueueBytes.Add(float64(retained))
-	release := func() {
-		queue.queued.Add(-retained)
-		publishQueueBytes.Sub(float64(retained))
-	}
+	release := queue.hold(retained)
 
 	// Submit to this service's pool (non-blocking; bounded at admission by its
 	// bytes). Uses context.Background() since publish should complete even if

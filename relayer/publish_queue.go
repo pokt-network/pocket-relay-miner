@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 
 	"github.com/alitto/pond/v2"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // publishWorkersPerService is how many publish tasks one service runs at once.
@@ -19,9 +20,24 @@ const publishWorkersPerService = 2
 // hung service is refused at admission instead of growing until the process is
 // killed.
 type servicePublishQueue struct {
-	pool     pond.Pool
-	queued   atomic.Int64
-	maxBytes int64
+	pool       pond.Pool
+	queued     atomic.Int64
+	maxBytes   int64
+	bytesGauge prometheus.Gauge
+}
+
+// hold adds a task's bytes to the queue and returns what gives them back.
+func (q *servicePublishQueue) hold(n int64) (release func()) {
+	q.queued.Add(n)
+	if q.bytesGauge != nil {
+		q.bytesGauge.Add(float64(n))
+	}
+	return func() {
+		q.queued.Add(-n)
+		if q.bytesGauge != nil {
+			q.bytesGauge.Sub(float64(n))
+		}
+	}
 }
 
 // newPublishQueues builds one queue per configured service. Every service gets
@@ -30,10 +46,13 @@ type servicePublishQueue struct {
 func newPublishQueues(config *Config) map[string]*servicePublishQueue {
 	queues := make(map[string]*servicePublishQueue, len(config.Services))
 	for serviceID := range config.Services {
+		maxBytes := config.ValidationQueueMaxBytes(serviceID)
 		queues[serviceID] = &servicePublishQueue{
-			pool:     pond.NewPool(publishWorkersPerService),
-			maxBytes: config.ValidationQueueMaxBytes(serviceID),
+			pool:       pond.NewPool(publishWorkersPerService),
+			maxBytes:   maxBytes,
+			bytesGauge: publishQueueBytes.WithLabelValues(serviceID),
 		}
+		publishQueueMaxBytes.WithLabelValues(serviceID).Set(float64(maxBytes))
 	}
 	return queues
 }
