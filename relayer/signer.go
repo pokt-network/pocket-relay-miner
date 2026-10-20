@@ -183,9 +183,13 @@ func (rs *ResponseSigner) SignRelayResponseWithContext(
 		return nil, fmt.Errorf("no signer for operator %s (available: %v)", supplierOperatorAddr, set.operatorAddresses)
 	}
 
-	// Ensure payload hash is set
-	if err := relayResponse.UpdatePayloadHash(); err != nil {
-		return nil, fmt.Errorf("failed to update payload hash: %w", err)
+	// Ensure payload hash is set. A response built from its payload's hash
+	// alone (the publish path) carries the hash and no payload: the signature
+	// covers the hash, so it is kept as it is.
+	if len(relayResponse.GetPayload()) > 0 || len(relayResponse.GetPayloadHash()) == 0 {
+		if err := relayResponse.UpdatePayloadHash(); err != nil {
+			return nil, fmt.Errorf("failed to update payload hash: %w", err)
+		}
 	}
 
 	// Get signable bytes hash

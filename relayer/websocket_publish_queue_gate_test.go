@@ -317,3 +317,15 @@ func TestAClientFrameIsRefusedBeforeTheBackendWhenThePublishQueueIsFull(t *testi
 		})
 	}
 }
+
+// ProcessRelayPayloadHash is ProcessRelay with the response hash as its body:
+// these paths mine from the body, so it is only here to satisfy the interface.
+func (p *sizedMinedProcessor) ProcessRelayPayloadHash(
+	ctx context.Context,
+	reqBody []byte,
+	respPayloadHash [32]byte,
+	supplierAddr, serviceID string,
+	arrivalBlockHeight int64,
+) (*transport.MinedRelayMessage, error) {
+	return p.ProcessRelay(ctx, reqBody, respPayloadHash[:], supplierAddr, serviceID, arrivalBlockHeight)
+}
