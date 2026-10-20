@@ -274,15 +274,13 @@ func isSMSTCorruption(err error) bool {
 
 // redisSMST holds a Redis-backed sparse merkle sum trie for a session.
 type redisSMST struct {
-	sessionID      string
-	trie           smt.SparseMerkleSumTrie
-	store          smstNodeStore
-	sealing        bool   // Set to true when seal process starts (blocks all new updates)
-	claimedRoot    []byte // Set after sealing completes and root is verified stable
-	claimedCount   uint64 // Cached count after flush (for HA warmup)
-	claimedSum     uint64 // Cached sum after flush (for HA warmup)
-	proofPath      []byte
-	compactProofBz []byte
+	sessionID    string
+	trie         smt.SparseMerkleSumTrie
+	store        smstNodeStore
+	sealing      bool   // Set to true when seal process starts (blocks all new updates)
+	claimedRoot  []byte // Set after sealing completes and root is verified stable
+	claimedCount uint64 // Cached count after flush (for HA warmup)
+	claimedSum   uint64 // Cached sum after flush (for HA warmup)
 
 	// pendingLeafBytes is the relay bytes its leaves hold since the last leaf
 	// compaction; atomic because removing a tree from the map reads it without
@@ -1480,10 +1478,6 @@ func (m *RedisSMSTManager) prove(ctx context.Context, sessionID string, seed []b
 	if err != nil {
 		return nil, err
 	}
-
-	// Cache the proof
-	tree.proofPath = seed
-	tree.compactProofBz = proofBz
 
 	// CRITICAL: Log proof details for debugging invalid proofs
 	m.logger.Info().
