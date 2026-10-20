@@ -22,7 +22,7 @@
 //     up; a Redis hash field that should be present was absent.
 //     - "evicted corrupt SMST session from memory" — emitted on every
 //     eviction with the reason label (update_tree_corruption,
-//     flush_tree_corruption, prove_closest_corruption, ...).
+//     flush_tree_corruption, prove_corruption, ...).
 //
 //  3. Redis server state:
 //     - INFO memory → evicted_keys should be 0. Any non-zero means
@@ -1392,7 +1392,7 @@ func proveOn(trie smt.SparseMerkleSumTrie, seed []byte, weighted bool) (*smt.Spa
 func (m *RedisSMSTManager) prove(ctx context.Context, sessionID string, seed []byte, weighted bool) (proofBytes []byte, err error) {
 	defer func() {
 		if isSMSTCorruption(err) {
-			m.evictCorruptSession(ctx, sessionID, "prove_closest_corruption")
+			m.evictCorruptSession(ctx, sessionID, "prove_corruption")
 		}
 	}()
 
@@ -1457,7 +1457,7 @@ func (m *RedisSMSTManager) prove(ctx context.Context, sessionID string, seed []b
 	// store.Get on every lazy child — exactly the panic-surface we are
 	// hardening. Wrap it at the boundary.
 	var proof *smt.SparseMerkleClosestProof
-	if err := m.runSMSTSafely(sessionID, "prove_closest", func() error {
+	if err := m.runSMSTSafely(sessionID, "prove", func() error {
 		p, e := proveOn(tree.trie, seed, weighted)
 		if e != nil {
 			return e
@@ -1473,7 +1473,7 @@ func (m *RedisSMSTManager) prove(ctx context.Context, sessionID string, seed []b
 				return m.proveFromLeaves(ctx, sessionID, tree.claimedRoot, seed, weighted)
 			}
 		}
-		return nil, fmt.Errorf("failed to prove closest: %w", err)
+		return nil, fmt.Errorf("failed to prove: %w", err)
 	}
 
 	proofBz, err := marshalClosestProof(proof, tree.trie.Spec())

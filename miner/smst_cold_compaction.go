@@ -562,12 +562,12 @@ func (m *RedisSMSTManager) proveFromLeaves(ctx context.Context, sessionID string
 		}
 		trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), claimedRoot, protocol.SMTValueHasher())
 		var proof *smt.SparseMerkleClosestProof
-		if err := m.runSMSTSafely(sessionID, "prove_closest_cold", func() error {
+		if err := m.runSMSTSafely(sessionID, "prove_cold", func() error {
 			p, proveErr := proveOn(trie, seed, weighted)
 			proof = p
 			return proveErr
 		}); err != nil {
-			return fmt.Errorf("failed to prove closest: %w", err)
+			return fmt.Errorf("failed to prove: %w", err)
 		}
 		proofBz, err = marshalClosestProof(proof, trie.Spec())
 		if err != nil {
