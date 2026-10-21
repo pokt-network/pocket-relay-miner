@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document specifies the WebSocket handshake validation protocol between the gateway (the client that sends relays) and RelayMiner (supplier). The handshake carries the same validation information as `RelayRequest.Meta`, enabling the relayer to validate the connection upfront (eager validation), after which subsequent WebSocket messages can be validated either eagerly or optimistically based on relayer configuration.
+This document specifies the WebSocket handshake validation protocol between the gateway (the client that sends relays) and RelayMiner (supplier). The handshake carries the same validation information as `RelayRequest.Meta`, enabling the relayer to validate the connection upfront (eager validation), after which every subsequent WebSocket message is validated and charged before it is forwarded (eager), whatever the service's `validation_mode`.
 
 ## Current State (v1.0)
 
@@ -83,8 +83,7 @@ signature = ring.Sign(signableBytes, gatewayOrAppPrivateKey)
 │  - Connection upgraded to WebSocket                              │
 │  - Bridge established to backend                                 │
 │  - Session context stored for relay processing                   │
-│  - Subsequent messages validated per relayer config              │
-│    (eager or optimistic)                                         │
+│  - Each subsequent message validated before forwarding (eager)   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -103,10 +102,10 @@ signature = ring.Sign(signableBytes, gatewayOrAppPrivateKey)
 
 Once the WebSocket connection is established:
 
-1. **Eager Mode**: Each WebSocket message (RelayRequest) is fully validated before forwarding
-2. **Optimistic Mode**: Messages are forwarded immediately, validation happens async
-
-The validation mode is configured per-service in the relayer config.
+Each WebSocket message (RelayRequest) is fully validated and charged before it is
+forwarded. `validation_mode: optimistic` applies to HTTP relays only; a service with a
+WebSocket backend and an optimistic mode (its own or the default) is named once in a
+Warn at start.
 
 ## Implementation Tasks
 

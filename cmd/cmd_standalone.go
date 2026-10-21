@@ -146,6 +146,7 @@ func runStandalone(cmd *cobra.Command, _ []string) (err error) {
 	// fills. That is the difference from running the two subcommands.
 	memLimit := memlimit.Apply(logger)
 	logValidationQueueCapacity(logger, cfg.Relayer, memLimit)
+	logOptimisticOnEagerOnlyTransports(logger, cfg.Relayer)
 
 	unknown := cfg.Warnings()
 	for _, w := range unknown {
