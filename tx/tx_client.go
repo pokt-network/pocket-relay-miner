@@ -1063,7 +1063,14 @@ func (tc *TxClient) broadcastRaw(
 		// and by then the transaction is gone. The node's own height travels
 		// inside RawLog, which this line already carries, so the field that has
 		// to be added is ours.
-		tc.logger.Warn().
+		// Code 19 is a re-sent transaction the node already holds: the resend
+		// loop working as designed (see ErrTxAlreadyQueued), counted by the
+		// rebroadcast metrics, so Debug. Every other refusal is Warn.
+		event := tc.logger.Warn()
+		if isAlreadyQueuedRejection(res.TxResponse.Codespace, res.TxResponse.Code) {
+			event = tc.logger.Debug()
+		}
+		event.
 			Str("supplier", signerAddr).
 			Str("tx_type", txType).
 			Str("tx_hash", txHash).

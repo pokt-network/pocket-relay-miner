@@ -168,3 +168,15 @@ func TestNewWebSocketBridge_RequiresRelayProcessor(t *testing.T) {
 	assert.Nil(t, bridge)
 	assert.Contains(t, err.Error(), "RelayProcessor", "error must point at the missing dependency")
 }
+
+// ProcessRelayPayloadHash is ProcessRelay with the response hash as its body:
+// these paths mine from the body, so it is only here to satisfy the interface.
+func (n *noopRelayProcessor) ProcessRelayPayloadHash(
+	ctx context.Context,
+	reqBody []byte,
+	respPayloadHash [32]byte,
+	supplierAddr, serviceID string,
+	arrivalBlockHeight int64,
+) (*transport.MinedRelayMessage, error) {
+	return n.ProcessRelay(ctx, reqBody, respPayloadHash[:], supplierAddr, serviceID, arrivalBlockHeight)
+}

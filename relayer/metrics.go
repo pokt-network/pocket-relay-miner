@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/alitto/pond/v2"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/pokt-network/pocket-relay-miner/observability"
@@ -293,13 +292,26 @@ var (
 		[]string{"service_id"},
 	)
 
-	publishQueueBytes = observability.RelayerFactory.NewGauge(
+	publishQueueBytes = observability.RelayerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "publish_queue_bytes",
-			Help:      "Request and response bodies currently retained by queued publish tasks",
+			Help:      "Request bodies and response hashes retained by this service's publish tasks, served and not yet handed to the publisher",
 		},
+		[]string{"service_id"},
+	)
+
+	// publishQueueMaxBytes is publish_queue_bytes' ceiling: past it the service
+	// is refused with service_publish_queue_full.
+	publishQueueMaxBytes = observability.RelayerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "publish_queue_max_bytes",
+			Help:      "Most this service's publish tasks may retain before it is refused (its validation queue bound)",
+		},
+		[]string{"service_id"},
 	)
 
 	// batch_queue_bytes is the batcher's own retained-bytes count -- the exact
@@ -758,9 +770,9 @@ var (
 // AlreadyRegisteredError is tolerated because a process may build more than one
 // proxy (tests do). The first registration wins and keeps reading a live pool;
 // failing here would turn an observability detail into a startup error.
-func registerWorkerQueueDepth(subpools map[string]pond.Pool) error {
-	for name, sp := range subpools {
-		sp := sp
+func registerWorkerQueueDepth(subpools map[string]func() uint64) error {
+	for name, waiting := range subpools {
+		waiting := waiting
 		g := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Namespace:   metricsNamespace,
 			Subsystem:   metricsSubsystem,
@@ -768,7 +780,7 @@ func registerWorkerQueueDepth(subpools map[string]pond.Pool) error {
 			Help:        "Tasks waiting in a worker subpool right now (the queues are unbounded)",
 			ConstLabels: prometheus.Labels{"subpool": name},
 		}, func() float64 {
-			return float64(sp.WaitingTasks())
+			return float64(waiting())
 		})
 		if err := observability.RelayerRegistry.Register(g); err != nil {
 			var already prometheus.AlreadyRegisteredError

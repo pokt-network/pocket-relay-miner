@@ -132,6 +132,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 		logger:             logger,
 		config:             c,
 		validationQueues:   newValidationQueues(c),
+		publishQueues:      newPublishQueues(c),
 		clientPool:         clients,
 		clientPoolFallback: fallback,
 		responseSigner:     signer,

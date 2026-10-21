@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -25,6 +26,17 @@ type RelayProcessor interface {
 	ProcessRelay(
 		ctx context.Context,
 		reqBody, respBody []byte,
+		supplierAddr string,
+		serviceID string,
+		arrivalBlockHeight int64,
+	) (*transport.MinedRelayMessage, error)
+
+	// ProcessRelayPayloadHash is ProcessRelay given the sha256 of the response
+	// body instead of the body: the mined relay keeps only that hash.
+	ProcessRelayPayloadHash(
+		ctx context.Context,
+		reqBody []byte,
+		respPayloadHash [32]byte,
 		supplierAddr string,
 		serviceID string,
 		arrivalBlockHeight int64,
@@ -118,6 +130,18 @@ func (rp *relayProcessor) ProcessRelay(
 	serviceID string,
 	arrivalBlockHeight int64,
 ) (*transport.MinedRelayMessage, error) {
+	return rp.ProcessRelayPayloadHash(ctx, reqBody, sha256.Sum256(respBody), supplierAddr, serviceID, arrivalBlockHeight)
+}
+
+// ProcessRelayPayloadHash implements RelayProcessor.
+func (rp *relayProcessor) ProcessRelayPayloadHash(
+	ctx context.Context,
+	reqBody []byte,
+	respPayloadHash [32]byte,
+	supplierAddr string,
+	serviceID string,
+	arrivalBlockHeight int64,
+) (*transport.MinedRelayMessage, error) {
 	// Try to deserialize as a protobuf RelayRequest
 	relayReq := &servicetypes.RelayRequest{}
 	if err := relayReq.Unmarshal(reqBody); err != nil {
@@ -131,7 +155,7 @@ func (rp *relayProcessor) ProcessRelay(
 	}
 
 	// Build relay response
-	relayResp, err := rp.buildRelayResponse(ctx, relayReq, respBody, supplierAddr)
+	relayResp, err := rp.buildRelayResponse(ctx, relayReq, respPayloadHash, supplierAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build relay response: %w", err)
 	}
@@ -142,14 +166,12 @@ func (rp *relayProcessor) ProcessRelay(
 		Res: relayResp,
 	}
 
-	// CRITICAL: Dehydrate the payload BEFORE marshaling for SMST storage.
-	// This ensures the SMST root hash matches what the blockchain validator expects.
-	// The signature was already computed over the full payload in buildRelayResponse(),
-	// and the PayloadHash field allows verification without the full payload (v0.1.25+).
+	// The relay carries no payload, only its hash: the SMST root hash then
+	// matches what the blockchain validator expects, and the PayloadHash field
+	// allows verification without the payload (v0.1.25+).
 	// Reference: ../poktroll/pkg/relayer/miner/miner.go:107-111
-	relayResp.Payload = nil
 
-	// Calculate relay hash (now WITHOUT payload - matches blockchain expectation)
+	// Calculate relay hash (WITHOUT payload - matches blockchain expectation)
 	relayBz, err := relay.Marshal()
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal relay: %w", err)
@@ -214,26 +236,34 @@ func (rp *relayProcessor) ProcessRelay(
 	return msg, nil
 }
 
-// buildRelayResponse creates and signs a relay response.
+// emptyPayloadHash is sha256 of an empty response body.
+var emptyPayloadHash = sha256.Sum256(nil)
+
+// errEmptyResponsePayload refuses to mine a relay whose response body is empty.
+var errEmptyResponsePayload = errors.New("attempted to sign a relay response with an empty payload")
+
+// buildRelayResponse creates and signs a relay response from the hash of the
+// backend response body. The payload itself is left out: the signature covers
+// the payload hash and not the payload (RelayResponse.GetSignableBytesHash drops
+// the payload once the hash is set), and the payload is dropped before the
+// relay reaches the tree anyway.
 func (rp *relayProcessor) buildRelayResponse(
 	ctx context.Context,
 	relayReq *servicetypes.RelayRequest,
-	respBody []byte,
+	respPayloadHash [32]byte,
 	supplierAddr string,
 ) (*servicetypes.RelayResponse, error) {
-	// Create relay response with the backend response payload
+	// An empty response is not mined, as when the payload itself was signed
+	// (RelayResponse.UpdatePayloadHash refuses an empty payload).
+	if respPayloadHash == emptyPayloadHash {
+		return nil, errEmptyResponsePayload
+	}
 	relayResp := &servicetypes.RelayResponse{
 		Meta: servicetypes.RelayResponseMetadata{
 			SessionHeader: relayReq.Meta.SessionHeader,
 		},
-		Payload: respBody,
+		PayloadHash: respPayloadHash[:],
 	}
-
-	// Calculate payload hash for signature efficiency (v0.1.25+)
-	// This allows the response payload to be nil'd before SMST storage
-	// while still being verifiable via the payload hash
-	payloadHash := sha256.Sum256(respBody)
-	relayResp.PayloadHash = payloadHash[:]
 
 	// Sign the response if signer is available
 	if rp.signer != nil {
@@ -244,8 +274,6 @@ func (rp *relayProcessor) buildRelayResponse(
 		relayResp.Meta.SupplierOperatorSignature = sig
 	}
 
-	// NOTE: Payload is NOT cleared here - it's cleared in ProcessRelay() BEFORE marshaling.
-	// This ensures the relay bytes stored in the SMST match what the blockchain expects.
 	return relayResp, nil
 }
 

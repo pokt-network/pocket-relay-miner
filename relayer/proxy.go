@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,6 +140,8 @@ const (
 	// dropReasonNoPublisher: mined, but this relayer has no publisher to hand
 	// it to the store.
 	dropReasonNoPublisher = "no_publisher"
+	// dropReasonNoPublishQueue is a relay of a service with no publish queue.
+	dropReasonNoPublishQueue = "no_publish_queue"
 
 	// overBudgetReasonPushAtBudget: a WebSocket backend message, charged after it
 	// was served, left its session at or over the budget.
@@ -170,8 +173,11 @@ var gzipBufPool = sync.Pool{
 
 // publishTask holds the data needed for publishing a mined relay.
 type publishTask struct {
-	reqBody            []byte
-	respBody           []byte
+	reqBody []byte
+	// respPayloadHash is sha256 of the response body: the mined relay keeps only
+	// the hash (its payload is dropped before the tree), so the task does not
+	// retain the body.
+	respPayloadHash    [32]byte
 	arrivalBlockHeight int64
 	serviceID          string
 	supplierAddr       string
@@ -258,8 +264,10 @@ type ProxyServer struct {
 
 	// Subpools for specific tasks
 	validationSubpool pond.Pool
-	publishSubpool    pond.Pool
 	metricsSubpool    pond.Pool
+
+	// publishQueues is each service's publish tasks; see servicePublishQueue.
+	publishQueues map[string]*servicePublishQueue
 
 	// Global session monitor (shared across all WebSocket connections)
 	sessionMonitor *SessionMonitor
@@ -378,22 +386,22 @@ func NewProxyServer(
 	masterPoolSize := workerPool.MaxConcurrency()
 	sizing := SizingFromMaster(masterPoolSize)
 	validationWorkers := sizing.Validation
-	publishWorkers := sizing.Publish
 	metricsWorkers := sizing.Metrics
 
 	validationSubpool := workerPool.NewSubpool(validationWorkers)
-	publishSubpool := workerPool.NewSubpool(publishWorkers)
 	metricsSubpool := workerPool.NewSubpool(metricsWorkers)
+	publishQueues := newPublishQueues(config)
+	publishWorkers := len(publishQueues) * publishWorkersPerService
 
 	// The subpools had no metrics at all until now, which is why a relayer
 	// queueing thousands of tasks looked identical to an idle one.
 	workerPoolMaxWorkers.WithLabelValues("validation").Set(float64(validationWorkers))
 	workerPoolMaxWorkers.WithLabelValues("publish").Set(float64(publishWorkers))
 	workerPoolMaxWorkers.WithLabelValues("metrics").Set(float64(metricsWorkers))
-	if qErr := registerWorkerQueueDepth(map[string]pond.Pool{
-		"validation": validationSubpool,
-		"publish":    publishSubpool,
-		"metrics":    metricsSubpool,
+	if qErr := registerWorkerQueueDepth(map[string]func() uint64{
+		"validation": validationSubpool.WaitingTasks,
+		"publish":    func() uint64 { return waitingTasks(publishQueues) },
+		"metrics":    metricsSubpool.WaitingTasks,
 	}); qErr != nil {
 		return nil, qErr
 	}
@@ -403,7 +411,7 @@ func NewProxyServer(
 		Int("publish_workers", publishWorkers).
 		Int("metrics_workers", metricsWorkers).
 		Int("master_pool_size", masterPoolSize).
-		Msg("created worker subpools (8x CPU: 70% validation, 20% publish, 10% metrics)")
+		Msg("created worker subpools (validation and metrics from the master pool; publish: one pool per service)")
 
 	// Initialize async metric recorder (avoids histogram lock contention in hot path)
 	metricRecorder := NewMetricRecorder(logger, metricsSubpool)
@@ -440,7 +448,7 @@ func NewProxyServer(
 		maxRequestBodySizeAcrossServices: config.MaxRequestBodySizeAcrossServices(),
 		workerPool:                       workerPool,
 		validationSubpool:                validationSubpool,
-		publishSubpool:                   publishSubpool,
+		publishQueues:                    publishQueues,
 		metricsSubpool:                   metricsSubpool,
 		metricRecorder:                   metricRecorder,
 		validationQueues:                 validationQueues,
@@ -1212,6 +1220,17 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stop admitting THIS service while its publish tasks hold its whole bound:
+	// they wait on something only this service needs (its difficulty at a new
+	// session), and the other services keep being served. 429 with Retry-After,
+	// like the validation queue below.
+	if p.publishQueues[serviceID].full() {
+		w.Header().Set("Retry-After", "1")
+		p.sendError(w, http.StatusTooManyRequests, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonServicePublishQueueFull).Inc()
+		return
+	}
+
 	// An optimistic relay is served BEFORE it is validated and charged, so the
 	// only place it can be refused without being given away is here, before the
 	// backend. Eager relays are validated before serving and never wait in that
@@ -1781,20 +1800,34 @@ func (p *ProxyServer) submitPublishTask(
 		return
 	}
 
-	// Bodies this task will hold until it runs. Counted BEFORE the submit and
-	// released when the task finishes, so the gauge reflects what the queue is
-	// retaining rather than what it has processed. Task COUNT cannot stand in
-	// for this: the queue is unbounded and a task's cost is its payload.
-	retained := int64(len(reqBody) + len(respBody))
-	publishQueueBytes.Add(float64(retained))
+	queue := p.publishQueues[serviceID]
+	if queue == nil {
+		relaysDropped.WithLabelValues(serviceID, rpcType, dropReasonNoPublishQueue).Inc()
+		logging.WithSessionContext(p.logger.Debug(), logging.SessionContextPartial(sessionID, serviceID, supplierAddr, applicationAddr, 0)).
+			Msg("service has no publish queue, skipping relay publication")
+		return
+	}
 
-	// Submit publish task to pond worker pool (non-blocking, unbounded queue)
-	// Uses context.Background() since publish should complete even if request context is cancelled
-	_, submitted := p.publishSubpool.TrySubmit(func() {
-		defer publishQueueBytes.Sub(float64(retained))
+	// The task keeps the request and the response's hash, not the response:
+	// the mined relay carries only the hash. Hashed here, before the queue, so
+	// a task waiting on a slow lookup does not retain the body.
+	respPayloadHash := sha256.Sum256(respBody)
+
+	// Bytes this task will hold until it runs. Counted BEFORE the submit and
+	// released when the task finishes, so the gauge and this service's bound read
+	// what the queue is retaining rather than what it has processed. Task COUNT
+	// cannot stand in for this: a task's cost is its request.
+	retained := int64(len(reqBody) + len(respPayloadHash))
+	release := queue.hold(retained)
+
+	// Submit to this service's pool (non-blocking; bounded at admission by its
+	// bytes). Uses context.Background() since publish should complete even if
+	// request context is cancelled
+	_, submitted := queue.pool.TrySubmit(func() {
+		defer release()
 		task := publishTask{
 			reqBody:            reqBody,
-			respBody:           respBody,
+			respPayloadHash:    respPayloadHash,
 			arrivalBlockHeight: arrivalBlockHeight,
 			serviceID:          serviceID,
 			supplierAddr:       supplierAddr,
@@ -1809,7 +1842,7 @@ func (p *ProxyServer) submitPublishTask(
 	// only ever climbs. Submit returns a Task interface whose nil-ness is not a
 	// reliable signal; this one says so outright.
 	if !submitted {
-		publishQueueBytes.Sub(float64(retained))
+		release()
 	}
 }
 
@@ -2564,6 +2597,10 @@ func (p *ProxyServer) SetRelayMeter(meter *RelayMeter) {
 // redis.batch_max_queued_mib. Already queued relays are never dropped.
 const rejectReasonPublishQueueFull = "publish_queue_full"
 
+// rejectReasonServicePublishQueueFull is one service's publish queue holding its
+// bound; publish_queue_full is the batch queue every service shares.
+const rejectReasonServicePublishQueueFull = "service_publish_queue_full"
+
 // rejectReasonMeteringNotConfigured refuses a relay that nothing would charge: the
 // meter, or the pipeline that carries it, was never wired.
 const rejectReasonMeteringNotConfigured = "metering_not_configured"
@@ -3010,10 +3047,10 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 
 	// Use RelayProcessor if available for proper relay construction
 	if p.relayProcessor != nil {
-		msg, err := p.relayProcessor.ProcessRelay(
+		msg, err := p.relayProcessor.ProcessRelayPayloadHash(
 			ctx,
 			task.reqBody,
-			task.respBody,
+			task.respPayloadHash,
 			task.supplierAddr,
 			task.serviceID,
 			task.arrivalBlockHeight,
@@ -3151,8 +3188,8 @@ func (p *ProxyServer) Close(ctx context.Context) error {
 	if p.validationSubpool != nil {
 		p.validationSubpool.StopAndWait()
 	}
-	if p.publishSubpool != nil {
-		p.publishSubpool.StopAndWait()
+	for _, q := range p.publishQueues {
+		q.pool.StopAndWait()
 	}
 	if p.metricsSubpool != nil {
 		p.metricsSubpool.StopAndWait()

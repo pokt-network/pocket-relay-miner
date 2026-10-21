@@ -18,6 +18,7 @@ import (
 	"github.com/pokt-network/ring-go"
 
 	"github.com/puzpuzpuz/xsync/v4"
+	"github.com/rs/zerolog"
 
 	"github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto"
@@ -103,6 +104,11 @@ type ringClient struct {
 	// ringPointsCacheTTL (max-age floor on read) so it never grows or freezes
 	// for the process lifetime.
 	ringPointsCache *xsync.Map[ringPointsCacheKey, ringPointsCacheEntry]
+
+	// gatewaysLeftOut is the gateways already reported as left out of a ring:
+	// the ring is rebuilt every session, and a gateway without a usable key
+	// stays without one, so it is a Warn once per process and Debug after.
+	gatewaysLeftOut *xsync.Map[string, struct{}]
 }
 
 // NewRingClient creates a new RingClient with the provided query clients.
@@ -116,10 +122,23 @@ func NewRingClient(
 	return &ringClient{
 		logger:             logger,
 		ringPointsCache:    xsync.NewMap[ringPointsCacheKey, ringPointsCacheEntry](),
+		gatewaysLeftOut:    xsync.NewMap[string, struct{}](),
 		applicationQuerier: applicationQuerier,
 		accountQuerier:     accountQuerier,
 		sharedQuerier:      sharedQuerier,
 	}
+}
+
+// gatewayLeftOutEvent is Warn the first time this process leaves gatewayAddress
+// out of a ring, and Debug after.
+func (rc *ringClient) gatewayLeftOutEvent(gatewayAddress string) *zerolog.Event {
+	if rc.gatewaysLeftOut == nil {
+		return rc.logger.Warn()
+	}
+	if _, seen := rc.gatewaysLeftOut.LoadOrStore(gatewayAddress, struct{}{}); seen {
+		return rc.logger.Debug()
+	}
+	return rc.logger.Warn()
 }
 
 // GetRingForAddressAtHeight returns the ring for the address and block height provided.
@@ -337,7 +356,7 @@ func (rc *ringClient) getRingPubKeysForAddress(
 	for _, gatewayAddress := range GetRingAddressesAtSessionEndHeight(&app, sessionEndHeight) {
 		gatewayPubKey, err := rc.accountQuerier.GetPubKeyFromAddress(ctx, gatewayAddress)
 		if query.IsEntityNotFound(err) || errors.Is(err, query.ErrAccountPubKeyNotFound) {
-			rc.logger.Warn().Err(err).
+			rc.gatewayLeftOutEvent(gatewayAddress).Err(err).
 				Str("gateway_address", gatewayAddress).
 				Msg("leaving gateway out of the ring: it has no public key")
 			continue
@@ -346,7 +365,7 @@ func (rc *ringClient) getRingPubKeysForAddress(
 			return nil, err
 		}
 		if _, ok := gatewayPubKey.(*secp256k1.PubKey); !ok {
-			rc.logger.Warn().
+			rc.gatewayLeftOutEvent(gatewayAddress).
 				Str("gateway_address", gatewayAddress).
 				Str("key_type", fmt.Sprintf("%T", gatewayPubKey)).
 				Msg("leaving gateway out of the ring: its key is not a secp256k1 key")

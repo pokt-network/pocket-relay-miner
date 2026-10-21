@@ -296,3 +296,15 @@ func TestHandleSendRelay_PublishBudgetFreshAfterSlowBackend(t *testing.T) {
 		"publish budget must be measured from publish time, not handler entry "+
 			"(got %s left of %s after a %s backend)", fx.proc.lastPublishBudget, grpcPublishTimeout, backendDelay)
 }
+
+// ProcessRelayPayloadHash is ProcessRelay with the response hash as its body:
+// these paths mine from the body, so it is only here to satisfy the interface.
+func (p *recordingProcessor) ProcessRelayPayloadHash(
+	ctx context.Context,
+	reqBody []byte,
+	respPayloadHash [32]byte,
+	supplierAddr, serviceID string,
+	arrivalBlockHeight int64,
+) (*transport.MinedRelayMessage, error) {
+	return p.ProcessRelay(ctx, reqBody, respPayloadHash[:], supplierAddr, serviceID, arrivalBlockHeight)
+}

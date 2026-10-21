@@ -42,6 +42,11 @@ type ProofShape struct {
 	// same answer and the plan is read at most once per block.
 	mu           sync.Mutex
 	notAppliedAt int64
+
+	// readFailing is whether the last read of the plan failed: the failure is
+	// a Warn when reads start failing and an Info when they recover, not a
+	// line for every supplier batch and every retry in between.
+	readFailing atomic.Bool
 }
 
 // NewProofShape returns a ProofShape that reads the plan through client.
@@ -72,10 +77,17 @@ func (s *ProofShape) Weighted(ctx context.Context, blockHeight int64) bool {
 	// other's query timeouts.
 	height, err := s.client.AppliedPlanHeight(ctx, weightedProofUpgrade)
 	if err != nil {
-		s.logger.Warn().Err(err).
+		event := s.logger.Debug()
+		if s.readFailing.CompareAndSwap(false, true) {
+			event = s.logger.Warn()
+		}
+		event.Err(err).
 			Str("upgrade", weightedProofUpgrade).
 			Msg("could not read the upgrade plan; building closest proofs until it is read")
 		return false
+	}
+	if s.readFailing.CompareAndSwap(true, false) {
+		s.logger.Info().Str("upgrade", weightedProofUpgrade).Msg("the upgrade plan is read again")
 	}
 	if height <= 0 {
 		s.mu.Lock()

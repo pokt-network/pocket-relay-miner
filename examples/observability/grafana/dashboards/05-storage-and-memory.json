@@ -1852,11 +1852,20 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (service_id)(ha_relayer_validation_queue_bytes{service_id=~\"$service\"}) / sum by (service_id)(ha_relayer_validation_queue_max_bytes{service_id=~\"$service\"})",
-          "legendFormat": "{{service_id}}",
+          "legendFormat": "{{service_id}} validation",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (service_id)(ha_relayer_publish_queue_bytes{service_id=~\"$service\"}) / sum by (service_id)(ha_relayer_publish_queue_max_bytes{service_id=~\"$service\"})",
+          "legendFormat": "{{service_id}} publish",
+          "refId": "B"
         }
       ],
-      "title": "Validation queue used",
+      "title": "Validation and publish queue used",
       "type": "timeseries"
     },
     {
@@ -1920,7 +1929,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(ha_relayer_publish_queue_bytes)",
+          "expr": "sum(ha_relayer_publish_queue_bytes{service_id=~\"$service\"})",
           "legendFormat": "publish queue",
           "refId": "A"
         },
