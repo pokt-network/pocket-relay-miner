@@ -200,7 +200,7 @@ properties:
           enum:
             - eager
             - optimistic
-          description: Validation mode override for this service
+          description: Validation mode override for this service (HTTP relays only; WebSocket and gRPC are always eager)
         timeout_profile:
           type: string
           description: Name of timeout profile to use for this service (defines request timeout and HTTP client timeouts)
@@ -407,7 +407,7 @@ properties:
     enum:
       - eager
       - optimistic
-    description: Default validation mode for services (eager=validate first, optimistic=forward first)
+    description: Default validation mode for services (eager=validate first, optimistic=forward first); HTTP relays only, WebSocket and gRPC are always eager
     default: optimistic
 
   default_request_timeout_seconds:

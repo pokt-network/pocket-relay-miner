@@ -440,6 +440,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// in `relayer validate`, so putting it there would turn "warn and start"
 	// into "refuse to start".
 	logValidationQueueCapacity(logger, config, memLimit)
+	logOptimisticOnEagerOnlyTransports(logger, config)
 
 	// Keys the file carries that this binary does not understand.
 	//
@@ -1512,6 +1513,22 @@ func verifyGRPCConnectivity(ctx context.Context, logger logging.Logger, grpcURL 
 		Msg("gRPC endpoint responded successfully to GetParams query")
 
 	return nil
+}
+
+// logOptimisticOnEagerOnlyTransports says once, at start, which services ask
+// for optimistic validation on a transport that only validates eagerly. Not
+// routed through config.Warnings(), which is fatal under --strict-config and in
+// `relayer validate`: the default mode is optimistic, so every config with a
+// WebSocket or gRPC backend would refuse to start.
+func logOptimisticOnEagerOnlyTransports(logger logging.Logger, config *relayer.Config) {
+	services := config.OptimisticOnEagerOnlyTransports()
+	if len(services) == 0 {
+		return
+	}
+	logger.Warn().
+		Strs("services", services).
+		Msg("validation_mode optimistic applies only to HTTP relays: the WebSocket and gRPC relays " +
+			"of these services are validated and charged before they are forwarded (eager)")
 }
 
 // logValidationQueueCapacity reports what the per-service validation queues may

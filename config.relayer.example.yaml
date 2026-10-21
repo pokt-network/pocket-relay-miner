@@ -325,7 +325,9 @@ services:
 # Service Defaults
 # ==============================================================================
 # Validation mode for services that do not set one: "eager" validates the relay
-# before serving it, "optimistic" serves first and validates afterwards.
+# before serving it, "optimistic" serves first and validates afterwards. The mode
+# applies to HTTP relays only: WebSocket and gRPC relays are always validated and
+# charged before they are forwarded, and the relayer says so once at start.
 default_validation_mode: optimistic
 
 # Fallback request timeout, in seconds, for a service whose timeout profile

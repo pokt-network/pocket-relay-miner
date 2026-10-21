@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -1058,6 +1059,33 @@ func (c *Config) GetServiceValidationMode(serviceID string) ValidationMode {
 		return svc.ValidationMode
 	}
 	return c.DefaultValidationMode
+}
+
+// OptimisticOnEagerOnlyTransports lists, sorted, the services whose validation
+// mode is optimistic (their own or the default) and that have WebSocket or gRPC
+// backends, as "service (rpc types)". Those transports validate and charge every
+// relay before forwarding it, whatever the mode says: only the HTTP handler
+// reads it.
+func (c *Config) OptimisticOnEagerOnlyTransports() []string {
+	var services []string
+	for id, svc := range c.Services {
+		if c.GetServiceValidationMode(id) != ValidationModeOptimistic {
+			continue
+		}
+		var rpcTypes []string
+		for rpcType := range svc.Backends {
+			if rpcType == "websocket" || rpcType == "grpc" {
+				rpcTypes = append(rpcTypes, rpcType)
+			}
+		}
+		if len(rpcTypes) == 0 {
+			continue
+		}
+		sort.Strings(rpcTypes)
+		services = append(services, fmt.Sprintf("%s (%s)", id, strings.Join(rpcTypes, ", ")))
+	}
+	sort.Strings(services)
+	return services
 }
 
 // GetServiceTimeout returns the request timeout for a service.
