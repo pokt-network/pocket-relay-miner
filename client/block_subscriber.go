@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	stdhttp "net/http"
 	"runtime"
@@ -138,7 +139,7 @@ const (
 
 // BlockSubscriber is the leader's single reader of blocks from the chain. It
 // learns that a height exists from two sources racing each other -- the
-// websocket's NewBlockHeader events and a poll of the node's latest height --
+// websocket's NewBlockHeader events and a poll of the node's committed height --
 // and publishes a height only after reading that block's canonical hash, in
 // order, with no height skipped.
 //
@@ -157,7 +158,7 @@ type BlockSubscriber struct {
 	logger logging.Logger
 	config BlockSubscriberConfig
 
-	// cometClient serves every HTTP query (Block, Status). It is never started:
+	// cometClient serves every HTTP query (Block, ABCIInfo, Status). It is never started:
 	// HTTP calls do not need it, and the websocket gets its own client, which
 	// is replaced when it goes silent.
 	cometClient *http.HTTP
@@ -448,7 +449,7 @@ func (bs *BlockSubscriber) notePublished(height int64) {
 	}
 }
 
-// pollLoop reports the node's latest height once per interval, whatever the
+// pollLoop reports the node's committed height once per interval, whatever the
 // websocket is doing.
 func (bs *BlockSubscriber) pollLoop(ctx context.Context) {
 	defer bs.wg.Done()
@@ -460,15 +461,36 @@ func (bs *BlockSubscriber) pollLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		queryCtx, cancel := context.WithTimeout(ctx, bs.config.QueryTimeout)
-		status, err := bs.cometClient.Status(queryCtx)
-		cancel()
+		height, err := bs.committedHeight(ctx)
 		if err != nil {
 			bs.logger.Debug().Err(err).Msg("latest-height poll failed")
 			continue
 		}
-		bs.observe(status.SyncInfo.LatestBlockHeight)
+		bs.observe(height)
 	}
+}
+
+// committedHeight is the last height the node's app has committed. A node saves
+// a block and answers it on /status and /block before its app commits it, and
+// until then a transaction is simulated at the height before: a claim or proof
+// sent on the first block of its window is refused as outside it. The app's
+// commit is what abci_info reports. When abci_info fails, the height before
+// /status is used: a node saves a block only after committing the one before.
+func (bs *BlockSubscriber) committedHeight(ctx context.Context) (int64, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, bs.config.QueryTimeout)
+	defer cancel()
+	info, infoErr := bs.cometClient.ABCIInfo(queryCtx)
+	if infoErr == nil && info != nil && info.Response.LastBlockHeight > 0 {
+		return info.Response.LastBlockHeight, nil
+	}
+	status, err := bs.cometClient.Status(queryCtx)
+	if err != nil {
+		return 0, errors.Join(infoErr, err)
+	}
+	if status.SyncInfo.LatestBlockHeight <= 1 {
+		return 0, fmt.Errorf("node reports no committed height (abci_info: %v)", infoErr)
+	}
+	return status.SyncInfo.LatestBlockHeight - 1, nil
 }
 
 // subscriptionLoop keeps a websocket subscription open, replacing the client
@@ -696,27 +718,19 @@ func (bs *BlockSubscriber) publishToSubscribers(block *SimpleBlock) {
 	}
 }
 
-// fetchLatestBlock fetches and stores the latest block via an RPC query.
+// fetchLatestBlock fetches and stores the last committed block via an RPC query.
 // Used for the initial block and fallback when the subscription is not available.
 func (bs *BlockSubscriber) fetchLatestBlock(ctx context.Context) error {
 	queryCtx, cancel := context.WithTimeout(ctx, bs.config.QueryTimeout)
 	defer cancel()
 
-	result, err := bs.cometClient.Block(queryCtx, nil)
+	height, err := bs.committedHeight(queryCtx)
 	if err != nil {
-		return fmt.Errorf("failed to query block: %w", err)
+		return fmt.Errorf("failed to query the committed height: %w", err)
 	}
-	if result == nil || result.Block == nil {
-		return fmt.Errorf("failed to query block: the node answered no block")
-	}
-
-	// CRITICAL: Use BlockID.Hash (canonical block ID) instead of Block.Hash() (computed hash)
-	// This must match what the validator stores in ctx.HeaderHash() via StoreBlockHash()
-	// See: poktroll/x/session/keeper/keeper.go:82
-	block := &SimpleBlock{
-		height:    result.Block.Height,
-		hash:      result.BlockID.Hash,
-		timestamp: result.Block.Time,
+	block, err := bs.reader.readBlock(queryCtx, height)
+	if err != nil {
+		return err
 	}
 
 	bs.lastBlock.Store(block)
