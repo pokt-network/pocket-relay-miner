@@ -14,6 +14,7 @@ import (
 
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -186,6 +187,12 @@ type RelayMeter struct {
 	// from closing admission.
 	dispatcherHealth func() (bool, error)
 
+	// servicesOverGuarantee is the services already reported with a service
+	// factor above the protocol guarantee: the limit is recomputed for every
+	// session meter, and the factor of a service does not change between them,
+	// so it is a Warn once per process and Debug after.
+	servicesOverGuarantee *xsync.Map[string, struct{}]
+
 	// Lifecycle
 	ctx      context.Context
 	cancelFn context.CancelFunc
@@ -226,9 +233,22 @@ func NewRelayMeter(
 		ledger:                redisutil.NewChargeLedger(),
 		seen:                  make(map[string]int64),
 		inFlight:              make(map[string]int64),
+		servicesOverGuarantee: xsync.NewMap[string, struct{}](),
 	}
 	m.ledger.OnWritten(m.chargeWritten)
 	return m
+}
+
+// overGuaranteeEvent is Warn the first time this process finds serviceID's
+// service factor above the protocol guarantee, and Debug after.
+func (m *RelayMeter) overGuaranteeEvent(serviceID string) *zerolog.Event {
+	if m.servicesOverGuarantee == nil {
+		return m.logger.Warn()
+	}
+	if _, seen := m.servicesOverGuarantee.LoadOrStore(serviceID, struct{}{}); seen {
+		return m.logger.Debug()
+	}
+	return m.logger.Warn()
 }
 
 // errDispatcherNotWired is the refusal before SetDispatcherHealth ran: with no
@@ -1082,7 +1102,7 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 
 		// Warning if effectiveLimit exceeds baseLimit (potential unpaid work)
 		if effectiveLimit > baseLimit {
-			m.logger.Warn().
+			m.overGuaranteeEvent(serviceID).
 				Str("service_id", serviceID).
 				Str("app_address", appAddress).
 				Float64("service_factor", serviceFactor).
