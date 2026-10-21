@@ -93,7 +93,11 @@ version). Run tests with `make` too, except when debugging one package.
 3. No AI attribution in commits or PR bodies: no `Co-Authored-By` for an AI, no
    "Generated with" footer.
 4. Open a PR to `main`. The title uses the commit format; the description is
-   bullets: what changed, how it was tested, what breaks.
+   bullets: what changed, how it was tested, what breaks, and the issues it
+   resolves. Before opening it, read the open issues (`gh issue list`) for any
+   the change touches: `Closes #N` for one it resolves whole, `Refs #N` for one
+   it resolves in part, and after the merge comment on that issue with what
+   is left.
 5. PRs are squash-merged.
 6. A `vX.Y.Z` tag on `main` publishes `ghcr.io/pokt-network/pocket-relay-miner:vX.Y.Z`
    plus `latest`, and opens a draft release. A pre-release tag (`vX.Y.Z-rc.N`,
