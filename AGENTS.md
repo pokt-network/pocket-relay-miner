@@ -161,6 +161,8 @@ high-availability mode's; standalone mode's are after the list.
 2. **Same version for relayer and miner**: image
    `ghcr.io/pokt-network/pocket-relay-miner:v0.1.5` for both, or the binary of
    the same tag. Mixed versions are not supported. Never use a moving tag.
+   On a chain running poktroll v0.1.36 only v0.1.5 or newer gets sessions
+   proved ([versions](docs/deploy/README.md#relay-miner-and-poktroll-versions)).
 3. **Redis 8.10 or newer, with `maxmemory` set and `maxmemory-policy
    noeviction`.** Both binaries refuse to start when `redis_version` is below
    8.10, when `maxmemory` is 0, or when the policy is anything other than

@@ -294,6 +294,26 @@ In high-availability mode:
 4. Relayer. Its `/ready` turns 200 once the miner's manifest is in Redis.
 5. Send a relay, then watch the claim land after the session ends.
 
+## Relay miner and poktroll versions
+
+Your network's poktroll version decides which relay miner versions can get
+their sessions proved. From poktroll v0.1.36 the chain accepts only weighted
+proofs, and only v0.1.5 builds them.
+
+| Relay miner | Built against | Chain on poktroll v0.1.35 | Chain on poktroll v0.1.36 (plan `v0.1.36` applied, or started on v0.1.36) |
+|---|---|---|---|
+| v0.1.0 to v0.1.4 | poktroll v0.1.35 | supported | **not supported**: every proof is a closest proof and the chain refuses it (`proof is not a weighted merkle proof`), so a session that requires a proof loses its reward. Measured on beta: 16 of 16 required proofs lost |
+| v0.1.5 | poktroll v0.1.36 | supported: closest proofs until the chain applies the `v0.1.36` plan (covered by tests; not yet run against a live v0.1.35 chain) | supported: weighted proofs, verified on beta under load |
+
+- Upgrade to v0.1.5 **before** your network applies the poktroll v0.1.36
+  upgrade. The same binary runs before and after it and switches the proofs on
+  its own.
+- A session whose proof window spans the upgrade halt, and whose proof did not
+  land before the halt, can still end `PROOF_MISSING`. Later sessions are not
+  affected.
+- v0.1.5 refuses relays signed with rings padded with the old placeholder key.
+  Current signers do not use it.
+
 ## Upgrading and rolling back
 
 - Read the release notes of the version you are moving to first: what changed,
