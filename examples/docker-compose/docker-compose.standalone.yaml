@@ -27,7 +27,7 @@ services:
   standalone:
     # The same image and tag as the high-availability example: standalone
     # mode is a subcommand of the one binary, released since v0.1.3.
-    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.4
+    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.5
     command: ["standalone", "--config", "/config/standalone.yaml"]
     volumes:
       - ./config/standalone.yaml:/config/standalone.yaml:ro

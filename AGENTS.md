@@ -47,11 +47,11 @@ response; the **miner** builds the claim and the proof from the served relays
 and submits them to the chain. It runs in 1 of 2 modes:
 
 - **High-availability mode**: 2 processes from 1 binary (`relayer`, `miner`),
-  sharing 1 Redis; relayers and miners can have replicas. Released (v0.1.4);
+  sharing 1 Redis; relayers and miners can have replicas. Released (v0.1.5);
   its Docker Compose runbook was verified on beta with an image built before
   v0.1.0.
 - **Standalone mode**: 1 process (`standalone`) that runs both, its state in an
-  embedded store on local disk, no Redis, no replicas. Released (v0.1.4).
+  embedded store on local disk, no Redis, no replicas. Released (v0.1.5).
   On a local chain (Tilt, level 3) it served, claimed, proved and settled
   every relay, as high-availability mode did; its runbooks are not yet
   verified on beta.
@@ -159,7 +159,7 @@ high-availability mode's; standalone mode's are after the list.
    on 1 relayer + 1 miner and on 2 relayers + 2 miners, the latter at lower
    load; the load tests and every capacity figure are from 1 relayer + 1 miner.
 2. **Same version for relayer and miner**: image
-   `ghcr.io/pokt-network/pocket-relay-miner:v0.1.4` for both, or the binary of
+   `ghcr.io/pokt-network/pocket-relay-miner:v0.1.5` for both, or the binary of
    the same tag. Mixed versions are not supported. Never use a moving tag.
 3. **Redis 8.10 or newer, with `maxmemory` set and `maxmemory-policy
    noeviction`.** Both binaries refuse to start when `redis_version` is below
