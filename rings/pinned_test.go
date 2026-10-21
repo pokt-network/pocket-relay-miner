@@ -102,7 +102,7 @@ func TestVerifySignatureAgainstPoints_ValidRingSig(t *testing.T) {
 // validator (Task 2) and verifier (Task 6) use to REFUSE pinning it.
 func TestIsPlaceholderPubKey(t *testing.T) {
 	phPriv := secp256k1.GenPrivKeyFromSecret([]byte("placeholder_ring_key_for_apps_without_gateways"))
-	require.True(t, IsPlaceholderPubKey(phPriv.PubKey()), "must match rings.PlaceholderRingPubKey")
+	require.True(t, IsPlaceholderPubKey(phPriv.PubKey()), "must match the old ring padding key")
 	require.False(t, IsPlaceholderPubKey(secp256k1.GenPrivKey().PubKey()))
 }
 
@@ -133,7 +133,7 @@ func TestVerifySignatureAgainstPoints_TamperedPayload(t *testing.T) {
 	err = VerifySignatureAgainstPoints(req, pts)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrRingClientInvalidRelayRequestSignature)
-	require.Contains(t, err.Error(), "invalid signature")
+	require.Contains(t, err.Error(), "invalid relay request signature or bytes")
 }
 
 // TestVerifySignatureAgainstPoints_RingNotInPinnedSet verifies that a
@@ -156,7 +156,7 @@ func TestVerifySignatureAgainstPoints_RingNotInPinnedSet(t *testing.T) {
 	err = VerifySignatureAgainstPoints(req, pts)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrRingClientInvalidRelayRequestSignature)
-	require.Contains(t, err.Error(), "ring not in pinned set")
+	require.Contains(t, err.Error(), "does not match the expected one")
 }
 
 // TestVerifySignatureAgainstPoints_MissingSignature verifies the nil
@@ -261,7 +261,7 @@ func TestPubKeyFromHex_WrongLength(t *testing.T) {
 
 // TestPrecomputeRingPoints_Valid verifies the returned map is keyed by each
 // pubkey's encoded curve point, matching the shape
-// ringClient.getRingPointsForAddressAtHeight builds for on-chain rings.
+// ringClient.getRingPointsForAddressAtSessionEndHeight builds for on-chain rings.
 func TestPrecomputeRingPoints_Valid(t *testing.T) {
 	appPriv := secp256k1.GenPrivKey()
 	gwPriv := secp256k1.GenPrivKey()

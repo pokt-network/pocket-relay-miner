@@ -55,7 +55,7 @@ mkdir -p bin && tar -xzf pocket-relay-miner_v0.1.4_linux_amd64.tar.gz -C bin
 
 **Expect**: `pocket-relay-miner_v0.1.4_linux_amd64.tar.gz: OK`
 
-Or **Run** (build from source; needs Go 1.26.5 and make)
+Or **Run** (build from source; needs Go 1.27.2 and make)
 
 ```bash
 make build-release

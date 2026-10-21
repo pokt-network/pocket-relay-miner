@@ -4,7 +4,9 @@ What poktroll does, per entity, and where the money moves. It exists because
 reasoning about the protocol from memory missed half the cases and invented
 situations that cannot happen.
 
-**Verified against poktroll v0.1.35** — the version pinned by `go.mod:20`.
+**Verified against poktroll v0.1.35.** `go.mod` now pins v0.1.36, which changes
+some of these rules (its upgrade handler, `app/upgrades/v0.1.36.go`, lists them);
+the sheets have not been verified against it yet.
 
 ### The rule of this directory
 

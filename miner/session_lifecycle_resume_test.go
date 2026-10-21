@@ -294,7 +294,7 @@ func TestFlushTree_AfterARestartClaimsTheSealedRootOfASessionLeftClaiming(t *tes
 	require.NoError(t, err)
 	require.Equal(t, sealed, third, "LINK resume-claim-root: the root does not move on a second claim")
 	path := sha256.Sum256([]byte("resume-root-path"))
-	proof, err := next.ProveClosest(ctx, session, path[:])
+	proof, err := next.ProveWeighted(ctx, session, path[:])
 	require.NoError(t, err)
 	ok, _ := chainVerifies(t, proof, sealed)
 	require.True(t, ok, "LINK resume-claim-root: the proof of the resumed claim verifies against the sealed root")

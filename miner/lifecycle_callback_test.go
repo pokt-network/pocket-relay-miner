@@ -58,6 +58,10 @@ func (m *mockSMSTManager) GetTreeRoot(_ context.Context, _ string) ([]byte, erro
 	return []byte("mock-root"), nil
 }
 
+func (m *mockSMSTManager) ProveWeighted(_ context.Context, _ string, _ []byte) ([]byte, error) {
+	return []byte("mock-proof"), nil
+}
+
 func (m *mockSMSTManager) ProveClosest(_ context.Context, _ string, _ []byte) ([]byte, error) {
 	return []byte("mock-proof"), nil
 }

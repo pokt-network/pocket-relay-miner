@@ -300,8 +300,8 @@ func BenchmarkRedisSMST_FlushTree(b *testing.B) {
 	}
 }
 
-// BenchmarkRedisSMST_ProveClosest benchmarks proof generation.
-func BenchmarkRedisSMST_ProveClosest(b *testing.B) {
+// BenchmarkRedisSMST_ProveWeighted benchmarks proof generation.
+func BenchmarkRedisSMST_ProveWeighted(b *testing.B) {
 	suite := setupBenchSuite(b)
 	defer suite.Cleanup()
 
@@ -333,9 +333,9 @@ func BenchmarkRedisSMST_ProveClosest(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		path := protocol.GetPathForProof([]byte("relay-key-0"), sessionID)
-		_, err := manager.ProveClosest(suite.ctx, sessionID, path)
+		_, err := manager.ProveWeighted(suite.ctx, sessionID, path)
 		if err != nil {
-			b.Fatalf("ProveClosest failed: %v", err)
+			b.Fatalf("ProveWeighted failed: %v", err)
 		}
 	}
 }
@@ -379,9 +379,9 @@ func BenchmarkRedisSMST_Session100Relays(b *testing.B) {
 
 		// Generate proof
 		path := protocol.GetPathForProof([]byte("relay-key-0"), sessionID)
-		_, err = manager.ProveClosest(suite.ctx, sessionID, path)
+		_, err = manager.ProveWeighted(suite.ctx, sessionID, path)
 		if err != nil {
-			b.Fatalf("ProveClosest failed: %v", err)
+			b.Fatalf("ProveWeighted failed: %v", err)
 		}
 	}
 }
@@ -423,9 +423,9 @@ func BenchmarkRedisSMST_Session1000Relays(b *testing.B) {
 
 		// Generate proof
 		path := protocol.GetPathForProof([]byte("relay-key-0"), sessionID)
-		_, err = manager.ProveClosest(suite.ctx, sessionID, path)
+		_, err = manager.ProveWeighted(suite.ctx, sessionID, path)
 		if err != nil {
-			b.Fatalf("ProveClosest failed: %v", err)
+			b.Fatalf("ProveWeighted failed: %v", err)
 		}
 	}
 }

@@ -1,12 +1,12 @@
 package main
 
 import (
+	"crypto/sha3"
 	"encoding/hex"
 	"math/big"
 
 	dsecp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	dleqtypes "github.com/pokt-network/go-dleq/types"
-	"golang.org/x/crypto/sha3"
 )
 
 // dleqTypesPoint aliases the go-dleq point interface so main.go reads without

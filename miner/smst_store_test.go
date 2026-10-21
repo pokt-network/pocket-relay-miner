@@ -42,7 +42,7 @@ func TestSMSTStore_ATreeIsClaimedProvedAndCompactedOnBothBackends(t *testing.T) 
 		path := coldPaths(22, 1)[0]
 
 		failover := smstManagerOver(store, supplier)
-		proofBz, err := failover.ProveClosest(ctx, sessionID, path)
+		proofBz, err := failover.ProveWeighted(ctx, sessionID, path)
 		require.NoError(t, err)
 		ok, _ := chainVerifies(t, proofBz, root)
 		require.True(t, ok, "a proof from the stored nodes")
@@ -54,7 +54,7 @@ func TestSMSTStore_ATreeIsClaimedProvedAndCompactedOnBothBackends(t *testing.T) 
 		require.NoError(t, err)
 		require.True(t, compacted)
 
-		proofBz, err = smstManagerOver(store, supplier).ProveClosest(ctx, sessionID, path)
+		proofBz, err = smstManagerOver(store, supplier).ProveWeighted(ctx, sessionID, path)
 		require.NoError(t, err)
 		ok, _ = chainVerifies(t, proofBz, root)
 		require.True(t, ok, "a proof from the leaves blob")

@@ -58,7 +58,7 @@ var (
 	)
 
 	// SMSTPanicsRecovered counts panics caught at the miner -> smt
-	// library boundary (UpdateTree, Commit, ProveClosest, Import, etc.).
+	// library boundary (UpdateTree, Commit, ProveWeighted, Import, etc.).
 	// Any non-zero value is a data-corruption signal (missing node,
 	// malformed payload, unexpected library assertion) that the
 	// defensive wrapper converted into an error instead of tumbling the

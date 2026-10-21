@@ -94,6 +94,7 @@ type Clients struct {
 	serviceClient     *serviceQueryClient
 	accountClient     *accountQueryClient
 	bankClient        *bankQueryClient
+	upgradeClient     *upgradeQueryClient
 
 	// Lifecycle
 	mu     sync.RWMutex
@@ -142,6 +143,7 @@ func NewQueryClients(
 	qc.serviceClient = newServiceQueryClient(logger, grpcConn, config.QueryTimeout, &qc.heights)
 	qc.accountClient = newAccountQueryClient(logger, grpcConn, config.QueryTimeout)
 	qc.bankClient = newBankQueryClient(logger, grpcConn, config.QueryTimeout)
+	qc.upgradeClient = newUpgradeQueryClient(grpcConn, config.QueryTimeout)
 
 	qc.logger.Info().
 		Str("endpoint", config.GRPCEndpoint).
@@ -250,6 +252,11 @@ func (qc *Clients) Account() client.AccountQueryClient {
 // Bank returns the bank query client.
 func (qc *Clients) Bank() client.BankQueryClient {
 	return qc.bankClient
+}
+
+// Upgrade returns the upgrade query client.
+func (qc *Clients) Upgrade() UpgradeQueryClient {
+	return qc.upgradeClient
 }
 
 // GRPCConnection returns the underlying gRPC connection.
@@ -1733,12 +1740,12 @@ func (c *accountQueryClient) GetPubKeyFromAddress(ctx context.Context, address s
 		return nil, err
 	}
 	if acc == nil {
-		return nil, fmt.Errorf("account not found: %s", address)
+		return nil, fmt.Errorf("%w: account %s not found", ErrAccountPubKeyNotFound, address)
 	}
 
 	pubKey := acc.GetPubKey()
 	if pubKey == nil {
-		return nil, fmt.Errorf("public key not found for account: %s", address)
+		return nil, fmt.Errorf("%w: account %s has none", ErrAccountPubKeyNotFound, address)
 	}
 
 	return pubKey, nil

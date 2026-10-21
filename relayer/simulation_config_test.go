@@ -31,11 +31,13 @@ func hexPubKey(t *testing.T) string {
 	return hex.EncodeToString(priv.PubKey().Bytes())
 }
 
-// placeholderPubKeyHex returns the hex encoding of rings.PlaceholderRingPubKey
-// — the forbidden padding key whose private half is publicly derivable.
+// placeholderPubKeyHex returns the hex encoding of the old ring padding key
+// — forbidden as a pinned key because its private half is publicly derivable.
 func placeholderPubKeyHex(t *testing.T) string {
 	t.Helper()
-	return hex.EncodeToString(rings.PlaceholderRingPubKey.Bytes())
+	pk := secp256k1.GenPrivKeyFromSecret([]byte("placeholder_ring_key_for_apps_without_gateways")).PubKey()
+	require.True(t, rings.IsPlaceholderPubKey(pk))
+	return hex.EncodeToString(pk.Bytes())
 }
 
 func validIdentity(t *testing.T) SimIdentity {

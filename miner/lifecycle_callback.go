@@ -122,8 +122,11 @@ type SMSTManager interface {
 	// GetTreeRoot returns the root hash for an already-flushed session.
 	GetTreeRoot(ctx context.Context, sessionID string) (rootHash []byte, err error)
 
-	// ProveClosest generates a proof for the closest leaf to the given path.
-	ProveClosest(ctx context.Context, sessionID string, path []byte) (proofBytes []byte, err error)
+	// ProveWeighted generates a proof for the leaf the seed selects, weighted by relay count.
+	ProveWeighted(ctx context.Context, sessionID string, seed []byte) (proofBytes []byte, err error)
+
+	// ProveClosest generates a proof for the leaf closest to the seed path.
+	ProveClosest(ctx context.Context, sessionID string, seed []byte) (proofBytes []byte, err error)
 
 	// DeleteTree removes the SMST for a session (cleanup after settlement).
 	DeleteTree(ctx context.Context, sessionID string) error
@@ -181,6 +184,9 @@ type LifecycleCallback struct {
 	// buildPool is used for bounded parallel claim/proof building.
 	// If nil, falls back to unbounded goroutines (legacy behavior).
 	buildPool pond.Pool
+
+	// proofShape picks the proof the chain verifies. If nil, proofs are weighted.
+	proofShape *ProofShape
 }
 
 // NewLifecycleCallback creates a new lifecycle callback.
@@ -255,6 +261,11 @@ func (lc *LifecycleCallback) SetBuildPool(pool pond.Pool) {
 // If not set, local cache cleanup is skipped (Redis entries still expire via TTL).
 func (lc *LifecycleCallback) SetDeduplicator(dedup Deduplicator) {
 	lc.deduplicator = dedup
+}
+
+// SetProofShape wires what picks a weighted or a closest proof.
+func (lc *LifecycleCallback) SetProofShape(shape *ProofShape) {
+	lc.proofShape = shape
 }
 
 // SetProofQueryClient wires the on-chain proof query client used by the
@@ -2583,6 +2594,10 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		proofResults := make(chan proofBuildResult, len(sessionsNeedingProof))
 		numProofTasks := len(sessionsNeedingProof)
 
+		// One shape for the whole batch: the retry loop below compares it with
+		// the chain's before every attempt.
+		weighted := lc.proofShape.Weighted(ctx, lc.blockClient.LastBlock(ctx).Height())
+
 		for i, snapshot := range sessionsNeedingProof {
 			// Capture loop variables for goroutine
 			index := i
@@ -2621,18 +2636,22 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				// Record the scheduled proof height for operators
 				SetProofScheduledHeight(snap.SupplierOperatorAddress, snap.ServiceID, float64(earliestProofHeight))
 
-				// Generate the proof path from the seed block hash
-				path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
+				// Generate the proof seed from the seed block hash
+				seed := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
 
 				lc.logger.Info().
 					Str(logging.FieldSessionID, snap.SessionID).
 					Str("block_hash_from_blockid", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
-					Str("proof_path_computed", fmt.Sprintf("%x", path)).
+					Str("proof_seed_computed", fmt.Sprintf("%x", seed)).
 					Int64("block_height", proofRequirementSeedHeight).
 					Msg("DEBUG: proof path computation (using BlockID.Hash)")
 
 				// Generate the proof (CPU-bound cryptographic operation, can parallelize)
-				proofBytes, proofErr := lc.smstManager.ProveClosest(ctx, snap.SessionID, path)
+				prove := lc.smstManager.ProveClosest
+				if weighted {
+					prove = lc.smstManager.ProveWeighted
+				}
+				proofBytes, proofErr := prove(ctx, snap.SessionID, seed)
 				if proofErr != nil {
 					result.err = fmt.Errorf("failed to generate proof for session %s: %w", snap.SessionID, proofErr)
 					proofResults <- result
@@ -2781,7 +2800,20 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		var proofSigned tx.SignedTxPayload
 		// nodeBehind: see the claim twin.
 		nodeBehind := false
+		// shapeChanged: the chain crossed the upgrade after the batch was built,
+		// so its proofs are of the shape the chain no longer verifies. The
+		// sessions go back to claimed and are built again next block.
+		shapeChanged := false
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
+			if lc.proofShape.Weighted(ctx, lc.blockClient.LastBlock(ctx).Height()) != weighted {
+				logger.Warn().
+					Bool("built_weighted", weighted).
+					Int("batch_size", len(proofMsgs)).
+					Msg("the chain's proof shape changed since the batch was built; returning the group to the next block")
+				lc.deferProofs(ctx, validProofSnapshots)
+				shapeChanged = true
+				break
+			}
 			// Re-inject instead of re-signing, for the reason the claim twin
 			// states in full. THE PROOF LOOP HAS NO EJECTION -- the chain never
 			// names one proof of a batch -- so there is no batch change that
@@ -2802,6 +2834,18 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				if errors.Is(submitErr, tx.ErrTxProofNotRequired) {
 					lc.settleNotRequiredBatch(ctx, logger, submitErr, validProofSnapshots)
 					notRequired = true
+					break
+				}
+
+				// The chain refused closest proofs: it verifies weighted ones,
+				// though no plan said so (a chain started on v0.1.36). Same exit
+				// as the shape check above, on any attempt, the last included.
+				if !weighted && lc.proofShape.LearnFromRefusal(submitErr) {
+					logger.Warn().
+						Int("batch_size", len(proofMsgs)).
+						Msg("the chain refused the batch's closest proofs; returning the group to the next block to build weighted ones")
+					lc.deferProofs(ctx, validProofSnapshots)
+					shapeChanged = true
 					break
 				}
 
@@ -2977,7 +3021,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		}
 
 		// Not a failure of the cycle: see the claim twin.
-		if nodeBehind {
+		if nodeBehind || shapeChanged {
 			continue
 		}
 

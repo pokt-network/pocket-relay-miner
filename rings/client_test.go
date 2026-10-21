@@ -202,10 +202,9 @@ func TestRingClient_GetRingForAddressAtHeight_NoDelegations(t *testing.T) {
 		DelegateeGatewayAddresses: []string{}, // Empty
 	}
 
-	// Setup mock account querier with public keys (including placeholder)
+	// Setup mock account querier with the app's public key
 	pubKeys := map[string]cryptotypes.PubKey{
-		appAddress:             appPubKey,
-		PlaceholderRingAddress: PlaceholderRingPubKey,
+		appAddress: appPubKey,
 	}
 
 	appQuerier := &mockApplicationQuerier{app: app}
@@ -214,12 +213,12 @@ func TestRingClient_GetRingForAddressAtHeight_NoDelegations(t *testing.T) {
 
 	client := NewRingClient(logger, appQuerier, accQuerier, sharedQuerier)
 
-	// Test getting ring - should use placeholder
+	// Test getting ring - the app key pads the ring
 	ring, err := client.GetRingForAddressAtHeight(ctx, appAddress, 100)
 
 	require.NoError(t, err)
 	require.NotNil(t, ring)
-	// Ring should contain app + placeholder = 2 keys
+	// Ring should contain the app key twice = 2 members
 	require.Equal(t, 2, ring.Size())
 }
 
@@ -441,20 +440,6 @@ func TestGetRingAddressesAtBlock(t *testing.T) {
 	require.Contains(t, addresses, "gateway1")
 }
 
-// TestPlaceholderRingPubKey tests that the placeholder key is valid.
-func TestPlaceholderRingPubKey(t *testing.T) {
-	require.NotNil(t, PlaceholderRingPubKey)
-	require.NotEmpty(t, PlaceholderRingAddress)
-
-	// Verify placeholder can be used in a ring
-	keys := []cryptotypes.PubKey{PlaceholderRingPubKey, generateTestKeys(t, 1)[0]}
-	ring, err := GetRingFromPubKeys(keys)
-
-	require.NoError(t, err)
-	require.NotNil(t, ring)
-	require.Equal(t, 2, ring.Size())
-}
-
 // TestRingClient_GetRingForAddressAtHeight_ErrorRetrievingPubKey tests error handling.
 func TestRingClient_GetRingForAddressAtHeight_ErrorRetrievingPubKey(t *testing.T) {
 	ctx := context.Background()
@@ -524,8 +509,8 @@ func TestGetRingAddressesAtSessionEndHeight_WithDuplicates(t *testing.T) {
 	require.Equal(t, 3, len(addresses))
 }
 
-// TestRingClient_GetRingAddressesAtBlock_QueryError tests error handling.
-func TestRingClient_GetRingAddressesAtBlock_QueryError(t *testing.T) {
+// TestRingClient_GetRingForAddressAtHeight_SharedParamsError tests error handling.
+func TestRingClient_GetRingForAddressAtHeight_SharedParamsError(t *testing.T) {
 	ctx := context.Background()
 	logger := newNopLogger()
 
@@ -539,13 +524,12 @@ func TestRingClient_GetRingAddressesAtBlock_QueryError(t *testing.T) {
 	sharedQuerier := &mockSharedQuerier{err: errors.New("query failed")}
 
 	client := NewRingClient(logger, appQuerier, accQuerier, sharedQuerier)
-	rc := client.(*ringClient)
 
 	// This should fail when trying to get params
-	addresses, err := rc.GetRingAddressesAtBlock(ctx, app, 100)
+	ring, err := client.GetRingForAddressAtHeight(ctx, "app1", 100)
 
 	require.Error(t, err)
-	require.Nil(t, addresses)
+	require.Nil(t, ring)
 	require.Contains(t, err.Error(), "query failed")
 }
 
@@ -642,8 +626,7 @@ func TestRingClient_VerifyRelayRequestSignature_MissingSignature(t *testing.T) {
 	}
 
 	pubKeys := map[string]cryptotypes.PubKey{
-		appAddress:             appPubKey,
-		PlaceholderRingAddress: PlaceholderRingPubKey,
+		appAddress: appPubKey,
 	}
 
 	appQuerier := &mockApplicationQuerier{app: app}
@@ -691,8 +674,7 @@ func TestRingClient_VerifyRelayRequestSignature_InvalidSignature(t *testing.T) {
 	}
 
 	pubKeys := map[string]cryptotypes.PubKey{
-		appAddress:             appPubKey,
-		PlaceholderRingAddress: PlaceholderRingPubKey,
+		appAddress: appPubKey,
 	}
 
 	appQuerier := &mockApplicationQuerier{app: app}
@@ -752,7 +734,7 @@ func TestRingClient_VerifyRelayRequestSignature_InvalidSessionHeader(t *testing.
 	require.Contains(t, err.Error(), "invalid session header")
 }
 
-// TestRingClient_GetRingPointsForAddressAtHeight tests the getRingPointsForAddressAtHeight helper.
+// TestRingClient_GetRingPointsForAddressAtHeight tests the getRingPointsForAddressAtSessionEndHeight helper.
 func TestRingClient_GetRingPointsForAddressAtHeight(t *testing.T) {
 	ctx := context.Background()
 	logger := newNopLogger()
@@ -784,8 +766,8 @@ func TestRingClient_GetRingPointsForAddressAtHeight(t *testing.T) {
 	client := NewRingClient(logger, appQuerier, accQuerier, sharedQuerier)
 	rc := client.(*ringClient)
 
-	// Test getRingPointsForAddressAtHeight
-	ringPoints, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, 100)
+	// Test getRingPointsForAddressAtSessionEndHeight
+	ringPoints, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, 100)
 
 	require.NoError(t, err)
 	require.NotNil(t, ringPoints)
@@ -812,7 +794,7 @@ func TestRingClient_GetRingPointsForAddressAtHeight_ApplicationError(t *testing.
 	client := NewRingClient(logger, appQuerier, accQuerier, sharedQuerier)
 	rc := client.(*ringClient)
 
-	ringPoints, err := rc.getRingPointsForAddressAtHeight(ctx, "invalid_address", 100)
+	ringPoints, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, "invalid_address", 100)
 
 	require.Error(t, err)
 	require.Nil(t, ringPoints)
@@ -835,8 +817,7 @@ func TestRingClient_GetRingPointsForAddressAtHeight_NoDelegations(t *testing.T) 
 	}
 
 	pubKeys := map[string]cryptotypes.PubKey{
-		appAddress:             appPubKey,
-		PlaceholderRingAddress: PlaceholderRingPubKey,
+		appAddress: appPubKey,
 	}
 
 	appQuerier := &mockApplicationQuerier{app: app}
@@ -846,11 +827,12 @@ func TestRingClient_GetRingPointsForAddressAtHeight_NoDelegations(t *testing.T) 
 	client := NewRingClient(logger, appQuerier, accQuerier, sharedQuerier)
 	rc := client.(*ringClient)
 
-	ringPoints, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, 100)
+	ringPoints, numMembers, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, 100)
 
 	require.NoError(t, err)
 	require.NotNil(t, ringPoints)
-	require.Equal(t, 2, len(ringPoints), "should have 2 points (app + placeholder)")
+	require.Equal(t, 1, len(ringPoints), "one distinct point: the app key")
+	require.Equal(t, 2, numMembers, "two members: the app key twice")
 }
 
 // TestRingClient_GetRingPointsForAddressAtHeight_MultipleDelegations tests with many delegations.
@@ -890,7 +872,7 @@ func TestRingClient_GetRingPointsForAddressAtHeight_MultipleDelegations(t *testi
 	client := NewRingClient(logger, appQuerier, accQuerier, sharedQuerier)
 	rc := client.(*ringClient)
 
-	ringPoints, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, 100)
+	ringPoints, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, 100)
 
 	require.NoError(t, err)
 	require.NotNil(t, ringPoints)
@@ -972,7 +954,7 @@ func BenchmarkGetRingPointsForAddressAtHeight(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		_, err := rc.getRingPointsForAddressAtHeight(ctx, appAddress, 100)
+		_, _, err := rc.getRingPointsForAddressAtSessionEndHeight(ctx, appAddress, 100)
 		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}

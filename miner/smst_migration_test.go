@@ -71,7 +71,7 @@ func TestMigrateLegacySMSTKeys_RescuesOwnerAndEnablesProof(t *testing.T) {
 	require.NoError(t, err, "owner must lazy-load from migrated keys")
 	require.Equal(t, ownerRoot, gotRoot, "owner root must match legacy root (end-to-end rescue)")
 
-	proof, err := ownerMgr.ProveClosest(h.ctx, sessionID, relayPath)
+	proof, err := ownerMgr.ProveWeighted(h.ctx, sessionID, relayPath)
 	require.NoError(t, err, "owner must generate a proof from migrated tree")
 	require.NotEmpty(t, proof, "proof bytes must be non-empty")
 }
@@ -211,7 +211,7 @@ func (h *migrationHarness) newManager(supplierAddr string) *RedisSMSTManager {
 }
 
 // buildOwnerTree uses a real RedisSMSTManager to build and flush a tree,
-// then returns the root and a valid path for ProveClosest. The path points
+// then returns the root and a valid path for ProveWeighted. The path points
 // at the first inserted relay's key (hashed by the SMT).
 func (h *migrationHarness) buildOwnerTree(
 	t *testing.T,
@@ -226,7 +226,7 @@ func (h *migrationHarness) buildOwnerTree(
 	root, err := mgr.FlushTree(h.ctx, sessionID)
 	require.NoError(t, err)
 
-	// Use the canonical helper to build a ProveClosest path — the same one
+	// Use the canonical helper to build a ProveWeighted path — the same one
 	// used in production proof generation. Any 32-byte hash works, but using
 	// GetPathForProof keeps the test realistic end-to-end.
 	return root, protocol.GetPathForProof(relays[0].key, sessionID)

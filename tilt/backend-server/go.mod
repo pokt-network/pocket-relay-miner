@@ -1,6 +1,6 @@
 module github.com/pokt-network/pocket-relay-miner/tilt/backend-server
 
-go 1.26.5
+go 1.27.2
 
 require (
 	github.com/gorilla/websocket v1.5.3

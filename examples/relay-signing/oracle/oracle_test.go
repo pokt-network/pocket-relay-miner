@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha3"
 	"encoding/binary"
 	"fmt"
 	"math/big"
@@ -11,7 +12,6 @@ import (
 	dsecp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	dleqsecp "github.com/pokt-network/go-dleq/secp256k1"
 	ring "github.com/pokt-network/ring-go"
-	"golang.org/x/crypto/sha3"
 )
 
 // The vectors this oracle publishes are only useful if the primitives that

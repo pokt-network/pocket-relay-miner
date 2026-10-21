@@ -31,7 +31,7 @@ func (f *flakySupplier) SubmitProofsReturningHash(_ context.Context, _ int64, _ 
 // than its path asks hides which call the path actually makes.
 type provingSMST struct{ smstStub }
 
-func (provingSMST) ProveClosest(_ context.Context, _ string, _ []byte) ([]byte, error) {
+func (provingSMST) ProveWeighted(_ context.Context, _ string, _ []byte) ([]byte, error) {
 	return []byte("proof-bytes"), nil
 }
 

@@ -517,11 +517,11 @@ func (m *RedisSMSTManager) coldTreeCompacted(ctx context.Context, sessionID stri
 	return compacted, nil
 }
 
-// proveClosestFromLeaves rebuilds the claimed tree from its leaves blob in
+// proveFromLeaves rebuilds the claimed tree from its leaves blob in
 // memory, checks the rebuilt root against claimedRoot, and proves on it. The
 // load waits on RebuildAdmission, which bounds how many trees are in memory at
 // once when a whole cohort of sessions reaches its proof window.
-func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID string, claimedRoot, path []byte) ([]byte, error) {
+func (m *RedisSMSTManager) proveFromLeaves(ctx context.Context, sessionID string, claimedRoot, seed []byte, weighted bool) ([]byte, error) {
 	supplier := m.config.SupplierAddress
 	start := time.Now()
 	result := "failed"
@@ -562,12 +562,12 @@ func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID
 		}
 		trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), claimedRoot, protocol.SMTValueHasher())
 		var proof *smt.SparseMerkleClosestProof
-		if err := m.runSMSTSafely(sessionID, "prove_closest_cold", func() error {
-			p, proveErr := trie.ProveClosest(path)
+		if err := m.runSMSTSafely(sessionID, "prove_cold", func() error {
+			p, proveErr := proveOn(trie, seed, weighted)
 			proof = p
 			return proveErr
 		}); err != nil {
-			return fmt.Errorf("failed to prove closest: %w", err)
+			return fmt.Errorf("failed to prove: %w", err)
 		}
 		proofBz, err = marshalClosestProof(proof, trie.Spec())
 		if err != nil {
@@ -597,7 +597,8 @@ func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID
 	}
 	m.logger.Info().
 		Str(logging.FieldSessionID, sessionID).
-		Str("proof_path_hex", fmt.Sprintf("%x", path)).
+		Str("proof_seed_hex", fmt.Sprintf("%x", seed)).
+		Bool("weighted", weighted).
 		Str("claimed_root_hex", fmt.Sprintf("%x", claimedRoot)).
 		Int("proof_len", len(proofBz)).
 		Msg("generated proof from SMST rebuilt from its leaves blob")

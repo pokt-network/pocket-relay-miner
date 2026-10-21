@@ -791,7 +791,7 @@ func (c *Config) GetSupplierClaimingConfig() SupplierClaimerConfig {
 
 // suppliersPerCPUWarnThreshold is a ROUGH advisory floor, not an SLA. At
 // window-open every owned supplier builds its claim/proof concurrently and SMST
-// proving (ProveClosest) is CPU-bound; well above this ratio an under-provisioned
+// proving (ProveWeighted) is CPU-bound; well above this ratio an under-provisioned
 // instance can submit too late and forfeit. The real fix is horizontal scaling
 // (the SupplierClaimer distributes suppliers across replicas automatically).
 const suppliersPerCPUWarnThreshold = 50

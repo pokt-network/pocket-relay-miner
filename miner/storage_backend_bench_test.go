@@ -61,8 +61,8 @@ func BenchmarkStoreBackend_SMSTSession1000Relays(b *testing.B) {
 				b.Fatalf("FlushTree: %v", err)
 			}
 			path := protocol.GetPathForProof([]byte("relay-key-0"), sessionID)
-			if _, err := m.ProveClosest(ctx, sessionID, path); err != nil {
-				b.Fatalf("ProveClosest: %v", err)
+			if _, err := m.ProveWeighted(ctx, sessionID, path); err != nil {
+				b.Fatalf("ProveWeighted: %v", err)
 			}
 		}
 	})

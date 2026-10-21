@@ -38,7 +38,7 @@ func sessionRootAndProof(t *testing.T, f *handlerTestFixture, sessionID string, 
 	t.Helper()
 	root, err := f.smstMgr.FlushTree(f.ctx, sessionID)
 	require.NoError(t, err)
-	proof, err = f.smstMgr.ProveClosest(f.ctx, sessionID, path)
+	proof, err = f.smstMgr.ProveWeighted(f.ctx, sessionID, path)
 	require.NoError(t, err)
 	return root, proof
 }

@@ -10,6 +10,7 @@ import (
 
 	poktcrypto "github.com/pokt-network/poktroll/pkg/crypto"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
+	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/pokt-network/ring-go"
 	"github.com/stretchr/testify/require"
@@ -24,33 +25,44 @@ import (
 // height.
 func atHeight(h int64) func() int64 { return func() int64 { return h } }
 
-// errReachedRingVerification marks that validation got as far as the ring.
+// errPastGraceDecision marks that validation got as far as the session lookup.
 //
 // It is the discriminator this test needs, not a detail: the grace branch
-// returns ErrSessionExpired from getTargetSessionBlockHeight, BEFORE any ring
-// work (validator.go:150-158). So reaching the ring proves the validator took
-// the ACTIVE-session branch, which is the defect. A nil ring client would panic
-// here instead, turning a precise answer into a stack trace.
-var errReachedRingVerification = errors.New("reached ring verification")
+// returns ErrSessionExpired from getTargetSessionBlockHeight, BEFORE the session
+// lookup, and the ring is verified only after it. So reaching the lookup proves
+// the validator took the ACTIVE-session branch, which is the defect. A nil
+// session cache would panic here instead, turning a precise answer into a stack
+// trace.
+var errPastGraceDecision = errors.New("reached the session lookup")
+
+// sentinelSessionCache implements cache.SessionCache and never answers.
+type sentinelSessionCache struct{}
+
+func (sentinelSessionCache) GetSession(context.Context, string, string, int64) (*sessiontypes.Session, error) {
+	return nil, errPastGraceDecision
+}
+func (sentinelSessionCache) Start(context.Context) error { return nil }
+func (sentinelSessionCache) Close() error                { return nil }
 
 // sentinelRingClient implements crypto.RingClient (two methods, verified in
 // poktroll v0.1.35 pkg/crypto/interface.go:16-28) and never verifies anything.
+// The validator reaches it only after the session lookup, which
+// sentinelSessionCache refuses.
 type sentinelRingClient struct{}
 
 var _ poktcrypto.RingClient = sentinelRingClient{}
 
 func (sentinelRingClient) GetRingForAddressAtHeight(context.Context, string, int64) (*ring.Ring, error) {
-	return nil, errReachedRingVerification
+	return nil, errPastGraceDecision
 }
 
 func (sentinelRingClient) VerifyRelayRequestSignature(context.Context, *servicetypes.RelayRequest) error {
-	return errReachedRingVerification
+	return errPastGraceDecision
 }
 
-// newGraceValidator builds a validator whose only wired collaborator is the ring
-// sentinel. The session cache stays nil deliberately: both branches this test
-// distinguishes return before it is reached (validator.go:150 for grace,
-// validator.go:158 for the ring), so wiring it would hide which one ran.
+// newGraceValidator builds a validator whose only wired collaborators are
+// sentinels: the grace branch returns before the session lookup, the active
+// branch stops at it, so the error says which one ran.
 func newGraceValidator(grace uint64, sessionEnd int64) RelayValidator {
 	params := &sharedtypes.Params{
 		// Non-zero: IsGracePeriodElapsed resolves the session grid through
@@ -62,7 +74,7 @@ func newGraceValidator(grace uint64, sessionEnd int64) RelayValidator {
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		&ValidatorConfig{},
 		sentinelRingClient{},
-		nil,
+		sentinelSessionCache{},
 		&epochSharedParamCache{
 			oldParams:     params,
 			newParams:     params,
@@ -120,7 +132,7 @@ func TestRelayPipeline_JudgesGraceAtTheRelaysOwnArrivalHeight(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrSessionExpired,
 		"LINK grace-uses-the-relays-own-arrival-height: this relay arrived at %d, %d blocks past the grace window of session [%d,%d] which closes at %d. "+
-			"Reaching ring verification instead (%v) means the validator took the active-session branch, i.e. it judged this relay against a height that is not this relay's.",
+			"Reaching the session lookup instead (%v) means the validator took the active-session branch, i.e. it judged this relay against a height that is not this relay's.",
 		arrival, arrival-graceCloses, sessionStart, sessionEnd, graceCloses, err)
 }
 
@@ -169,7 +181,7 @@ func TestValidateRelayRequest_TwoConcurrentRelaysAreEachJudgedAtTheirOwnHeight(t
 			},
 		},
 		sentinelRingClient{},
-		nil,
+		sentinelSessionCache{},
 		&epochSharedParamCache{oldParams: params, newParams: params, epochBoundary: sessionEnd},
 		nil,
 	)
@@ -192,7 +204,7 @@ func TestValidateRelayRequest_TwoConcurrentRelaysAreEachJudgedAtTheirOwnHeight(t
 	require.ErrorIs(t, expiredErr, ErrSessionExpired,
 		"LINK each-relay-keeps-its-own-height: the relay that arrived at %d is past the grace window and must expire, whatever the other goroutine was validating",
 		expiredAt)
-	require.ErrorIs(t, liveErr, errReachedRingVerification,
+	require.ErrorIs(t, liveErr, errPastGraceDecision,
 		"LINK each-relay-keeps-its-own-height: the relay that arrived at %d is inside the grace window and must be validated, whatever the other goroutine was validating",
 		liveAt)
 	require.NotErrorIs(t, liveErr, ErrSessionExpired,
@@ -200,7 +212,7 @@ func TestValidateRelayRequest_TwoConcurrentRelaysAreEachJudgedAtTheirOwnHeight(t
 }
 
 // TestRelayPipeline_AGraceRelayIsStillLive is the other half, and it must NOT
-// move: inside the grace window the relay is legitimate and must reach the ring.
+// move: inside the grace window the relay is legitimate and must be validated.
 //
 // Without it, "reject everything" would pass the test above, and the band that
 // session_height_bounds.go enforces (10.000 blocks, roughly 7 days) would be
@@ -230,7 +242,7 @@ func TestRelayPipeline_AGraceRelayIsStillLive(t *testing.T) {
 		ArrivalBlockHeight: arrival,
 	})
 
-	require.ErrorIs(t, err, errReachedRingVerification,
+	require.ErrorIs(t, err, errPastGraceDecision,
 		"LINK grace-relay-is-still-live: a relay arriving at %d is inside the grace window of session [%d,%d] and must be validated, not expired",
 		arrival, sessionStart, sessionEnd)
 	require.NotErrorIs(t, err, ErrSessionExpired)

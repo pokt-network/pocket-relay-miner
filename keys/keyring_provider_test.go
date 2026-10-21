@@ -1,6 +1,7 @@
 package keys
 
 import (
+	errorsmod "cosmossdk.io/errors"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -207,7 +208,7 @@ func TestIsPermanentKeyFailure(t *testing.T) {
 		{
 			// With key_names set, a key the operator deleted is gone for good.
 			name:      "named key no longer in the keyring",
-			err:       fmt.Errorf("key not found: %w", sdkerrors.ErrKeyNotFound),
+			err:       errorsmod.Wrap(sdkerrors.ErrKeyNotFound, "supplier1.info"), // as keyring.go wraps it
 			permanent: true,
 		},
 		{

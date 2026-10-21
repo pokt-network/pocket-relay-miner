@@ -3257,6 +3257,11 @@
         "staking_fee": {
           "amount": "1000000",
           "denom": "upokt"
+        },
+        "min_stake_included_services": "1",
+        "stake_per_additional_service": {
+          "amount": "0",
+          "denom": "upokt"
         }
       },
       "supplierList": [

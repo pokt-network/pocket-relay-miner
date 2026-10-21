@@ -172,7 +172,7 @@ func TestGetOrCreateTree_ValidClaimedRoot_Imports(t *testing.T) {
 }
 
 // TestLoadTreeFromRedis_CorruptRoot_ErrorsInsteadOfPanicking covers the
-// lazy-load path used by ProveClosest after HA failover.
+// lazy-load path used by ProveWeighted after HA failover.
 func TestLoadTreeFromRedis_CorruptRoot_ErrorsInsteadOfPanicking(t *testing.T) {
 	for _, n := range corruptRootLengths {
 		if n == 0 {

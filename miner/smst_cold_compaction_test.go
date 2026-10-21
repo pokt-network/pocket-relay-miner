@@ -65,9 +65,10 @@ func claimColdTree(t testing.TB, ctx context.Context, mgr *RedisSMSTManager, ses
 	return root
 }
 
-// chainVerifies runs the proof through the chain's own sequence
-// (x/proof/keeper/proof_validation.go in poktroll v0.1.35): unmarshal the
-// compact proof, decompact it with the protocol spec, verify it against root.
+// chainVerifies runs the proof through the chain's closest-proof checks
+// (x/proof/keeper/proof_validation.go): unmarshal the compact proof, decompact
+// it with the protocol spec, verify it against root. It does not check that the
+// leaf is the one a seed selects; weightedVerifies does.
 // It returns the decompacted proof so a caller can compare what it proves.
 func chainVerifies(t testing.TB, proofBz, root []byte) (bool, *smt.SparseMerkleClosestProof) {
 	t.Helper()
@@ -119,10 +120,11 @@ func TestColdCompaction_AFailoverMinerProvesACompactedTreeAgainstTheClaimedRoot(
 	paths := coldPaths(7, 120)
 	before := make([]*smt.SparseMerkleClosestProof, len(paths))
 	for i, path := range paths {
-		proofBz, err := mgr.ProveClosest(ctx, sessionID, path)
+		proofBz, err := mgr.ProveWeighted(ctx, sessionID, path)
 		require.NoError(t, err)
 		ok, proof := chainVerifies(t, proofBz, root)
 		require.True(t, ok, "control: the uncompacted tree's proof for path %d verifies", i)
+		require.True(t, weightedVerifies(t, proofBz, root, path), "the uncompacted tree's proof for seed %d is the leaf the seed selects", i)
 		before[i] = proof
 	}
 
@@ -145,10 +147,11 @@ func TestColdCompaction_AFailoverMinerProvesACompactedTreeAgainstTheClaimedRoot(
 		SupplierAddress: supplier, CacheTTL: time.Hour, RebuildAdmission: NewRebuildAdmission(zerolog.Nop()),
 	})
 	for i, path := range paths {
-		proofBz, err := failover.ProveClosest(ctx, sessionID, path)
+		proofBz, err := failover.ProveWeighted(ctx, sessionID, path)
 		require.NoError(t, err, "LINK V1: path %d proves from the compacted tree", i)
 		ok, proof := chainVerifies(t, proofBz, root)
 		require.True(t, ok, "LINK V1: the proof from the compacted tree for path %d verifies against the claimed root", i)
+		require.True(t, weightedVerifies(t, proofBz, root, path), "LINK V1: the compacted tree's proof for seed %d is the leaf the seed selects", i)
 		badOK, _ := chainVerifies(t, proofBz, badRoot)
 		require.False(t, badOK, "control: path %d does not verify against a root with one bit changed", i)
 		require.Equal(t, before[i].ClosestPath, proof.ClosestPath, "path %d proves the same leaf", i)
@@ -157,7 +160,7 @@ func TestColdCompaction_AFailoverMinerProvesACompactedTreeAgainstTheClaimedRoot(
 	}
 
 	// The manager that compacted it proves too, now from Redis.
-	proofBz, err := mgr.ProveClosest(ctx, sessionID, paths[0])
+	proofBz, err := mgr.ProveWeighted(ctx, sessionID, paths[0])
 	require.NoError(t, err)
 	ok, _ := chainVerifies(t, proofBz, root)
 	require.True(t, ok, "the compacting manager proves from the blob")
@@ -170,7 +173,7 @@ func TestColdCompaction_AFailoverMinerProvesACompactedTreeAgainstTheClaimedRoot(
 	again, err := resumer.FlushTree(ctx, sessionID)
 	require.NoError(t, err)
 	require.Equal(t, root, again, "a resumed compacted tree flushes to the claimed root")
-	proofBz, err = resumer.ProveClosest(ctx, sessionID, paths[1])
+	proofBz, err = resumer.ProveWeighted(ctx, sessionID, paths[1])
 	require.NoError(t, err)
 	ok, _ = chainVerifies(t, proofBz, root)
 	require.True(t, ok, "a resumed compacted tree proves")
@@ -200,7 +203,7 @@ func TestColdCompaction_ATreeClaimedBeforeCompactionExistedIsProvedFromItsHash(t
 	badRoot := bytes.Clone(root)
 	badRoot[7] ^= 0x01
 	for i, path := range coldPaths(17, 20) {
-		proofBz, err := upgraded.ProveClosest(ctx, sessionID, path)
+		proofBz, err := upgraded.ProveWeighted(ctx, sessionID, path)
 		require.NoError(t, err, "LINK upgrade: path %d of a tree without a blob proves from its hash", i)
 		ok, _ := chainVerifies(t, proofBz, root)
 		require.True(t, ok, "LINK upgrade: path %d verifies against the claimed root", i)
@@ -239,7 +242,7 @@ func TestColdCompaction_ConcurrentProofsOfACompactedTreeAllVerify(t *testing.T) 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			proofs[i], errs[i] = failover.ProveClosest(ctx, sessionID, paths[i])
+			proofs[i], errs[i] = failover.ProveWeighted(ctx, sessionID, paths[i])
 		}()
 	}
 	wg.Wait()
@@ -397,7 +400,7 @@ func TestColdCompaction_AProofFromABlobThatDoesNotRebuildTheClaimedRootFails(t *
 
 	mismatches := testutil.ToFloat64(observability.SMSTColdRebuilds.WithLabelValues(supplier, "mismatch"))
 	failover := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier, CacheTTL: time.Hour})
-	proofBz, err := failover.ProveClosest(ctx, sessionID, coldPaths(9, 1)[0])
+	proofBz, err := failover.ProveWeighted(ctx, sessionID, coldPaths(9, 1)[0])
 	require.ErrorIs(t, err, errColdRootMismatch, "LINK V2-prove: a rebuild that is not the claimed root yields no proof")
 	require.Nil(t, proofBz)
 	require.Equal(t, mismatches+1, testutil.ToFloat64(observability.SMSTColdRebuilds.WithLabelValues(supplier, "mismatch")))
@@ -470,7 +473,7 @@ func TestColdCompaction_ARejectedSetKeepsTheNodesHashAndIsRetried(t *testing.T) 
 	require.True(t, keyExists(t, client, kb.SMSTLeavesKey(supplier, sessionID)))
 	require.Len(t, retries, 1, "a compaction that succeeded schedules nothing more")
 
-	proofBz, err := mgr.ProveClosest(ctx, sessionID, coldPaths(10, 1)[0])
+	proofBz, err := mgr.ProveWeighted(ctx, sessionID, coldPaths(10, 1)[0])
 	require.NoError(t, err)
 	ok, _ := chainVerifies(t, proofBz, root)
 	require.True(t, ok)
@@ -560,7 +563,7 @@ func TestColdCompaction_AProofThatLosesTheNodesHashMidWalkIsProvedFromTheBlob(t 
 
 	prover := NewRedisSMSTManager(zerolog.Nop(), hooked, RedisSMSTManagerConfig{SupplierAddress: supplier, CacheTTL: time.Hour})
 	rebuilds := testutil.ToFloat64(observability.SMSTColdRebuilds.WithLabelValues(supplier, "ok"))
-	proofBz, err := prover.ProveClosest(ctx, sessionID, coldPaths(13, 1)[0])
+	proofBz, err := prover.ProveWeighted(ctx, sessionID, coldPaths(13, 1)[0])
 	require.False(t, race.armed.Load(), "control: the hash was deleted between the check and the walk")
 	require.NoError(t, err, "LINK race: a hash deleted mid-proof falls back to the blob")
 	ok, _ := chainVerifies(t, proofBz, root)

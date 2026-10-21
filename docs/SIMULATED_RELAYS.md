@@ -81,10 +81,10 @@ clock, shared Redis). Nothing depends on the honesty of the caller.
 - **Config allowlist.** Only pinned, enabled, unexpired identities are
   accepted, selected by a `key_id`.
 - **Real ring signature over an operator-controlled ring.** The caller must
-  sign correctly, like a real gateway relay. The deterministic ring-padding
-  "placeholder" key is **forbidden** as a pinned member (its private key is
-  publicly derivable), so forgery requires a private key the operator actually
-  holds. **Treat simulation gateway private keys as gateway-grade secrets, and
+  sign correctly, like a real gateway relay. The deterministic "placeholder"
+  key that older ring builders padded rings with is **forbidden** as a pinned
+  member (its private key is publicly derivable), so forgery requires a private
+  key the operator actually holds. **Treat simulation gateway private keys as gateway-grade secrets, and
   use dedicated identities — never the keys of a revenue-generating app.**
 - **Identity binding.** The request's application address must match the
   pinned identity, and its service must be one of the identity's
@@ -147,7 +147,7 @@ discarded when they were generated: the block passes `relayer validate`, but
 nothing can sign for it, so it serves nothing until you put your own keys in.
 
 Config validation **rejects** (`relayer validate` exits `1`, and the relayer
-refuses to start) a config that pins the ring-padding placeholder key, an empty
+refuses to start) a config that pins the ring placeholder key, an empty
 or duplicate `key_id`, a malformed pubkey, an identity with no gateway pubkeys,
 an explicit `max_rps` of zero or less after defaults (an unset one defaults to
 5), or a `not_after` that is not RFC3339. "Malformed" includes a pubkey that is

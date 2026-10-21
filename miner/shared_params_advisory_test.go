@@ -43,14 +43,16 @@ func betaSharedParams() *sharedtypes.Params {
 
 // localnetGenesisSharedParams reproduces tilt/config/genesis.json BEFORE the fix:
 // application_unbonding_period_sessions=1 at num_blocks_per_session=10 gives a
-// 10-block unbonding period against a 17-block claim+proof settlement window.
+// 10-block unbonding period against an 18-block claim+proof settlement window.
+// proof_window_open_offset_blocks is 1, not the old file's 0: poktroll v0.1.36
+// rejects 0 first, which would hide the unbonding violation under test.
 func localnetGenesisSharedParams() *sharedtypes.Params {
 	return &sharedtypes.Params{
 		NumBlocksPerSession:                10,
 		GracePeriodEndOffsetBlocks:         1,
 		ClaimWindowOpenOffsetBlocks:        1,
 		ClaimWindowCloseOffsetBlocks:       8,
-		ProofWindowOpenOffsetBlocks:        0,
+		ProofWindowOpenOffsetBlocks:        1,
 		ProofWindowCloseOffsetBlocks:       8,
 		SupplierUnbondingPeriodSessions:    20,
 		ApplicationUnbondingPeriodSessions: 1,
