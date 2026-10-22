@@ -1,6 +1,6 @@
 module github.com/pokt-network/pocket-relay-miner/tilt/tiltcheck
 
-go 1.27.2
+go 1.27.3
 
 require (
 	go.starlark.net v0.0.0-20261005163335-bcb1a1a55bf9
