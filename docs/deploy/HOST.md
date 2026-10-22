@@ -25,15 +25,15 @@ in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 - A Linux host with systemd and cgroup v2, root access, and the
   [prerequisites](README.md#prerequisites): a reachable node, a staked
   supplier key, a backend per service, a funded supplier account.
-- A copy of this repository at tag `v0.1.5`, for `examples/host/` and
+- A copy of this repository at tag `v0.1.6`, for `examples/host/` and
   `config.redis.example.conf`:
 
 ```bash
-git clone --branch v0.1.5 https://github.com/pokt-network/pocket-relay-miner.git && cd pocket-relay-miner
+git clone --branch v0.1.6 https://github.com/pokt-network/pocket-relay-miner.git && cd pocket-relay-miner
 ```
 
-**If not**: `Remote branch v0.1.5 not found in upstream origin` → check the
-tag is typed exactly `v0.1.5`; the list of tags is at
+**If not**: `Remote branch v0.1.6 not found in upstream origin` → check the
+tag is typed exactly `v0.1.6`; the list of tags is at
 <https://github.com/pokt-network/pocket-relay-miner/tags>.
 
 **Stop if**: you do not have the supplier key or the node endpoints. A human
@@ -47,13 +47,13 @@ same one.
 **Run** (download it from the release; `arm64` instead of `amd64` on ARM)
 
 ```bash
-curl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.5/pocket-relay-miner_v0.1.5_linux_amd64.tar.gz
-curl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.5/checksums.txt
+curl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.6/pocket-relay-miner_v0.1.6_linux_amd64.tar.gz
+curl -sLO https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.6/checksums.txt
 sha256sum --ignore-missing -c checksums.txt
-mkdir -p bin && tar -xzf pocket-relay-miner_v0.1.5_linux_amd64.tar.gz -C bin
+mkdir -p bin && tar -xzf pocket-relay-miner_v0.1.6_linux_amd64.tar.gz -C bin
 ```
 
-**Expect**: `pocket-relay-miner_v0.1.5_linux_amd64.tar.gz: OK`
+**Expect**: `pocket-relay-miner_v0.1.6_linux_amd64.tar.gz: OK`
 
 Or **Run** (build from source; needs Go 1.27.3 and make)
 
@@ -67,7 +67,7 @@ Or **Run** (copy it out of the release image; needs Docker, and the binary is
 statically linked)
 
 ```bash
-mkdir -p bin && id=$(docker create ghcr.io/pokt-network/pocket-relay-miner:v0.1.5) && docker cp "$id:/usr/local/bin/pocket-relay-miner" bin/pocket-relay-miner && docker rm "$id"
+mkdir -p bin && id=$(docker create ghcr.io/pokt-network/pocket-relay-miner:v0.1.6) && docker cp "$id:/usr/local/bin/pocket-relay-miner" bin/pocket-relay-miner && docker rm "$id"
 ```
 
 Then install it and create the service user:

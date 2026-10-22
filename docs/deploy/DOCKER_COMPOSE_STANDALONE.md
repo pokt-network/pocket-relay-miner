@@ -96,19 +96,19 @@ $C pull; echo "EXIT=$?"
 ```
 
 **Expect** (not verified):
-`ghcr.io/pokt-network/pocket-relay-miner:v0.1.5` pulled, then `EXIT=0`.
+`ghcr.io/pokt-network/pocket-relay-miner:v0.1.6` pulled, then `EXIT=0`.
 
 **If not**: `manifest unknown` → check the compose file names exactly that
 image. If this host cannot reach `ghcr.io`, build the image locally with the
 same name (takes a few minutes), because the compose file names that image:
 
 ```bash
-git checkout v0.1.5 2>/dev/null || echo "tag v0.1.5 not found: building the current checkout"
-docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.5 .
+git checkout v0.1.6 2>/dev/null || echo "tag v0.1.6 not found: building the current checkout"
+docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.6 .
 ```
 
 If the tag is not in your checkout, fetch it first (`git fetch --tags`):
-otherwise the image is whatever commit you have checked out, under the v0.1.5
+otherwise the image is whatever commit you have checked out, under the v0.1.6
 name. The build pulls its base images from Docker Hub: `429 Too Many Requests`
 is Docker Hub's anonymous pull limit → wait, or `docker login`, and run it
 again.
