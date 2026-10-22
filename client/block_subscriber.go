@@ -189,6 +189,12 @@ type BlockSubscriber struct {
 	wsHeight        atomic.Int64
 	publishedPastWS atomic.Int64
 
+	// abciFailures counts consecutive abci_info reads that gave no committed
+	// height, and abciFallbackWarned whether that was reported: a Warn once
+	// reads keep failing, an Info when one answers again, not a line per poll.
+	abciFailures       atomic.Int64
+	abciFallbackWarned atomic.Bool
+
 	// Fan-out pub/sub for multiple consumers
 	// Each subscriber gets an independent channel to avoid race conditions
 	subscribers   map[uint64]*subscriberInfo
@@ -470,27 +476,52 @@ func (bs *BlockSubscriber) pollLoop(ctx context.Context) {
 	}
 }
 
+// abciFailuresBeforeWarn is how many consecutive abci_info reads must fail
+// before the fallback is reported, so a read that fails now and then is not.
+const abciFailuresBeforeWarn = 3
+
 // committedHeight is the last height the node's app has committed. A node saves
 // a block and answers it on /status and /block before its app commits it, and
 // until then a transaction is simulated at the height before: a claim or proof
 // sent on the first block of its window is refused as outside it. The app's
-// commit is what abci_info reports. When abci_info fails, the height before
-// /status is used: a node saves a block only after committing the one before.
+// commit is what abci_info reports.
+//
+// When abci_info gives none, /status is used as it was before: at most a few
+// seconds early, which costs a refused transaction resent a block later. The
+// height before /status would never be early, but /status stays on a height
+// for the whole block after it commits, so it would be a block late every time.
 func (bs *BlockSubscriber) committedHeight(ctx context.Context) (int64, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, bs.config.QueryTimeout)
-	defer cancel()
-	info, infoErr := bs.cometClient.ABCIInfo(queryCtx)
+	// One timeout per call: an abci_info a proxy holds must not leave /status
+	// an expired context.
+	infoCtx, cancelInfo := context.WithTimeout(ctx, bs.config.QueryTimeout)
+	info, infoErr := bs.cometClient.ABCIInfo(infoCtx)
+	cancelInfo()
 	if infoErr == nil && info != nil && info.Response.LastBlockHeight > 0 {
+		bs.abciFailures.Store(0)
+		if bs.abciFallbackWarned.CompareAndSwap(true, false) {
+			bs.logger.Info().Int64("height", info.Response.LastBlockHeight).
+				Msg("abci_info answers again: polling the committed height")
+		}
 		return info.Response.LastBlockHeight, nil
 	}
-	status, err := bs.cometClient.Status(queryCtx)
+	if infoErr == nil {
+		infoErr = errors.New("abci_info reported no committed height")
+	}
+	if bs.abciFailures.Add(1) >= abciFailuresBeforeWarn && bs.abciFallbackWarned.CompareAndSwap(false, true) {
+		bs.logger.Warn().Err(infoErr).
+			Msg("abci_info keeps failing: polling the node's latest height from /status, which can run a few seconds ahead of the committed one")
+	}
+
+	statusCtx, cancelStatus := context.WithTimeout(ctx, bs.config.QueryTimeout)
+	defer cancelStatus()
+	status, err := bs.cometClient.Status(statusCtx)
 	if err != nil {
 		return 0, errors.Join(infoErr, err)
 	}
-	if status.SyncInfo.LatestBlockHeight <= 1 {
-		return 0, fmt.Errorf("node reports no committed height (abci_info: %v)", infoErr)
+	if status.SyncInfo.LatestBlockHeight <= 0 {
+		return 0, errors.Join(infoErr, errors.New("node reports no height"))
 	}
-	return status.SyncInfo.LatestBlockHeight - 1, nil
+	return status.SyncInfo.LatestBlockHeight, nil
 }
 
 // subscriptionLoop keeps a websocket subscription open, replacing the client
@@ -721,14 +752,11 @@ func (bs *BlockSubscriber) publishToSubscribers(block *SimpleBlock) {
 // fetchLatestBlock fetches and stores the last committed block via an RPC query.
 // Used for the initial block and fallback when the subscription is not available.
 func (bs *BlockSubscriber) fetchLatestBlock(ctx context.Context) error {
-	queryCtx, cancel := context.WithTimeout(ctx, bs.config.QueryTimeout)
-	defer cancel()
-
-	height, err := bs.committedHeight(queryCtx)
+	height, err := bs.committedHeight(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to query the committed height: %w", err)
 	}
-	block, err := bs.reader.readBlock(queryCtx, height)
+	block, err := bs.reader.readBlock(ctx, height)
 	if err != nil {
 		return err
 	}
@@ -775,8 +803,6 @@ func (bs *BlockSubscriber) CommittedBlocksSequence(_ context.Context) client.Blo
 // This method exists solely for poktroll client.BlockClient interface compliance.
 // The chain version was previously fetched via ABCIInfo RPC, but analysis showed
 // no production code actually uses this value - only test mocks access it.
-//
-// Returning nil saves one unnecessary RPC call (ABCIInfo) at BlockSubscriber startup.
 //
 // Interface: github.com/pokt-network/poktroll/pkg/client.BlockClient
 // Used by: Tests only (never called in production code)
