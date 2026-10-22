@@ -4,7 +4,7 @@
 # fetching another one is a Docker Hub pull of its own.
 
 # Build stage
-FROM mirror.gcr.io/library/golang:1.27.2-alpine AS builder
+FROM mirror.gcr.io/library/golang:1.27.3-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \

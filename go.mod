@@ -1,6 +1,6 @@
 module github.com/pokt-network/pocket-relay-miner
 
-go 1.27.2
+go 1.27.3
 
 require (
 	cosmossdk.io/api v0.9.2
