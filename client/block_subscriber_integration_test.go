@@ -59,6 +59,13 @@ type mockCometBFTServer struct {
 	// notYetAnswers makes that many block reads answer the node's real
 	// "not yet" error, the one a node behind a load balancer gave on beta.
 	notYetAnswers atomic.Int64
+	// committedHeight, when set, is the height abci_info reports: a node saves
+	// a block, and answers it on status and block, before its app commits it.
+	// Unset, abci_info reports currentHeight.
+	committedHeight atomic.Int64
+	// abciDown answers every abci_info with an error, as a provider that
+	// blocks it does.
+	abciDown atomic.Bool
 	// silentWS stops delivering websocket events, as a node dropping them
 	// for a slow client does; the subscription stays open.
 	silentWS atomic.Bool
@@ -374,14 +381,23 @@ func (m *mockCometBFTServer) handleABCIInfo(w http.ResponseWriter, req map[strin
 		m.sendJSONError(w, req, "ABCI info failed")
 		return
 	}
+	if m.abciDown.Load() {
+		m.sendJSONError(w, req, "abci_info is not served here")
+		return
+	}
 
+	committed := m.committedHeight.Load()
+	if committed == 0 {
+		committed = m.currentHeight.Load()
+	}
 	response := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      req["id"],
 		"result": map[string]interface{}{
 			"response": map[string]interface{}{
-				"version": m.currentVersion,
-				"data":    "poktroll",
+				"version":           m.currentVersion,
+				"data":              "poktroll",
+				"last_block_height": fmt.Sprintf("%d", committed),
 			},
 		},
 	}

@@ -79,9 +79,12 @@ func (h *hangingPublishProcessor) SetDifficultyProvider(DifficultyProvider) {}
 func (h *hangingPublishProcessor) othersDone(n int) <-chan struct{} {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.othersWant, h.othersCh = n, make(chan struct{})
+	// The channel is kept here: when n are already processed, signalOthersLocked
+	// closes it and clears the field, and a nil channel would block forever.
+	ch := make(chan struct{})
+	h.othersWant, h.othersCh = n, ch
 	h.signalOthersLocked()
-	return h.othersCh
+	return ch
 }
 
 func (h *hangingPublishProcessor) signalOthersLocked() {
